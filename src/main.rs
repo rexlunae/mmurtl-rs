@@ -22,6 +22,7 @@ mod apic;
 mod smp;
 mod virtio;
 mod keyboard;
+mod fs;
 
 use bootloader_api::BootInfo;
 use bootloader_api::info::Optional;
@@ -129,6 +130,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     virtio::blk::self_test();
     serial::write_str("[TEST] Network ARP test...\n");
     virtio::net::arp_demo();
+
+    // Mount the exFAT filesystem and exercise read + create paths
+    serial::write_str("[TEST] exFAT filesystem...\n");
+    fs::exfat::demo();
 
     // Initialize IPC (stub)
     serial::write_str("[INIT] IPC subsystem...\n");

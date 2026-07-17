@@ -157,13 +157,20 @@ pub fn write_sectors(sector: u64, buf: &mut [u8]) -> bool {
 }
 
 /// Boot-time self-test: write a signature to the last sector, read it
-/// back, and verify. Non-destructive to anything but that sector.
+/// back, verify, then restore the sector's original contents (the disk
+/// may hold a real filesystem).
 pub fn self_test() {
     if !available() {
         crate::serial::write_line("[BLK] No virtio-blk device — self-test skipped");
         return;
     }
     let last = capacity_sectors() - 1;
+
+    let mut original = [0u8; SECTOR_SIZE];
+    if !read_sectors(last, &mut original) {
+        crate::serial::write_line("[BLK] Self-test READ FAILED");
+        return;
+    }
 
     let mut wbuf = [0u8; SECTOR_SIZE];
     let sig = b"MMURTL/RS phase-7 virtio-blk self-test";
@@ -183,8 +190,11 @@ pub fn self_test() {
         return;
     }
 
-    if rbuf == wbuf {
-        crate::serial::write_str("[BLK] Self-test OK: wrote+verified sector ");
+    // Put the original contents back before reporting
+    let restored = write_sectors(last, &mut original);
+
+    if rbuf == wbuf && restored {
+        crate::serial::write_str("[BLK] Self-test OK: wrote+verified+restored sector ");
         crate::serial::write_dec(last);
         crate::serial::write_str("\n");
     } else {
