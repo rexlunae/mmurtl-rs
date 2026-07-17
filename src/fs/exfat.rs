@@ -773,13 +773,23 @@ fn place_entry_set(vol: &Volume, dir: &DirRef, set: &[u8]) -> Result<(), &'stati
                     return Err("directory full");
                 }
                 let new_cluster = bitmap_alloc(vol, 1).ok_or("disk full")?;
-                if !zero_cluster(vol, new_cluster) {
-                    return Err("cluster zero failed");
+                // Prepare the new cluster fully (zeroed, FAT terminator)
+                // BEFORE linking it, so a failure here just needs the
+                // allocation undone and never leaves a half-linked chain.
+                if !zero_cluster(vol, new_cluster) || !fat_write(vol, new_cluster, FAT_EOF) {
+                    fat_write(vol, new_cluster, 0);
+                    bitmap_set(vol, &[new_cluster], false);
+                    return Err("cluster init failed");
                 }
                 let tail = *chain.last().unwrap();
-                if !fat_write(vol, tail, new_cluster) || !fat_write(vol, new_cluster, FAT_EOF) {
+                if !fat_write(vol, tail, new_cluster) {
+                    fat_write(vol, new_cluster, 0);
+                    bitmap_set(vol, &[new_cluster], false);
                     return Err("FAT update failed");
                 }
+                // From here the cluster is a legitimate (empty) part of
+                // the directory — a later failure leaves a valid, merely
+                // larger directory, not an inconsistency.
                 chain.push(new_cluster);
                 data.resize(chain.len() * cbytes, 0);
             }
@@ -829,8 +839,17 @@ fn update_stream_entry(
     Ok(())
 }
 
+/// Free a contiguous run previously produced by `write_data_contiguous`
+/// (rollback for failed create/overwrite paths). No-op for empty files.
+fn rollback_contiguous(vol: &Volume, first: u32, data_len: usize) {
+    if first >= 2 && data_len > 0 {
+        free_clusters(vol, first, true, data_len as u64);
+    }
+}
+
 /// Allocate contiguous clusters for `data` and write it. Returns the
-/// first cluster (0 for empty data).
+/// first cluster (0 for empty data). On failure the allocation is rolled
+/// back — no bitmap bits stay set without a directory entry to own them.
 fn write_data_contiguous(vol: &Volume, data: &[u8]) -> Result<u32, &'static str> {
     if data.is_empty() {
         return Ok(0);
@@ -842,6 +861,7 @@ fn write_data_contiguous(vol: &Volume, data: &[u8]) -> Result<u32, &'static str>
         let chunk_start = i * cbytes;
         let chunk_end = (chunk_start + cbytes).min(data.len());
         if !write_cluster(vol, first + i as u32, &data[chunk_start..chunk_end]) {
+            rollback_contiguous(vol, first, data.len());
             return Err("data write failed");
         }
     }
@@ -884,7 +904,13 @@ pub fn create_file(path: &str, data: &[u8]) -> Result<(), &'static str> {
         FLAG_ALLOC_POSSIBLE | FLAG_NO_FAT_CHAIN
     };
     let set = build_entry_set(name, ATTR_ARCHIVE, flags, first, data.len() as u64);
-    place_entry_set(vol, &parent, &set)
+    if let Err(e) = place_entry_set(vol, &parent, &set) {
+        // No directory entry references the clusters — free them again
+        // so the bitmap stays consistent.
+        rollback_contiguous(vol, first, data.len());
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Overwrite `path` with `data`, creating it if absent
@@ -896,15 +922,23 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<(), &'static str> {
             if f.is_dir() {
                 return Err("is a directory");
             }
-            // Free the old allocation, write the new one, patch the entry
-            free_clusters(vol, f.first_cluster, f.no_fat_chain, f.data_length);
+            // Order matters: write the NEW allocation first, then repoint
+            // the entry, and only then free the old clusters. Any failure
+            // before the entry update leaves the old file fully intact;
+            // a failed entry update rolls the new allocation back.
             let first = write_data_contiguous(vol, data)?;
             let flags = if data.is_empty() {
                 FLAG_ALLOC_POSSIBLE
             } else {
                 FLAG_ALLOC_POSSIBLE | FLAG_NO_FAT_CHAIN
             };
-            return update_stream_entry(vol, &parent, &f, flags, first, data.len() as u64);
+            if let Err(e) = update_stream_entry(vol, &parent, &f, flags, first, data.len() as u64)
+            {
+                rollback_contiguous(vol, first, data.len());
+                return Err(e);
+            }
+            free_clusters(vol, f.first_cluster, f.no_fat_chain, f.data_length);
+            return Ok(());
         }
     }
     create_file(path, data)
@@ -930,9 +964,10 @@ pub fn delete(path: &str) -> Result<(), &'static str> {
         }
     }
 
-    // Free the allocation, then mark every entry of the set as unused
-    free_clusters(vol, f.first_cluster, f.no_fat_chain, f.data_length);
-
+    // Order matters: unlink the directory entries FIRST, then free the
+    // clusters. If the entry write fails, nothing has changed; if the
+    // cluster free fails afterwards, the worst case is leaked (orphaned)
+    // clusters — never a live entry pointing at freed space.
     let (chain, mut data) = load_dir(vol, &parent).ok_or("directory read failed")?;
     let off = f.set_offset;
     let set_len = f.set_entries * DIR_ENTRY;
@@ -945,6 +980,8 @@ pub fn delete(path: &str) -> Result<(), &'static str> {
     if !store_dir_range(vol, &chain, &data, off, set_len) {
         return Err("directory write failed");
     }
+
+    free_clusters(vol, f.first_cluster, f.no_fat_chain, f.data_length);
     Ok(())
 }
 
@@ -965,7 +1002,12 @@ pub fn mkdir(path: &str) -> Result<(), &'static str> {
 
     // One zeroed, FAT-chained cluster (chained keeps growth possible)
     let cluster = bitmap_alloc(vol, 1).ok_or("disk full")?;
+    let rollback = |vol: &Volume| {
+        fat_write(vol, cluster, 0);
+        bitmap_set(vol, &[cluster], false);
+    };
     if !zero_cluster(vol, cluster) || !fat_write(vol, cluster, FAT_EOF) {
+        rollback(vol);
         return Err("cluster init failed");
     }
 
@@ -976,7 +1018,11 @@ pub fn mkdir(path: &str) -> Result<(), &'static str> {
         cluster,
         vol.cluster_bytes() as u64,
     );
-    place_entry_set(vol, &parent, &set)
+    if let Err(e) = place_entry_set(vol, &parent, &set) {
+        rollback(vol);
+        return Err(e);
+    }
+    Ok(())
 }
 
 // ========================================================================
