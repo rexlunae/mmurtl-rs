@@ -73,6 +73,13 @@ impl BumpAllocator {
         // Map the initial heap pages
         map_pages(start, INITIAL_HEAP_SIZE, frame_alloc);
 
+        // Full TLB flush — ensure page table changes are seen by CPU
+        unsafe {
+            use x86_64::registers::control::Cr3;
+            let (pml4_frame, flags) = Cr3::read();
+            Cr3::write(pml4_frame, flags);
+        }
+
         self.heap_start.store(start as usize, Ordering::SeqCst);
         self.heap_end.store(end as usize, Ordering::SeqCst);
         self.next_free.store(start as usize, Ordering::SeqCst);

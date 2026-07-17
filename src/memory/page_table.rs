@@ -44,7 +44,7 @@ pub fn init(
 }
 
 /// Convert a physical address to a virtual address for kernel access
-fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
+pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
     VirtAddr::new(phys.as_u64() + unsafe { PHYSICAL_MEMORY_OFFSET })
 }
 

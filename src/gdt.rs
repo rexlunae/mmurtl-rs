@@ -29,8 +29,11 @@ static GDT: Lazy<InnerGdt> = Lazy::new(|| {
     let mut gdt = GlobalDescriptorTable::new();
     let kernel_code = gdt.add_entry(Descriptor::kernel_code_segment());
     let kernel_data = gdt.add_entry(Descriptor::kernel_data_segment());
-    let user_code = gdt.add_entry(Descriptor::user_code_segment());
+    // user_data must come before user_code for SYSRET:
+    //   SS = (STAR[63:48] + 8) | 3 → user_data
+    //   CS = (STAR[63:48] + 16) | 3 → user_code
     let user_data = gdt.add_entry(Descriptor::user_data_segment());
+    let user_code = gdt.add_entry(Descriptor::user_code_segment());
     let tss_entry = gdt.add_entry(Descriptor::tss_segment(&TSS));
     InnerGdt { gdt, selectors: Selectors { kernel_code, kernel_data, user_code, user_data, tss_entry } }
 });

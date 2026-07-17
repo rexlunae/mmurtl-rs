@@ -123,20 +123,30 @@ impl Scheduler {
 
     /// Allocate a stack for a new task (from the kernel heap)
     fn alloc_stack(name: &str) -> Box<[u8]> {
+        crate::serial::write_str("[SCHED]   alloc_stack(");
+        crate::serial::write_str(name);
+        crate::serial::write_str(")... ");
+
         let layout = alloc::alloc::Layout::from_size_align(TASK_STACK_SIZE, 16)
             .expect("Invalid stack layout");
+        crate::serial::write_str("layout_ok ");
+
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        crate::serial::write_str("zeroed ");
 
         // Build a Box<[u8]> from the raw allocation
         let slice = unsafe {
             core::slice::from_raw_parts_mut(ptr, TASK_STACK_SIZE)
         };
+        crate::serial::write_str("slice ");
+
         let boxed: Box<[u8]> = unsafe {
             Box::from_raw(slice)
         };
+        crate::serial::write_str("boxed ");
 
         // Log allocation
-        crate::serial::write_str("[SCHED] Stack for \"");
+        crate::serial::write_str("Stack for \"");
         crate::serial::write_str(name);
         crate::serial::write_str("\": ");
         crate::serial::write_dec(TASK_STACK_SIZE as u64);
@@ -208,24 +218,30 @@ impl Scheduler {
             return 0;
         }
 
-        // Simple round-robin: advance to the next active task
-        // Skip exited tasks and tasks waiting on messages
+        // Round-robin: advance to the next active task.
+        // Skip exited tasks, waiting tasks, and idle-priority tasks
+        // if any non-idle task is ready first.
+        let mut idle_fallback = None;
         for offset in 1..=n {
             let idx = (self.current_index + offset) % n;
-            match self.tasks[idx].state {
+            let t = &self.tasks[idx];
+            match t.state {
                 TaskState::Ready | TaskState::Running => {
+                    if t.priority == PRIORITY_IDLE {
+                        // Remember idle as a fallback
+                        if idle_fallback.is_none() {
+                            idle_fallback = Some(idx);
+                        }
+                        continue;
+                    }
                     return idx;
                 }
                 _ => continue,
             }
         }
 
-        // Fall back to current (or idle at index 0)
-        if n > 0 && self.tasks[0].state.is_active() {
-            0
-        } else {
-            self.current_index
-        }
+        // No non-idle ready task — use idle fallback or current
+        idle_fallback.unwrap_or(self.current_index)
     }
 
     /// Get the current task ID
@@ -322,38 +338,76 @@ pub unsafe extern "C" fn schedule_and_switch(current_rsp: u64) -> u64 {
 
 /// Create a new task (public API)
 pub fn create_task(entry: extern "C" fn() -> !, priority: TaskPriority, name: &'static str) -> u32 {
+    let was_enabled = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::disable();
     let mut sched = SCHEDULER.lock();
-    sched.create_task(entry, priority, name)
+    let tid = sched.create_task(entry, priority, name);
+    drop(sched);
+    if was_enabled {
+        x86_64::instructions::interrupts::enable();
+    }
+    tid
 }
 
 /// Get the current task ID
 pub fn current_task_id() -> u32 {
+    let was_enabled = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::disable();
     let sched = SCHEDULER.lock();
-    sched.current_id()
+    let id = sched.current_id();
+    drop(sched);
+    if was_enabled {
+        x86_64::instructions::interrupts::enable();
+    }
+    id
 }
 
 /// Send a message (blocking)
 pub fn send_message(receiver_id: u32, rqb: &mut Rqb) {
+    let was_enabled = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::disable();
     let mut sched = SCHEDULER.lock();
     sched.send_msg(receiver_id, rqb);
+    drop(sched);
+    if was_enabled {
+        x86_64::instructions::interrupts::enable();
+    }
 }
 
 /// Receive a message (blocking)
 pub fn receive_message(rqb: &mut Rqb) {
+    let was_enabled = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::disable();
     let mut sched = SCHEDULER.lock();
     sched.recv_msg(rqb);
+    drop(sched);
+    if was_enabled {
+        x86_64::instructions::interrupts::enable();
+    }
 }
 
 /// Reply to a message
 pub fn reply_message(sender_id: u32, rqb: &Rqb) {
+    let was_enabled = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::disable();
     let mut sched = SCHEDULER.lock();
     sched.reply_msg(sender_id, rqb);
+    drop(sched);
+    if was_enabled {
+        x86_64::instructions::interrupts::enable();
+    }
 }
 
 /// Mark the current task as exited
 pub fn mark_current_exited() {
+    let was_enabled = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::disable();
     let mut sched = SCHEDULER.lock();
     sched.mark_exited();
+    drop(sched);
+    if was_enabled {
+        x86_64::instructions::interrupts::enable();
+    }
 }
 
 /// Get the current RQB wait status (placeholder)
