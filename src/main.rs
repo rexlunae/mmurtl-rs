@@ -102,7 +102,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::write_str("[INIT] APIC...\n");
     apic::init();
 
-    // Boot the application processors
+    // Initialize the scheduler on the BSP (must precede AP boot: APs
+    // register themselves and start their timers as they come up)
+    serial::write_str("[INIT] Scheduler...\n");
+    scheduler::init();
+
+    // Boot the application processors — each joins the scheduler
     serial::write_str("[INIT] SMP...\n");
     smp::boot_aps();
 
@@ -113,18 +118,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::write_str("[INIT] USB subsystem...\n");
     usb::init();
 
-    // Initialize scheduler (PIT-based preemptive multitasking)
-    serial::write_str("[INIT] Scheduler...\n");
-    scheduler::init();
-
     // Initialize IPC (stub)
     serial::write_str("[INIT] IPC subsystem...\n");
     ipc::init();
-
-    // Create demo tasks (these run concurrently once interrupts are enabled)
-    serial::write_str("[SCHED] Creating demo tasks...\n");
-    scheduler::create_task(task_a, scheduler::PRIORITY_DEFAULT, "task_a");
-    scheduler::create_task(task_b, scheduler::PRIORITY_DEFAULT, "task_b");
 
     // Test heap allocation
     serial::write_str("[TEST] Heap allocation test...\n");
@@ -160,11 +156,22 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         serial::write_str("[TEST] Heap allocation OK!\n");
     }
 
-    // Enable interrupts
-    serial::write_str("[INFO] Enabling interrupts...\n");
-    x86_64::instructions::interrupts::enable();
+    // Create demo tasks — idle CPUs are kicked with a reschedule IPI and
+    // start running these immediately, even before the BSP enables
+    // interrupts for itself
+    serial::write_str("[SCHED] Creating demo worker tasks...\n");
+    for _ in 0..6 {
+        scheduler::create_task(worker_task, scheduler::PRIORITY_DEFAULT, "worker");
+    }
 
-    serial::write_str("\n✓ MMURTL/RS kernel ready.\n");
+    // Print before sti: once the BSP joins the rotation, this boot context
+    // is the BSP's idle task and only runs when the BSP has nothing to do
+    serial::write_str("\n✓ MMURTL/RS kernel ready — ");
+    serial::write_dec(smp::cpus_online() as u64);
+    serial::write_str(" CPU(s) scheduling.\n");
+
+    // Enable interrupts — the BSP joins the scheduling rotation
+    x86_64::instructions::interrupts::enable();
 
     // Idle loop
     loop {
@@ -172,30 +179,21 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 }
 
-/// Demo task A — prints a counter on each time slice
-/// Runs concurrently with task_b via preemptive multitasking
-extern "C" fn task_a() -> ! {
+/// Demo worker task — prints its task ID, the CPU it is currently running
+/// on, and a counter. With multiple CPUs scheduling, the same task shows
+/// up on different CPUs over time as it migrates.
+extern "C" fn worker_task() -> ! {
+    use core::fmt::Write;
+
+    let tid = scheduler::current_task_id();
     let mut count = 0u64;
     loop {
-        crate::serial::write_str("[A] Hello from task_a! count=");
-        crate::serial::write_dec(count);
-        crate::serial::write_str("\n");
-        count += 1;
-
-        // Busy-wait to eat up our time slice
-        for _ in 0..5000000 {
-            core::hint::spin_loop();
-        }
-    }
-}
-
-/// Demo task B — prints a counter on each time slice
-extern "C" fn task_b() -> ! {
-    let mut count = 0u64;
-    loop {
-        crate::serial::write_str("[B] Hello from task_b! count=");
-        crate::serial::write_dec(count);
-        crate::serial::write_str("\n");
+        // Build the line first, emit with a single write_str so lines from
+        // workers on different CPUs don't interleave mid-line
+        let cpu = scheduler::current_cpu();
+        let mut line: heapless::String<80> = heapless::String::new();
+        let _ = write!(line, "[T{} on CPU{}] count={}\n", tid, cpu, count);
+        serial::write_str(&line);
         count += 1;
 
         // Busy-wait to eat up our time slice

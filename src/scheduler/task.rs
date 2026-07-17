@@ -51,14 +51,10 @@ pub const PRIORITY_IDLE: TaskPriority = 31;
 // Task ID Generation
 // =======================================================================+
 
-static mut NEXT_TASK_ID: u32 = 1;
+static NEXT_TASK_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
 fn next_task_id() -> u32 {
-    unsafe {
-        let id = NEXT_TASK_ID;
-        NEXT_TASK_ID += 1;
-        id
-    }
+    NEXT_TASK_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }
 
 // ========================================================================
@@ -110,6 +106,9 @@ pub struct TaskControlBlock {
     pub name: &'static str,
     /// Total ticks this task has run
     pub total_ticks: u64,
+    /// If set, this task may only run on the given CPU (used for per-CPU
+    /// idle tasks). None = may run anywhere.
+    pub pinned_cpu: Option<u8>,
 }
 
 impl TaskControlBlock {
@@ -180,6 +179,26 @@ impl TaskControlBlock {
             kernel_stack_bottom: stack_bottom,
             name,
             total_ticks: 0,
+            pinned_cpu: None,
+        })
+    }
+
+    /// Adopt the currently-executing context as a task.
+    ///
+    /// Used for per-CPU idle tasks: the CPU's boot/park loop *becomes* the
+    /// idle task. No initial context is crafted — `context_ptr` is filled
+    /// in the first time the timer interrupt saves this context.
+    pub fn adopt_current(name: &'static str, priority: TaskPriority, cpu: u8) -> Box<Self> {
+        Box::new(Self {
+            id: next_task_id(),
+            state: TaskState::Running,
+            priority,
+            context_ptr: 0,
+            kernel_stack_top: 0,
+            kernel_stack_bottom: 0,
+            name,
+            total_ticks: 0,
+            pinned_cpu: Some(cpu),
         })
     }
 }

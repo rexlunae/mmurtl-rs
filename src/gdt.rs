@@ -53,21 +53,39 @@ pub struct Selectors {
     pub tss_entry: SegmentSelector,
 }
 
-/// Initialize the GDT on an application processor.
+/// Initialize an application processor's GDT.
 ///
-/// Loads the shared kernel GDT and segment registers but skips `ltr`: the
-/// TSS descriptor was marked busy when the BSP loaded it, and a second
-/// `ltr` of a busy TSS faults. Per-CPU TSSes come later with per-CPU IST
-/// stacks.
+/// Each AP gets its own GDT, TSS, and double-fault IST stack (allocated
+/// from the heap and leaked — they live for the machine's lifetime). A TSS
+/// cannot be shared: `ltr` marks its descriptor busy, so a second CPU
+/// loading the same descriptor would fault.
 pub fn init_ap() {
+    use alloc::boxed::Box;
+    use alloc::vec;
     use x86_64::instructions::segmentation::{CS, DS, ES, SS, Segment};
+    use x86_64::instructions::tables::load_tss;
 
-    GDT.gdt.load();
+    // Per-CPU double-fault IST stack
+    let ist_stack: &'static mut [u8] = Box::leak(vec![0u8; STACK_SIZE].into_boxed_slice());
+    let stack_top = ist_stack.as_ptr() as u64 + ist_stack.len() as u64;
+
+    let tss: &'static mut TaskStateSegment = Box::leak(Box::new(TaskStateSegment::new()));
+    tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(stack_top);
+
+    let gdt: &'static mut GlobalDescriptorTable = Box::leak(Box::new(GlobalDescriptorTable::new()));
+    let kernel_code = gdt.add_entry(Descriptor::kernel_code_segment());
+    let kernel_data = gdt.add_entry(Descriptor::kernel_data_segment());
+    let _user_data = gdt.add_entry(Descriptor::user_data_segment());
+    let _user_code = gdt.add_entry(Descriptor::user_code_segment());
+    let tss_entry = gdt.add_entry(Descriptor::tss_segment(&*tss));
+
+    gdt.load();
     unsafe {
-        CS::set_reg(GDT.selectors.kernel_code);
-        SS::set_reg(GDT.selectors.kernel_data);
-        DS::set_reg(GDT.selectors.kernel_data);
-        ES::set_reg(GDT.selectors.kernel_data);
+        CS::set_reg(kernel_code);
+        SS::set_reg(kernel_data);
+        DS::set_reg(kernel_data);
+        ES::set_reg(kernel_data);
+        load_tss(tss_entry);
     }
 }
 

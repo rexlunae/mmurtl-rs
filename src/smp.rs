@@ -301,10 +301,14 @@ fn wait_for_ap(timeout_ms: u32) -> bool {
 /// First Rust code an AP executes. `cpu_num` comes from the mailbox.
 #[no_mangle]
 pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
-    // Adopt the kernel's real GDT and IDT, then enable this CPU's LAPIC
+    // Per-CPU GDT/TSS/IST, shared IDT, then enable this CPU's LAPIC
     crate::gdt::init_ap();
     crate::interrupts::init_ap();
     crate::apic::enable_current_cpu();
+
+    // Join the scheduler: this park loop becomes the CPU's idle task, and
+    // the per-CPU LAPIC timer starts delivering 100 Hz scheduler ticks.
+    crate::scheduler::register_ap(cpu_num as usize);
 
     let apic_id = crate::apic::local_apic_id();
     CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
@@ -313,13 +317,13 @@ pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
     crate::serial::write_dec(cpu_num);
     crate::serial::write_str(" online (APIC ID ");
     crate::serial::write_dec(apic_id as u64);
-    crate::serial::write_str(")\n");
+    crate::serial::write_str("), scheduling\n");
 
     // Signal the BSP that bring-up is complete
     AP_READY.store(true, Ordering::SeqCst);
 
-    // Park with interrupts enabled — ready to service future IPIs. The
-    // LAPIC timer on this CPU stays masked until the scheduler goes SMP.
+    // Idle loop — the scheduler switches away from here whenever there is
+    // work, and back whenever there isn't.
     x86_64::instructions::interrupts::enable();
     loop {
         x86_64::instructions::hlt();

@@ -16,17 +16,24 @@ pub fn init() {
     write_str("[SERIAL] COM1 initialized at 115200 8N1\n");
 }
 
-/// Write a string to the serial console
+/// Write a string to the serial console.
+///
+/// The lock is taken with interrupts disabled: if the holder could be
+/// preempted (or interrupted by a printing handler on the same CPU), any
+/// other writer on this CPU would spin on a lock that can never be
+/// released — a deadlock on one core, a livelock across cores.
 pub fn write_str(s: &str) {
-    let mut guard = SERIAL_PORT.lock();
-    if let Some(port) = guard.as_mut() {
-        for byte in s.bytes() {
-            // Filter carriage returns, let \n through (serial handles LF)
-            if byte != b'\r' {
-                port.send(byte);
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut guard = SERIAL_PORT.lock();
+        if let Some(port) = guard.as_mut() {
+            for byte in s.bytes() {
+                // Filter carriage returns, let \n through (serial handles LF)
+                if byte != b'\r' {
+                    port.send(byte);
+                }
             }
         }
-    }
+    });
 }
 
 /// Write a decimal number to serial
