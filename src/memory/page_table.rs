@@ -177,6 +177,110 @@ pub unsafe fn map_page(
     Ok(())
 }
 
+/// Force uncacheable (UC: PCD|PWT) attributes onto the 4 KiB page
+/// containing `vaddr`, which must already be mapped.
+///
+/// The bootloader maps the whole physical-memory offset window as
+/// cacheable write-back, using huge pages where it can. When an MMIO
+/// region (Local APIC, I/O APIC) falls inside that window, its mapping
+/// must be demoted to uncacheable — but only for the exact 4 KiB page, so
+/// any covering huge page is first split into next-level tables that
+/// preserve the original translation and attributes.
+///
+/// # Safety
+/// Caller must ensure `vaddr` is mapped and that making this page
+/// uncacheable is correct (i.e. it covers MMIO, not kernel data in use).
+pub unsafe fn set_page_uncached(
+    vaddr: VirtAddr,
+    frame_allocator: &mut BumpFrameAllocator,
+) -> Result<(), &'static str> {
+    let pml4 = active_pml4();
+
+    let pml4e = &mut pml4[vaddr.p4_index()];
+    if !pml4e.flags().contains(Flags::PRESENT) {
+        return Err("set_page_uncached: PML4E not present");
+    }
+
+    let pdpt = &mut *phys_to_virt(pml4e.addr()).as_mut_ptr::<PageTable>();
+    let pdpte = &mut pdpt[vaddr.p3_index()];
+    if !pdpte.flags().contains(Flags::PRESENT) {
+        return Err("set_page_uncached: PDPTE not present");
+    }
+    if pdpte.flags().contains(Flags::HUGE_PAGE) {
+        // 1 GiB page → table of 512 × 2 MiB pages
+        split_huge_entry(pdpte, 2 * 1024 * 1024, frame_allocator)?;
+    }
+
+    let pd = &mut *phys_to_virt(pdpte.addr()).as_mut_ptr::<PageTable>();
+    let pde = &mut pd[vaddr.p2_index()];
+    if !pde.flags().contains(Flags::PRESENT) {
+        return Err("set_page_uncached: PDE not present");
+    }
+    if pde.flags().contains(Flags::HUGE_PAGE) {
+        // 2 MiB page → table of 512 × 4 KiB pages
+        split_huge_entry(pde, 4096, frame_allocator)?;
+    }
+
+    let pt = &mut *phys_to_virt(pde.addr()).as_mut_ptr::<PageTable>();
+    let pte = &mut pt[vaddr.p1_index()];
+    if !pte.flags().contains(Flags::PRESENT) {
+        return Err("set_page_uncached: PTE not present");
+    }
+    pte.set_addr(
+        pte.addr(),
+        pte.flags() | Flags::NO_CACHE | Flags::WRITE_THROUGH,
+    );
+
+    x86_64::instructions::tlb::flush(vaddr);
+    Ok(())
+}
+
+/// Split a huge-page entry into a freshly allocated next-level table of
+/// 512 entries covering the same physical range with the same attributes.
+/// `child_size` is 2 MiB when splitting a 1 GiB page, 4 KiB when splitting
+/// a 2 MiB page (children of the latter are PTEs, which must not carry the
+/// HUGE_PAGE bit — bit 7 is PAT there).
+unsafe fn split_huge_entry(
+    entry: &mut x86_64::structures::paging::page_table::PageTableEntry,
+    child_size: u64,
+    frame_allocator: &mut BumpFrameAllocator,
+) -> Result<(), &'static str> {
+    let base = entry.addr();
+    // Carry over only well-understood attribute flags
+    let attrs = entry.flags()
+        & (Flags::PRESENT
+            | Flags::WRITABLE
+            | Flags::USER_ACCESSIBLE
+            | Flags::WRITE_THROUGH
+            | Flags::NO_CACHE
+            | Flags::GLOBAL
+            | Flags::NO_EXECUTE);
+    let child_flags = if child_size > 4096 {
+        attrs | Flags::HUGE_PAGE
+    } else {
+        attrs
+    };
+
+    let table_frame = frame_allocator
+        .allocate_frame()
+        .ok_or("OOM: table for huge-page split")?;
+    let table = &mut *phys_to_virt(table_frame.start_address()).as_mut_ptr::<PageTable>();
+    table.zero();
+    for (i, child) in table.iter_mut().enumerate() {
+        child.set_addr(base + i as u64 * child_size, child_flags);
+    }
+
+    // Replace the huge entry with a pointer to the new table. Every
+    // translation (address + attributes) is unchanged, so stale TLB
+    // entries for other pages in the range remain correct; the caller
+    // flushes the one page whose attributes it changes.
+    entry.set_addr(
+        table_frame.start_address(),
+        Flags::PRESENT | Flags::WRITABLE | Flags::ACCESSED,
+    );
+    Ok(())
+}
+
 /// Unmap a single 4 KiB page (manual implementation)
 pub unsafe fn unmap_page(page: Page) -> Result<PhysFrame, &'static str> {
     let pml4 = active_pml4();
