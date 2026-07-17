@@ -7,6 +7,8 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+extern crate alloc;
+
 mod serial;
 mod gdt;
 mod interrupts;
@@ -97,6 +99,41 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Initialize IPC (stub)
     serial::write_str("[INIT] IPC subsystem...\n");
     ipc::init();
+
+    // Test heap allocation
+    serial::write_str("[TEST] Heap allocation test...\n");
+    {
+        use alloc::vec::Vec;
+        use alloc::boxed::Box;
+        use alloc::string::String;
+        use alloc::format;
+
+        // Box test
+        let boxed_val = Box::new(42u64);
+        serial::write_str("[TEST] Box: ");
+        serial::write_dec(*boxed_val);
+        serial::write_str("\n");
+
+        // Vec test
+        let mut numbers = Vec::new();
+        for i in 0..10 {
+            numbers.push(i * 100);
+        }
+        serial::write_str("[TEST] Vec: [");
+        for (i, n) in numbers.iter().enumerate() {
+            if i > 0 { serial::write_str(", "); }
+            serial::write_dec(*n as u64);
+        }
+        serial::write_str("]\n");
+
+        // Format test
+        let msg = format!("test-format-{}", 42);
+        serial::write_str("[TEST] String: ");
+        serial::write_str(&msg);
+        serial::write_str("\n");
+
+        serial::write_str("[TEST] Heap allocation OK!\n");
+    }
 
     // Enable interrupts
     serial::write_str("[INFO] Enabling interrupts...\n");
