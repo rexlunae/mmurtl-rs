@@ -101,11 +101,16 @@ fn le64(b: &[u8]) -> u64 {
     u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
 }
 
-fn fat_read(vol: &Volume, cluster: u32) -> u32 {
+/// Read one FAT entry. Returns None on I/O failure — callers must NOT
+/// treat a failed read as end-of-chain (a zeroed buffer would decode as
+/// 0, silently truncating the chain).
+fn fat_read(vol: &Volume, cluster: u32) -> Option<u32> {
     let byte_off = cluster as u64 * 4;
     let mut buf = [0u8; SECTOR];
-    read_sector(vol.fat_lba + byte_off / SECTOR as u64, &mut buf);
-    le32(&buf[(byte_off % SECTOR as u64) as usize..])
+    if !read_sector(vol.fat_lba + byte_off / SECTOR as u64, &mut buf) {
+        return None;
+    }
+    Some(le32(&buf[(byte_off % SECTOR as u64) as usize..]))
 }
 
 fn fat_write(vol: &Volume, cluster: u32, value: u32) -> bool {
@@ -189,10 +194,18 @@ fn names_equal_ascii(a: &str, b: &str) -> bool {
 
 /// Collect the cluster list of a file or directory.
 /// `no_fat_chain` means contiguous clusters covering `data_length` bytes.
-fn collect_chain(vol: &Volume, first: u32, no_fat_chain: bool, data_length: u64) -> Vec<u32> {
+///
+/// Returns None if a FAT read fails mid-walk — the chain is then unknown,
+/// which is an I/O error, not a shorter chain.
+fn collect_chain(
+    vol: &Volume,
+    first: u32,
+    no_fat_chain: bool,
+    data_length: u64,
+) -> Option<Vec<u32>> {
     let mut chain = Vec::new();
     if first < 2 {
-        return chain;
+        return Some(chain);
     }
     if no_fat_chain {
         let cbytes = vol.cluster_bytes() as u64;
@@ -204,14 +217,14 @@ fn collect_chain(vol: &Volume, first: u32, no_fat_chain: bool, data_length: u64)
         let mut c = first;
         for _ in 0..=vol.cluster_count {
             chain.push(c);
-            let next = fat_read(vol, c);
+            let next = fat_read(vol, c)?; // I/O failure aborts the walk
             if next < 2 || next == FAT_EOF || next > vol.cluster_count + 1 {
                 break;
             }
             c = next;
         }
     }
-    chain
+    Some(chain)
 }
 
 // ========================================================================
@@ -305,7 +318,12 @@ fn bitmap_set(vol: &Volume, clusters: &[u32], allocated: bool) -> bool {
 /// Free a file's clusters: clear bitmap bits and, for FAT-chained files,
 /// zero the stale FAT entries.
 fn free_clusters(vol: &Volume, first: u32, no_fat_chain: bool, data_length: u64) {
-    let chain = collect_chain(vol, first, no_fat_chain, data_length);
+    // On a FAT I/O failure the chain is unknown: free nothing. Leaking
+    // clusters is recoverable (fsck); freeing the wrong ones is not.
+    let chain = match collect_chain(vol, first, no_fat_chain, data_length) {
+        Some(c) => c,
+        None => return,
+    };
     if chain.is_empty() {
         return;
     }
@@ -349,9 +367,10 @@ impl DirFile {
     }
 }
 
-/// Load a directory's cluster chain and full contents into memory
+/// Load a directory's cluster chain and full contents into memory.
+/// None on I/O failure or an empty/invalid chain.
 fn load_dir(vol: &Volume, dir: &DirRef) -> Option<(Vec<u32>, Vec<u8>)> {
-    let chain = collect_chain(vol, dir.first_cluster, dir.no_fat_chain, dir.data_length);
+    let chain = collect_chain(vol, dir.first_cluster, dir.no_fat_chain, dir.data_length)?;
     if chain.is_empty() {
         return None;
     }
@@ -536,7 +555,13 @@ pub fn mount() -> bool {
     let mut label: heapless::String<24> = heapless::String::new();
     {
         let root = root_ref(&vol);
-        let chain = collect_chain(&vol, root.first_cluster, false, 0);
+        let chain = match collect_chain(&vol, root.first_cluster, false, 0) {
+            Some(c) => c,
+            None => {
+                crate::serial::write_line("[FS] I/O error walking root FAT chain — not mounted");
+                return false;
+            }
+        };
         let cbytes = vol.cluster_bytes();
         let mut buf = vec![0u8; cbytes];
         'outer: for &cluster in &chain {
@@ -651,7 +676,7 @@ fn read_file_inner(vol: &Volume, f: &DirFile) -> Option<Vec<u8>> {
     if f.data_length == 0 {
         return Some(Vec::new());
     }
-    let chain = collect_chain(vol, f.first_cluster, f.no_fat_chain, f.data_length);
+    let chain = collect_chain(vol, f.first_cluster, f.no_fat_chain, f.data_length)?;
     let cbytes = vol.cluster_bytes();
     if chain.len() * cbytes < f.data_length as usize {
         return None; // chain shorter than data_length
