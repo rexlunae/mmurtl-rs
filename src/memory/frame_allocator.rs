@@ -211,6 +211,41 @@ impl FrameAllocator {
         None
     }
 
+    /// Allocate `count` physically contiguous frames (for DMA rings and
+    /// buffers). Returns the physical address of the first frame.
+    pub fn allocate_contiguous(&mut self, count: usize) -> Option<PhysAddr> {
+        if count == 0 {
+            return None;
+        }
+        let total = self.total_frames;
+        let mut run_start = 0usize;
+        let mut run_len = 0usize;
+
+        for frame_idx in 0..total {
+            let word = frame_idx / 32;
+            let bit = frame_idx % 32;
+            if self.bitmap[word] & (1 << bit) == 0 {
+                if run_len == 0 {
+                    run_start = frame_idx;
+                }
+                run_len += 1;
+                if run_len == count {
+                    // Mark the whole run used
+                    for idx in run_start..run_start + count {
+                        self.bitmap[idx / 32] |= 1 << (idx % 32);
+                    }
+                    self.free_frames -= count;
+                    return Some(PhysAddr::new(run_start as u64 * FRAME_SIZE));
+                }
+            } else {
+                run_len = 0;
+            }
+        }
+
+        serial_write_str("[FRAME] No contiguous run found!\n");
+        None
+    }
+
     /// Free a previously allocated frame
     pub fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
         let addr = frame.start_address().as_u64();

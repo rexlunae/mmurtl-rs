@@ -2,7 +2,7 @@
 
 A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting x86_64 long mode.
 
-## Status: Phase 6 (SMP Scheduling) Complete ✅
+## Status: Phase 7 (Drivers) Complete ✅
 
 - ✅ Bootable via BIOS (UEFI support coming)
 - ✅ Serial output on COM1 (115200 8N1)
@@ -19,6 +19,10 @@ A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting
 - ✅ SMP scheduling: every CPU runs the scheduler off its own LAPIC timer;
   tasks migrate freely between cores, idle CPUs woken by reschedule IPIs
 - ✅ Per-CPU GDT/TSS with dedicated double-fault IST stacks on every core
+- ✅ Virtio core: legacy PCI transport, split virtqueues, contiguous DMA allocator
+- ✅ Storage: virtio-blk driver with sector read/write (verified end-to-end)
+- ✅ Network: virtio-net driver with a live ARP round trip through QEMU user-net
+- ✅ Input: PS/2 keyboard driver — scancode set 1 → ASCII with shift, char queue
 
 ## Building
 
@@ -36,12 +40,20 @@ cargo build -Z build-std=core,compiler_builtins,alloc \
 ## Running (requires QEMU)
 
 ```bash
+# Optional: test disk for the virtio-blk self-test
+qemu-img create -f raw test-disk.img 16M
+
 qemu-system-x86_64 \
     -drive format=raw,file=target/mmurtl-rs-bios.img \
+    -drive format=raw,file=test-disk.img,if=virtio \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
     -serial stdio \
     -m 256M \
     -smp 4
 ```
+
+(The virtio drive and NIC are optional — the kernel skips those drivers
+gracefully when the devices are absent.)
 
 ## Project Structure
 
@@ -81,8 +93,9 @@ Originally by Richard Burgess (1994):
 | 4 | Scheduler + RQB IPC (message-passing kernel) | ✅ Done |
 | 5 | Local APIC, I/O APIC, multi-core boot (SMP) | ✅ Done |
 | 6 | SMP scheduling (all CPUs schedule, IPI reschedule) | ✅ Done |
-| 7 | Drivers (storage, network, input) | 🔜 |
-| 8 | Userspace + syscalls | 🌱 |
+| 7 | Drivers: virtio-blk, virtio-net, PS/2 keyboard | ✅ Done |
+| 8 | Real RQB IPC + filesystem | 🔜 |
+| 9 | Userspace + syscalls | 🌱 |
 
 ## Memory Management (Phase 3)
 
@@ -192,6 +205,39 @@ Demo output with `-smp 4` — six workers migrating across four cores:
 [T9 on CPU3] count=1
 [T10 on CPU2] count=1
 ```
+
+## Drivers (Phase 7)
+
+### Virtio core (`virtio/mod.rs`)
+- Legacy (0.9.5) virtio-pci transport over the I/O port BAR — QEMU's
+  transitional devices (vendor `0x1AF4`) expose this alongside modern
+- Split virtqueues in the legacy layout (descriptor table + avail ring,
+  used ring on the next page boundary), free-list descriptor management,
+  fenced avail-ring publishing
+- DMA regions from a new physically-contiguous frame allocator path
+  (`allocate_contiguous`), accessed via the phys-offset window
+
+### Storage: virtio-blk (`virtio/blk.rs`)
+- 3-descriptor request chains (header → data → status), synchronous with
+  polled completion
+- `read_sectors` / `write_sectors` API (512-byte sectors, up to 4 KiB per
+  request)
+- Boot self-test writes a signature to the device's last sector, reads it
+  back, and verifies — confirmed from the host side with a hex dump of the
+  disk image
+
+### Network: virtio-net (`virtio/net.rs`)
+- RX/TX virtqueues, MAC from device config (`VIRTIO_NET_F_MAC`),
+  prefilled 2 KiB RX buffers with recycling
+- Boot demo does a real ARP round trip through QEMU user networking:
+  `ARP who-has 10.0.2.2 tell 10.0.2.15 ... reply: 10.0.2.2 is-at 52:55:0a:00:02:02`
+
+### Input: PS/2 keyboard (`keyboard.rs`)
+- IRQ1 feeds raw scancodes to the driver; scancode set 1 → ASCII with
+  shift tracking
+- Characters land in a lock-free ring buffer consumed by a `kbd_echo`
+  task — IRQ on the BSP, consumption on whatever CPU the task runs on:
+  `[KBD on CPU1] 'A'`
 
 ## USB Driver (xHCI)
 

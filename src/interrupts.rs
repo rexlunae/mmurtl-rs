@@ -292,17 +292,15 @@ core::arch::global_asm!(
 );
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
-    unsafe {
+    let scancode: u8 = unsafe {
         let mut status_port: Port<u8> = Port::new(0x64);
         while (status_port.read() & 1) == 0 {}
 
         let mut data_port: Port<u8> = Port::new(0x60);
-        let scancode: u8 = data_port.read();
-
-        crate::serial::write_str("[KEY] 0x");
-        crate::serial::write_hex_byte(scancode);
-        crate::serial::write_str("\n");
-    }
+        data_port.read()
+    };
+    // Feed the keyboard driver (translates + queues; no printing here)
+    crate::keyboard::handle_scancode(scancode);
     irq_eoi(InterruptIndex::Keyboard.as_u8() - PIC_1_OFFSET);
 }
 

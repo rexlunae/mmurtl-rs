@@ -20,6 +20,8 @@ mod usb;
 mod acpi;
 mod apic;
 mod smp;
+mod virtio;
+mod keyboard;
 
 use bootloader_api::BootInfo;
 use bootloader_api::info::Optional;
@@ -113,10 +115,20 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // Initialize PCI and USB
     serial::write_str("[INIT] PCI bus...\n");
-    let _devices = pci::scan();
+    let devices = pci::scan();
 
     serial::write_str("[INIT] USB subsystem...\n");
     usb::init();
+
+    // Virtio drivers: storage (virtio-blk) + network (virtio-net)
+    serial::write_str("[INIT] Virtio drivers...\n");
+    virtio::init(&devices);
+
+    // Driver proof-of-life: block device write/read/verify + ARP round trip
+    serial::write_str("[TEST] Storage self-test...\n");
+    virtio::blk::self_test();
+    serial::write_str("[TEST] Network ARP test...\n");
+    virtio::net::arp_demo();
 
     // Initialize IPC (stub)
     serial::write_str("[INIT] IPC subsystem...\n");
@@ -163,6 +175,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     for _ in 0..6 {
         scheduler::create_task(worker_task, scheduler::PRIORITY_DEFAULT, "worker");
     }
+    // Keyboard echo task — consumes the keyboard driver's char queue
+    scheduler::create_task(kbd_echo_task, scheduler::PRIORITY_DEFAULT, "kbd_echo");
 
     // Print before sti: once the BSP joins the rotation, this boot context
     // is the BSP's idle task and only runs when the BSP has nothing to do
@@ -198,6 +212,29 @@ extern "C" fn worker_task() -> ! {
 
         // Busy-wait to eat up our time slice
         for _ in 0..5000000 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Keyboard echo task — prints characters typed on the PS/2 keyboard,
+/// demonstrating IRQ → driver queue → task consumption across CPUs.
+extern "C" fn kbd_echo_task() -> ! {
+    use core::fmt::Write;
+
+    loop {
+        while let Some(c) = keyboard::pop_char() {
+            let cpu = scheduler::current_cpu();
+            let mut line: heapless::String<48> = heapless::String::new();
+            if c.is_ascii_graphic() || c == b' ' {
+                let _ = write!(line, "[KBD on CPU{}] '{}'\n", cpu, c as char);
+            } else {
+                let _ = write!(line, "[KBD on CPU{}] 0x{:02x}\n", cpu, c);
+            }
+            serial::write_str(&line);
+        }
+        // Nothing pending — let the time slice go by
+        for _ in 0..100000 {
             core::hint::spin_loop();
         }
     }
