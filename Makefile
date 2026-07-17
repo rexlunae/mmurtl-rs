@@ -9,13 +9,16 @@ all: build
 
 # Build the kernel ELF
 build:
-	cargo build -Z build-std=core,compiler_builtins,alloc \
+	cargo build -Z build-std=core,compiler_builtins,alloc -Z json-target-spec \
 		--target $(TARGET) \
 		--release
 
 # Create BIOS and UEFI boot images
 bios uefi: build
-	cd tools/image-builder && cargo run --release -- \
+	cd tools/image-builder && CARGO_BUILD_STD="" CARGO_BUILD_STD_FEATURES="" \
+		cargo run --release \
+		--target-dir target \
+		-- \
 		../../$(KERNEL_BIN) \
 		../../$(BIOS_IMG) \
 		../../$(UEFI_IMG)

@@ -22,6 +22,11 @@ use crate::memory::frame_allocator::BumpFrameAllocator;
 /// Global physical memory offset — set once during init
 pub static mut PHYSICAL_MEMORY_OFFSET: u64 = 0;
 
+/// Safe getter for the physical memory offset
+pub fn physical_memory_offset() -> u64 {
+    unsafe { PHYSICAL_MEMORY_OFFSET }
+}
+
 /// Initialize page table management from boot info
 pub fn init(
     physical_memory_offset: Option<u64>,

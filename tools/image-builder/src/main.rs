@@ -27,7 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  UEFI:   {}", uefi_path.display());
 
     let builder = bootloader::DiskImageBuilder::new(kernel_path);
-    builder.create_boot_image(&bios_path, &uefi_path)?;
+    builder.create_bios_image(&bios_path)?;
+    builder.create_uefi_image(&uefi_path)?;
 
     let bios_size = std::fs::metadata(&bios_path)?.len();
     let uefi_size = std::fs::metadata(&uefi_path)?.len();

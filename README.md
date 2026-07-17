@@ -66,10 +66,44 @@ Originally by Richard Burgess (1994):
 |-------|------|--------|
 | 1 | Boot, serial, interrupts, GDT/IDT, PIC | ✅ Done |
 | 2 | PCI bus scanning + xHCI USB driver skeleton | ✅ Done |
-| 3 | Memory management (frame allocator, paging, heap) | 🔜 |
-| 4 | Scheduler + RQB IPC (message-passing kernel) | 🌱 |
+| 3 | Physical frame allocator, paging, kernel heap | ✅ Done |
+| 4 | Scheduler + RQB IPC (message-passing kernel) | 🔜 |
 | 5 | Drivers (storage, network, input) | 🌱 |
 | 6 | Userspace + syscalls | 🌱 |
+
+## Memory Management (Phase 3)
+
+### Physical Frame Allocator
+- Bitmap-based: 1 bit per 4 KiB frame, supports up to 32 GiB
+- Scans bootloader memory map, auto-marks all non-usable regions
+- Next-fit allocation strategy with OOM detection
+- Reports free/total MiB at boot
+
+### Page Table Management
+- Walks 4-level page tables (PML4 → PDP → PD → PT → 4K page)
+- `translate_virtual()` — resolves any virtual address to physical
+- `map_page()` — maps a 4K page with on-demand intermediate table creation
+- `unmap_page()` — unmaps and returns the freed frame
+- `query_page()` — checks flags for any mapped page
+
+### Kernel Heap (Bump Allocator)
+- 4 MiB initial, auto-extends in 1 MiB chunks
+- Backed by frame allocator page mappings (allocates physical pages on demand)
+- `#[global_allocator]` enabling Vec, Box, String, format! from Rust's `alloc` crate
+- Fast bump-pointer, OOM handled by extension loop
+
+### Boot output:
+```
+[MEM] Initializing memory manager...
+[PAGING] Physical memory offset: 0xffff800000000000
+[FRAME] Bitmap at physical 0x1000000, total=8388608, free=8382408 frames (32744 MiB)
+[HEAP] Bump allocator at 0xffff900000000000 (4096 KiB)
+[MEM] Memory manager initialized: 32744 MiB free / 32768 MiB total
+[TEST] Box: 42
+[TEST] Vec: [0, 100, 200, 300, 400, 500, 600, 700, 800, 900]
+[TEST] String: test-format-42
+[TEST] Heap allocation OK!
+```
 
 ## USB Driver (xHCI)
 

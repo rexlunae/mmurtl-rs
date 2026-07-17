@@ -1,0 +1,5 @@
+# Override workspace-level stable build-std for this host binary.
+# The parent config sets build-std for the no_std kernel target;
+# this binary is a normal Linux executable.
+[build]
+target = "x86_64-unknown-linux-gnu"

@@ -92,7 +92,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::write_str("[INIT] USB subsystem...\n");
     usb::init();
 
-    // Initialize scheduler (stub)
+    // Initialize scheduler (PIT-based preemptive multitasking)
     serial::write_str("[INIT] Scheduler...\n");
     scheduler::init();
 
@@ -100,12 +100,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::write_str("[INIT] IPC subsystem...\n");
     ipc::init();
 
+    // Create demo tasks (these run concurrently once interrupts are enabled)
+    serial::write_str("[SCHED] Creating demo tasks...\n");
+    scheduler::create_task(task_a, scheduler::PRIORITY_DEFAULT, "task_a");
+    scheduler::create_task(task_b, scheduler::PRIORITY_DEFAULT, "task_b");
+
     // Test heap allocation
     serial::write_str("[TEST] Heap allocation test...\n");
     {
         use alloc::vec::Vec;
         use alloc::boxed::Box;
-        use alloc::string::String;
         use alloc::format;
 
         // Box test
@@ -147,8 +151,50 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 }
 
-// Define entry point using bootloader_api macro
-bootloader_api::entry_point!(kernel_main);
+/// Demo task A — prints a counter on each time slice
+/// Runs concurrently with task_b via preemptive multitasking
+extern "C" fn task_a() -> ! {
+    let mut count = 0u64;
+    loop {
+        crate::serial::write_str("[A] Hello from task_a! count=");
+        crate::serial::write_dec(count);
+        crate::serial::write_str("\n");
+        count += 1;
+
+        // Busy-wait to eat up our time slice
+        for _ in 0..5000000 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Demo task B — prints a counter on each time slice
+extern "C" fn task_b() -> ! {
+    let mut count = 0u64;
+    loop {
+        crate::serial::write_str("[B] Hello from task_b! count=");
+        crate::serial::write_dec(count);
+        crate::serial::write_str("\n");
+        count += 1;
+
+        // Busy-wait to eat up our time slice
+        for _ in 0..5000000 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Bootloader config that enables physical memory offset mapping
+use bootloader_api::config::{BootloaderConfig, Mappings, Mapping};
+
+const BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings.physical_memory = Option::Some(Mapping::Dynamic);
+    config
+};
+
+// Define entry point using bootloader_api macro with custom config
+bootloader_api::entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 /// Panic handler
 #[panic_handler]

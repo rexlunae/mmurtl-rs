@@ -212,11 +212,57 @@ extern "x86-interrupt" fn security_exception_handler(
 // Hardware Interrupt Handlers
 // ========================================================================
 
-extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {
-    unsafe {
-        eoi(InterruptIndex::Timer.as_u8());
-    }
-}
+/// Timer interrupt handler — defined in global assembly to avoid naked function restrictions.
+///
+/// Saves all registers, calls the Rust scheduler, then restores and IRETQs to the
+/// next scheduled task. This is the heart of preemptive multitasking.
+core::arch::global_asm!(
+    ".globl timer_handler",
+    "timer_handler:",
+    // Push all general-purpose registers (TaskContext layout)
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push rbx",
+    "push rbp",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    // RSP now points to saved TaskContext — pass it to the scheduler
+    "mov rdi, rsp",
+    // Send EOI to PIC (prevent IRQ nesting)
+    "mov al, 0x20",
+    "out 0x20, al",
+    // Call the Rust scheduler — returns new RSP in RAX
+    "call schedule_and_switch",
+    // Switch to the new task's stack
+    "mov rsp, rax",
+    // Restore registers
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rbp",
+    "pop rbx",
+    "pop rdx",
+    "pop rcx",
+    "pop rax",
+    // Return to the next task
+    "iretq"
+);
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     unsafe {
@@ -237,6 +283,11 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 // ========================================================================
 // IDT Initialization
 // ========================================================================
+
+/// Timer handler — defined in global_asm above
+extern "C" {
+    fn timer_handler();
+}
 
 /// The IDT — initialized once at boot
 static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
@@ -264,7 +315,11 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt.security_exception.set_handler_fn(security_exception_handler);
 
     // Hardware interrupts
-    idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_handler);
+    unsafe {
+        idt[InterruptIndex::Timer.as_usize()].set_handler_addr(
+            x86_64::VirtAddr::new(timer_handler as usize as u64)
+        );
+    }
     idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_handler);
 
     // Double fault with IST stack

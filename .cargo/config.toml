@@ -1,9 +1,2 @@
-[unstable]
-build-std = ["core", "compiler_builtins", "alloc"]
-build-std-features = ["compiler-builtins-mem"]
-
-[build]
-target = "x86_64-unknown-none.json"
-
-# Required for JSON target specs on nightly
-# We handle this via Makefile / cargo args instead
+# build-std and target are handled by the Makefile for the kernel.
+# Do not set them here — they break the host-binary image-builder tool.
