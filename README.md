@@ -2,7 +2,7 @@
 
 A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting x86_64 long mode.
 
-## Status: Phase 7 (Drivers) Complete ✅
+## Status: Phase 8 (exFAT Filesystem) Complete ✅
 
 - ✅ Bootable via BIOS (UEFI support coming)
 - ✅ Serial output on COM1 (115200 8N1)
@@ -23,6 +23,8 @@ A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting
 - ✅ Storage: virtio-blk driver with sector read/write (verified end-to-end)
 - ✅ Network: virtio-net driver with a live ARP round trip through QEMU user-net
 - ✅ Input: PS/2 keyboard driver — scancode set 1 → ASCII with shift, char queue
+- ✅ Filesystem: exFAT (mount, list, read, create) — interoperable with Linux
+  in both directions, `fsck.exfat`-clean after kernel writes
 
 ## Building
 
@@ -94,8 +96,9 @@ Originally by Richard Burgess (1994):
 | 5 | Local APIC, I/O APIC, multi-core boot (SMP) | ✅ Done |
 | 6 | SMP scheduling (all CPUs schedule, IPI reschedule) | ✅ Done |
 | 7 | Drivers: virtio-blk, virtio-net, PS/2 keyboard | ✅ Done |
-| 8 | Real RQB IPC + filesystem | 🔜 |
-| 9 | Userspace + syscalls | 🌱 |
+| 8 | exFAT filesystem (read + create, Linux-interoperable) | ✅ Done |
+| 9 | Real RQB IPC (blocking send/receive/reply) | 🔜 |
+| 10 | Userspace + syscalls | 🌱 |
 
 ## Memory Management (Phase 3)
 
@@ -238,6 +241,34 @@ Demo output with `-smp 4` — six workers migrating across four cores:
 - Characters land in a lock-free ring buffer consumed by a `kbd_echo`
   task — IRQ on the BSP, consumption on whatever CPU the task runs on:
   `[KBD on CPU1] 'A'`
+
+## exFAT Filesystem (Phase 8)
+
+MMURTL (1994) spoke FAT; MMURTL/RS speaks its modern descendant. The
+driver (`fs/exfat.rs`) implements the on-disk format from the Microsoft
+exFAT specification, on top of the virtio-blk driver:
+
+- **Mount**: boot sector parse (FAT offset, cluster heap, root directory),
+  allocation bitmap + volume label discovery from the root directory
+- **Read**: directory entry sets (File 0x85 + Stream 0xC0 + FileName 0xC1),
+  FAT cluster chains *and* the NoFatChain contiguous fast path
+- **Create**: contiguous NoFatChain allocation from the allocation bitmap,
+  directory entry sets with correct rotate-right set checksums, up-cased
+  name hashes, and exFAT timestamps
+
+Verified end to end against the reference implementations:
+```
+[FS] exFAT mounted: label "MMURTL", 3584 clusters x 4 KiB, root @ cluster 5
+[FS]   README.TXT  (55 bytes)          ← written by Linux, read by MMURTL/RS
+[FS] Created MMURTL.TXT (108 bytes), read-back verified
+```
+- `fsck.exfat` reports the volume **clean** after kernel writes
+- Linux mounts the image and reads `MMURTL.TXT` — content, size, and
+  timestamps all intact
+- A second kernel boot finds and reads the file it created (persistence)
+
+Current limitations: root-directory files only, ASCII names, no
+delete/rename/append, 512-byte sectors.
 
 ## USB Driver (xHCI)
 
