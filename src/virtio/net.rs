@@ -30,12 +30,19 @@ struct NetDevice {
     /// One page TX staging area (header + frame)
     tx_buf: DmaRegion,
     mac: [u8; 6],
+    /// Poisoned after a TX timeout or mismatched TX completion: the
+    /// device still owns the TX descriptor and the shared tx_buf, so a
+    /// late completion would be misattributed to the next send (and the
+    /// device could DMA from tx_buf while it's being rewritten).
+    /// Recovery requires a full device reset; until then, fail fast.
+    /// (RX wait timeouts are normal — "no packet yet" — not failures.)
+    failed: bool,
 }
 
 static NET: Mutex<Option<NetDevice>> = Mutex::new(None);
 
 pub fn available() -> bool {
-    NET.lock().is_some()
+    NET.lock().as_ref().map_or(false, |d| !d.failed)
 }
 
 pub fn mac() -> [u8; 6] {
@@ -106,11 +113,15 @@ pub fn init(dev: &crate::pci::PciDevice) {
         rx_buf,
         tx_buf: super::dma_alloc(1),
         mac,
+        failed: false,
     });
 }
 
 /// Send a raw ethernet frame (blocking until the device consumes it)
 fn send_frame(dev: &mut NetDevice, frame: &[u8]) -> bool {
+    if dev.failed {
+        return false;
+    }
     assert!(NET_HDR_LEN + frame.len() <= dev.tx_buf.size);
     unsafe {
         // 10-byte legacy header, all zero (no checksum offload, no GSO)
@@ -123,16 +134,36 @@ fn send_frame(dev: &mut NetDevice, frame: &[u8]) -> bool {
     }
 
     let chain = [(dev.tx_buf.phys, (NET_HDR_LEN + frame.len()) as u32, false)];
-    if dev.tx.submit(&chain).is_none() {
-        return false;
-    }
+    let head = match dev.tx.submit(&chain) {
+        Some(h) => h,
+        None => return false,
+    };
     dev.transport.notify(1);
-    dev.tx.wait_used(1, 1000).is_some()
+
+    match dev.tx.wait_used(1, 1000) {
+        None => {
+            // TX descriptor + tx_buf remain device-owned; a late
+            // completion would be misread by the next send. Poison.
+            dev.failed = true;
+            crate::serial::write_line("[NET] TX timed out — device disabled (needs reset)");
+            false
+        }
+        Some((used_head, _)) if used_head != head => {
+            dev.failed = true;
+            crate::serial::write_line("[NET] Stale TX completion — device disabled");
+            false
+        }
+        Some(_) => true,
+    }
 }
 
 /// Receive one frame into `out` (without the virtio header), waiting up to
-/// `timeout_ms`. Returns the frame length.
+/// `timeout_ms`. Returns the frame length. A timeout here is NOT an error
+/// (no packet arrived); the posted RX buffers remain valid.
 fn recv_frame(dev: &mut NetDevice, out: &mut [u8], timeout_ms: u32) -> Option<usize> {
+    if dev.failed {
+        return None;
+    }
     let (head, written) = dev.rx.wait_used(1, timeout_ms)?;
     let written = written as usize;
 

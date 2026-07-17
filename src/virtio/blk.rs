@@ -28,13 +28,21 @@ struct BlkDevice {
     /// One page: data buffer (up to 8 sectors)
     data: DmaRegion,
     capacity_sectors: u64,
+    /// Poisoned after a timeout or mismatched completion. A timed-out
+    /// request leaves the device owning our descriptors AND our shared
+    /// req/data DMA buffers — it may complete (and DMA) at any later
+    /// moment, so reusing the buffers or trusting the next used-ring
+    /// entry would misattribute a stale completion to a new request.
+    /// Recovery requires a full device reset; until then, fail fast.
+    failed: bool,
 }
 
 static BLK: Mutex<Option<BlkDevice>> = Mutex::new(None);
 
-/// Whether a virtio-blk device is available
+/// Whether a virtio-blk device is available (and not poisoned by a
+/// timed-out request)
 pub fn available() -> bool {
-    BLK.lock().is_some()
+    BLK.lock().as_ref().map_or(false, |d| !d.failed)
 }
 
 /// Device capacity in 512-byte sectors (0 if no device)
@@ -82,11 +90,15 @@ pub fn init(dev: &crate::pci::PciDevice) {
         req: super::dma_alloc(1),
         data: super::dma_alloc(1),
         capacity_sectors,
+        failed: false,
     });
 }
 
 /// Perform one request against the device. Returns false on any error.
 fn do_request(dev: &mut BlkDevice, write: bool, sector: u64, buf: &mut [u8]) -> bool {
+    if dev.failed {
+        return false;
+    }
     let sectors = buf.len() / SECTOR_SIZE;
     assert!(
         sectors >= 1 && sectors <= MAX_SECTORS_PER_REQ && buf.len() % SECTOR_SIZE == 0,
@@ -115,14 +127,28 @@ fn do_request(dev: &mut BlkDevice, write: bool, sector: u64, buf: &mut [u8]) -> 
         (dev.data.phys, buf.len() as u32, !write),
         (dev.req.phys + 16, 1, true),
     ];
-    if dev.queue.submit(&chain).is_none() {
-        return false;
-    }
+    let head = match dev.queue.submit(&chain) {
+        Some(h) => h,
+        None => return false,
+    };
     dev.transport.notify(0);
 
-    if dev.queue.wait_used(3, 1000).is_none() {
-        crate::serial::write_line("[BLK] Request timed out!");
-        return false;
+    match dev.queue.wait_used(3, 1000) {
+        None => {
+            // Descriptors and DMA buffers are still device-owned; a late
+            // completion would be misread by the next request. Poison.
+            dev.failed = true;
+            crate::serial::write_line("[BLK] Request timed out — device disabled (needs reset)");
+            return false;
+        }
+        Some((used_head, _len)) if used_head != head => {
+            // A completion for a chain we didn't just submit can only be
+            // a stale one from a previous failure — never trust it.
+            dev.failed = true;
+            crate::serial::write_line("[BLK] Stale completion detected — device disabled");
+            return false;
+        }
+        Some(_) => {}
     }
 
     let status = unsafe { dev.req.virt.add(16).read_volatile() };
