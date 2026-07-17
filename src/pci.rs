@@ -38,6 +38,16 @@ fn pci_config_read(bus: u8, device: u8, function: u8, register: u8) -> u32 {
     }
 }
 
+/// Write a 32-bit value to PCI config space
+fn pci_config_write(bus: u8, device: u8, function: u8, register: u8, value: u32) {
+    unsafe {
+        let mut address_port: Port<u32> = Port::new(0xCF8);
+        let mut data_port: Port<u32> = Port::new(0xCFC);
+        address_port.write(PciConfigAddress::new(bus, device, function, register).0);
+        data_port.write(value);
+    }
+}
+
 /// PCI device identifiers
 #[derive(Debug, Clone, Copy)]
 pub struct PciDevice {
@@ -92,6 +102,29 @@ impl PciDevice {
         } else {
             None // I/O BAR
         }
+    }
+
+    /// Get the I/O port base from BAR0 (I/O BAR), if it is one
+    pub fn io_base(&self) -> Option<u16> {
+        if self.bar0 & 1 == 1 {
+            Some((self.bar0 & 0xFFFC) as u16)
+        } else {
+            None
+        }
+    }
+
+    /// Enable I/O space, memory space, and bus mastering in the command
+    /// register — required before a device may DMA.
+    pub fn enable_bus_master(&self) {
+        let cmd_status = pci_config_read(self.bus, self.device, self.function, 0x04);
+        let cmd = (cmd_status & 0xFFFF) | 0b111; // IO space | mem space | bus master
+        pci_config_write(
+            self.bus,
+            self.device,
+            self.function,
+            0x04,
+            (cmd_status & 0xFFFF_0000) | cmd,
+        );
     }
 
     /// Human-readable class name
