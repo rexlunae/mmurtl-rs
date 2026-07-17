@@ -1,0 +1,15 @@
+[package]
+name = "mmurtl-rs"
+version = "0.1.0"
+edition = "2021"
+description = "MMURTL/RS - Message-passing multitasking real-time kernel in Rust"
+
+[dependencies]
+bootloader_api = "0.11.15"
+x86_64 = "=0.14.13"
+uart_16550 = "0.2"
+spin = "0.9"
+volatile = "0.4"
+
+[build-dependencies]
+bootloader = "0.11.15"
