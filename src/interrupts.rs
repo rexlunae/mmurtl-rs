@@ -59,6 +59,29 @@ pub unsafe fn eoi(irq: u8) {
     master_port.write(0x20u8); // EOI to master
 }
 
+/// Fully mask the legacy PIC — used once the APIC takes over
+pub fn mask_pic() {
+    unsafe {
+        let mut data1: Port<u8> = Port::new(PIC1_DATA);
+        let mut data2: Port<u8> = Port::new(PIC2_DATA);
+        data1.write(0xFFu8);
+        data2.write(0xFFu8);
+    }
+    crate::serial::write_line("[PIC] Fully masked (APIC mode)");
+}
+
+/// Send end-of-interrupt for a hardware IRQ, APIC-aware.
+///
+/// In APIC mode all IRQs (LAPIC timer, IOAPIC-routed keyboard) are
+/// acknowledged at the Local APIC; otherwise fall back to the 8259 PIC.
+pub fn irq_eoi(irq: u8) {
+    if crate::apic::enabled() {
+        crate::apic::eoi();
+    } else {
+        unsafe { eoi(irq) };
+    }
+}
+
 /// Hardware interrupt numbers
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -237,10 +260,8 @@ core::arch::global_asm!(
     "push r15",
     // RSP now points to saved TaskContext — pass it to the scheduler
     "mov rdi, rsp",
-    // Send EOI to PIC (prevent IRQ nesting)
-    "mov al, 0x20",
-    "out 0x20, al",
-    // Call the Rust scheduler — returns new RSP in RAX
+    // Call the Rust scheduler — returns new RSP in RAX.
+    // (EOI is sent inside schedule_and_switch, APIC- or PIC-appropriate.)
     "call schedule_and_switch",
     // Switch to the new task's stack
     "mov rsp, rax",
@@ -275,9 +296,17 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
         crate::serial::write_str("[KEY] 0x");
         crate::serial::write_hex_byte(scancode);
         crate::serial::write_str("\n");
-
-        eoi(InterruptIndex::Keyboard.as_u8());
     }
+    irq_eoi(InterruptIndex::Keyboard.as_u8() - PIC_1_OFFSET);
+}
+
+/// LAPIC spurious interrupt — no EOI must be sent
+extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {}
+
+/// LAPIC error interrupt
+extern "x86-interrupt" fn apic_error_handler(_stack_frame: InterruptStackFrame) {
+    crate::serial::write_line("[APIC] Error interrupt received");
+    crate::apic::eoi();
 }
 
 // ========================================================================
@@ -322,6 +351,10 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     }
     idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_handler);
 
+    // LAPIC vectors
+    idt[crate::apic::ERROR_VECTOR as usize].set_handler_fn(apic_error_handler);
+    idt[crate::apic::SPURIOUS_VECTOR as usize].set_handler_fn(spurious_handler);
+
     // Double fault with IST stack
     unsafe {
         idt.double_fault
@@ -334,5 +367,10 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
 
 /// Initialize the IDT — call once at boot after GDT is initialized.
 pub fn init() {
+    IDT.load();
+}
+
+/// Load the shared IDT on an application processor.
+pub fn init_ap() {
     IDT.load();
 }

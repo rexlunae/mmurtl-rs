@@ -28,6 +28,24 @@ pub unsafe fn set_frame_allocator(fa: *mut frame_allocator::FrameAllocator) {
     FRAME_ALLOC_PTR = fa;
 }
 
+/// Run a closure with mutable access to the global frame allocator.
+///
+/// Returns None if memory management is not yet initialized. Callers must
+/// run with interrupts disabled or during single-threaded init (the frame
+/// allocator itself is not locked).
+pub fn with_frame_allocator<R>(
+    f: impl FnOnce(&mut frame_allocator::FrameAllocator) -> R,
+) -> Option<R> {
+    unsafe {
+        let ptr = FRAME_ALLOC_PTR;
+        if ptr.is_null() {
+            None
+        } else {
+            Some(f(&mut *ptr))
+        }
+    }
+}
+
 // ========================================================================
 // Bump Allocator
 // ========================================================================

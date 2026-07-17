@@ -46,9 +46,10 @@ impl FrameAllocator {
     /// The bitmap itself is placed at the start of the first usable memory region.
     /// All physical addresses are converted to virtual via phys_to_virt.
     pub fn init(memory_regions: &MemoryRegions) -> &'static mut Self {
-        let (bitmap_addr, _bitmap_frames, total_frames) = Self::build_bitmap(memory_regions);
+        let (header_addr, reserved_frames, total_frames) = Self::build_bitmap(memory_regions);
 
-        // Convert bitmap physical address to accessible virtual address
+        // Layout: [FrameAllocator header: 1 frame][bitmap: N frames]
+        let bitmap_addr = header_addr + FRAME_SIZE;
         let bitmap_virt = phys_to_virt(bitmap_addr);
         let bitmap_ptr = bitmap_virt as *mut u32;
         let bitmap_slice = unsafe {
@@ -60,18 +61,36 @@ impl FrameAllocator {
             *entry = 0;
         }
 
+        let mark_frame_used = |bitmap: &mut [u32], frame_idx: usize| {
+            if frame_idx < BITMAP_ENTRIES * 32 {
+                bitmap[frame_idx / 32] |= 1 << (frame_idx % 32);
+            }
+        };
+
         // Mark all frames beyond the actual RAM as "used" (so they can't be allocated)
         let actual_frames = (Self::detect_top_of_ram(memory_regions) / FRAME_SIZE) as usize;
         if actual_frames < total_frames {
             for frame_idx in actual_frames..total_frames {
-                let word = frame_idx / 32;
-                let bit = frame_idx % 32;
-                bitmap_slice[word] |= 1 << bit;
+                mark_frame_used(bitmap_slice, frame_idx);
             }
         }
 
         // Mark all non-usable regions as used
         Self::mark_used(memory_regions, bitmap_slice);
+
+        // Reserve the first MiB: real-mode IVT, BDA, EBDA, and the SMP AP
+        // trampoline at 0x8000 all live here.
+        for frame_idx in 0..(0x10_0000 / FRAME_SIZE) as usize {
+            mark_frame_used(bitmap_slice, frame_idx);
+        }
+
+        // Reserve the allocator header + bitmap's own frames so they are
+        // never handed out (previously they were left allocatable and could
+        // be clobbered by heap pages).
+        let first_reserved = (header_addr / FRAME_SIZE) as usize;
+        for frame_idx in first_reserved..first_reserved + reserved_frames as usize {
+            mark_frame_used(bitmap_slice, frame_idx);
+        }
 
         // Count free frames
         let mut free_count = 0;
@@ -95,8 +114,8 @@ impl FrameAllocator {
         serial_write_dec((free_count as u64 * FRAME_SIZE) / (1024 * 1024));
         serial_write_str(" MiB)\n");
 
-        // Place the FrameAllocator header at the start of the bitmap region (phys + offset)
-        let allocator_virt = bitmap_virt as *mut FrameAllocator;
+        // Place the FrameAllocator header in its own frame, just before the bitmap
+        let allocator_virt = phys_to_virt(header_addr) as *mut FrameAllocator;
         unsafe {
             allocator_virt.write(FrameAllocator {
                 bitmap: core::mem::transmute(bitmap_slice.as_mut_ptr()),
@@ -121,20 +140,35 @@ impl FrameAllocator {
         top
     }
 
-    /// Calculate bitmap size and find placement
+    /// Calculate bitmap size and find placement.
+    ///
+    /// Returns (header physical address, total reserved frames, total tracked frames).
+    /// The reservation is one frame for the FrameAllocator header followed by
+    /// the bitmap frames.
     fn build_bitmap(memory_regions: &MemoryRegions) -> (u64, u64, usize) {
         let total_frames = (MAX_PHYSICAL_MEMORY / FRAME_SIZE) as usize;
         let bitmap_bytes = (total_frames + 7) / 8;
         let bitmap_frames = (bitmap_bytes as u64 + FRAME_SIZE - 1) / FRAME_SIZE;
+        let reserved_frames = 1 + bitmap_frames; // header + bitmap
+        let reserved_bytes = reserved_frames * FRAME_SIZE;
 
-        // Find a spot for the bitmap: use the start of the first usable region
-        let bitmap_addr = memory_regions
+        // Find the first usable region (above 1 MiB) large enough to hold
+        // the header + bitmap contiguously.
+        let header_addr = memory_regions
             .iter()
-            .find(|r| r.kind == MemoryRegionKind::Usable)
-            .map(|r| r.start)
-            .unwrap_or(0x100_0000); // Fallback: 16 MiB
+            .filter(|r| r.kind == MemoryRegionKind::Usable)
+            .find_map(|r| {
+                let start = r.start.max(0x10_0000);
+                let aligned = (start + FRAME_SIZE - 1) & !(FRAME_SIZE - 1);
+                if aligned + reserved_bytes <= r.end {
+                    Some(aligned)
+                } else {
+                    None
+                }
+            })
+            .expect("No usable region large enough for the frame bitmap");
 
-        (bitmap_addr, bitmap_frames, total_frames)
+        (header_addr, reserved_frames, total_frames)
     }
 
     /// Mark all non-usable frames as allocated in the bitmap

@@ -2,16 +2,20 @@
 
 A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting x86_64 long mode.
 
-## Status: Phase 1 Complete ✅
+## Status: Phase 5 (APIC + SMP) Complete ✅
 
 - ✅ Bootable via BIOS (UEFI support coming)
 - ✅ Serial output on COM1 (115200 8N1)
 - ✅ GDT with kernel/user segments + TSS (IST for double faults)
 - ✅ Full IDT — all 20 CPU exceptions handled with proper `x86-interrupt` convention
-- ✅ PIC (8259) remapped to 0x20/0x28
-- ✅ PIT timer handler + PS/2 keyboard scancode logging
+- ✅ PIC (8259) remapped to 0x20/0x28 (fallback; fully masked in APIC mode)
 - ✅ Kernel panic handler with file:line + message output
 - ✅ Physical memory region enumeration and usable memory counting
+- ✅ Preemptive round-robin scheduler + kernel heap
+- ✅ ACPI table parsing (RSDP → RSDT/XSDT → MADT)
+- ✅ Local APIC: PIT-calibrated LAPIC timer drives the 100 Hz scheduler tick
+- ✅ I/O APIC: legacy IRQ routing (keyboard) with interrupt source overrides
+- ✅ Multi-core boot: INIT-SIPI-SIPI trampoline brings all APs into long mode
 
 ## Building
 
@@ -32,7 +36,8 @@ cargo build -Z build-std=core,compiler_builtins,alloc \
 qemu-system-x86_64 \
     -drive format=raw,file=target/mmurtl-rs-bios.img \
     -serial stdio \
-    -m 256M
+    -m 256M \
+    -smp 4
 ```
 
 ## Project Structure
@@ -43,10 +48,13 @@ src/
 ├── serial.rs      — UART 16550 serial output
 ├── gdt.rs         — Global Descriptor Table + TSS
 ├── interrupts.rs  — IDT, exception handlers, PIC, timer/keyboard
+├── acpi.rs        — ACPI table parsing (RSDP/RSDT/XSDT/MADT)
+├── apic.rs        — Local APIC + I/O APIC driver, LAPIC timer, IPIs
+├── smp.rs         — Multi-core boot (AP trampoline, INIT-SIPI-SIPI)
 ├── memory/
-│   └── mod.rs     — Memory management (stub)
+│   └── mod.rs     — Frame allocator, paging, kernel heap
 ├── scheduler/
-│   └── mod.rs     — Task scheduler (stub)
+│   └── mod.rs     — Preemptive round-robin scheduler
 └── ipc/
     └── mod.rs     — RQB message-passing IPC (stub)
 ```
@@ -67,9 +75,11 @@ Originally by Richard Burgess (1994):
 | 1 | Boot, serial, interrupts, GDT/IDT, PIC | ✅ Done |
 | 2 | PCI bus scanning + xHCI USB driver skeleton | ✅ Done |
 | 3 | Physical frame allocator, paging, kernel heap | ✅ Done |
-| 4 | Scheduler + RQB IPC (message-passing kernel) | 🔜 |
-| 5 | Drivers (storage, network, input) | 🌱 |
-| 6 | Userspace + syscalls | 🌱 |
+| 4 | Scheduler + RQB IPC (message-passing kernel) | ✅ Done |
+| 5 | Local APIC, I/O APIC, multi-core boot (SMP) | ✅ Done |
+| 6 | SMP scheduling (per-CPU run queues, IPI reschedule) | 🔜 |
+| 7 | Drivers (storage, network, input) | 🌱 |
+| 8 | Userspace + syscalls | 🌱 |
 
 ## Memory Management (Phase 3)
 
@@ -103,6 +113,47 @@ Originally by Richard Burgess (1994):
 [TEST] Vec: [0, 100, 200, 300, 400, 500, 600, 700, 800, 900]
 [TEST] String: test-format-42
 [TEST] Heap allocation OK!
+```
+
+## APIC + SMP (Phase 5)
+
+### ACPI (`acpi.rs`)
+- Walks RSDP → RSDT/XSDT → MADT, mapping table pages on demand
+- Discovers the Local APIC base, every processor's APIC ID, the I/O APIC,
+  and ISA interrupt source overrides
+
+### Local APIC (`apic.rs`)
+- xAPIC MMIO mode, mapped uncached through the physical-memory offset
+- LAPIC timer calibrated against the PIT (channel 2 one-shot), then run in
+  periodic mode to drive the scheduler at 100 Hz — the legacy PIC/PIT path
+  remains as a fallback when no MADT is found
+- I/O APIC redirection entries route legacy IRQs (keyboard GSI 1) to the BSP
+- ICR helpers send INIT and STARTUP IPIs for AP bring-up
+
+### Multi-core boot (`smp.rs`)
+- Position-independent trampoline copied to physical `0x8000`: real mode →
+  protected mode → long mode (PAE + EFER.LME/NXE + kernel CR3)
+- BSP boots APs one at a time with INIT-SIPI-SIPI and a mailbox handshake
+  (per-CPU stack, entry point, CPU number)
+- Each AP loads the kernel GDT/IDT, enables its Local APIC, reports in, and
+  parks ready for future IPIs
+
+Boot output with `-smp 4`:
+```
+[ACPI] MADT: LAPIC base 0x00000000fee00000, 4 CPU(s), IOAPIC at 0x00000000fec00000, 5 IRQ override(s)
+[APIC] LAPIC base 0x00000000fee00000 (version 0x14), BSP APIC ID 0
+[IOAPIC] GSI 1 -> vector 33 on APIC ID 0
+[PIC] Fully masked (APIC mode)
+[APIC] Timer calibrated: 654544 ticks / 10 ms (div 16)
+[SMP] Booting 3 AP(s)...
+[SMP] Trampoline installed at 0x0000000000008000 (216 bytes)
+[SMP] Starting CPU 1 (APIC ID 1)...
+[SMP] CPU 1 online (APIC ID 1)
+[SMP] Starting CPU 2 (APIC ID 2)...
+[SMP] CPU 2 online (APIC ID 2)
+[SMP] Starting CPU 3 (APIC ID 3)...
+[SMP] CPU 3 online (APIC ID 3)
+[SMP] 4 CPU(s) online
 ```
 
 ## USB Driver (xHCI)

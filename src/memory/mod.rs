@@ -39,3 +39,71 @@ pub fn init(boot_info: &'static mut BootInfo) {
     crate::serial::write_dec(total_mib);
     crate::serial::write_str(" MiB total\n");
 }
+
+/// Ensure a physical range is accessible through the physical-memory offset
+/// mapping, mapping any missing pages on demand.
+///
+/// The bootloader only maps RAM at the physical memory offset, so MMIO
+/// regions (Local APIC, I/O APIC) and sometimes ACPI tables need extra
+/// mappings. `uncached` should be true for MMIO.
+pub fn ensure_phys_mapped(phys_start: u64, len: u64, uncached: bool) {
+    use x86_64::structures::paging::{Page, PhysFrame};
+    use x86_64::structures::paging::page_table::PageTableFlags as Flags;
+    use x86_64::{PhysAddr, VirtAddr};
+
+    let start = phys_start & !0xFFF;
+    let end = (phys_start + len + 0xFFF) & !0xFFF;
+
+    let mut phys = start;
+    while phys < end {
+        let virt = page_table::phys_to_virt(PhysAddr::new(phys));
+        if page_table::translate_virtual(virt).is_none() {
+            let mut flags = Flags::PRESENT | Flags::WRITABLE | Flags::NO_EXECUTE;
+            if uncached {
+                flags |= Flags::NO_CACHE | Flags::WRITE_THROUGH;
+            }
+            heap::with_frame_allocator(|fa| {
+                let mut adapter = frame_allocator::BumpFrameAllocator::new(fa);
+                unsafe {
+                    page_table::map_page(
+                        Page::containing_address(VirtAddr::new(virt.as_u64())),
+                        PhysFrame::containing_address(PhysAddr::new(phys)),
+                        flags,
+                        &mut adapter,
+                    )
+                    .expect("Failed to map physical range");
+                }
+            })
+            .expect("Frame allocator not initialized");
+        }
+        phys += 4096;
+    }
+}
+
+/// Identity-map a single executable page (virt == phys).
+///
+/// Used for the SMP AP trampoline: after an AP enables paging with the
+/// kernel's CR3, it is still executing at its low physical address, so that
+/// address must be identity-mapped and executable.
+pub fn identity_map_executable(phys: u64) {
+    use x86_64::structures::paging::{Page, PhysFrame};
+    use x86_64::structures::paging::page_table::PageTableFlags as Flags;
+    use x86_64::{PhysAddr, VirtAddr};
+
+    if page_table::translate_virtual(VirtAddr::new(phys)).is_some() {
+        return;
+    }
+    heap::with_frame_allocator(|fa| {
+        let mut adapter = frame_allocator::BumpFrameAllocator::new(fa);
+        unsafe {
+            page_table::map_page(
+                Page::containing_address(VirtAddr::new(phys)),
+                PhysFrame::containing_address(PhysAddr::new(phys)),
+                Flags::PRESENT | Flags::WRITABLE,
+                &mut adapter,
+            )
+            .expect("Failed to identity-map trampoline page");
+        }
+    })
+    .expect("Frame allocator not initialized");
+}

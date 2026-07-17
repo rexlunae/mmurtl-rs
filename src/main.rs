@@ -17,6 +17,9 @@ mod scheduler;
 mod ipc;
 mod pci;
 mod usb;
+mod acpi;
+mod apic;
+mod smp;
 
 use bootloader_api::BootInfo;
 use bootloader_api::info::Optional;
@@ -81,9 +84,27 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::write_str("[INIT] PIC...\n");
     interrupts::init_pic();
 
+    // Save the RSDP address before memory takes ownership of boot_info
+    let rsdp_addr = match boot_info.rsdp_addr {
+        Optional::Some(addr) => Some(addr),
+        Optional::None => None,
+    };
+
     // Initialize memory management
     serial::write_str("[INIT] Memory manager...\n");
     memory::init(boot_info);
+
+    // Parse ACPI tables (MADT: CPUs, Local APIC, I/O APIC)
+    serial::write_str("[INIT] ACPI...\n");
+    acpi::init(rsdp_addr);
+
+    // Switch from PIC/PIT to Local APIC + I/O APIC
+    serial::write_str("[INIT] APIC...\n");
+    apic::init();
+
+    // Boot the application processors
+    serial::write_str("[INIT] SMP...\n");
+    smp::boot_aps();
 
     // Initialize PCI and USB
     serial::write_str("[INIT] PCI bus...\n");
