@@ -43,9 +43,13 @@ pub fn init(boot_info: &'static mut BootInfo) {
 /// Ensure a physical range is accessible through the physical-memory offset
 /// mapping, mapping any missing pages on demand.
 ///
-/// The bootloader only maps RAM at the physical memory offset, so MMIO
-/// regions (Local APIC, I/O APIC) and sometimes ACPI tables need extra
-/// mappings. `uncached` should be true for MMIO.
+/// With `uncached` (for MMIO: Local APIC, I/O APIC) the pages are also
+/// guaranteed to be uncacheable. That matters even when the range is
+/// *already* mapped: the bootloader's `Mapping::Dynamic` window covers
+/// 0..max_phys_addr as cacheable write-back, so on machines with enough
+/// RAM the MMIO window is pre-mapped with the wrong attributes (and often
+/// inside a huge page). Such pages get their attributes forced to UC,
+/// splitting the covering huge page so only the 4 KiB MMIO page changes.
 pub fn ensure_phys_mapped(phys_start: u64, len: u64, uncached: bool) {
     use x86_64::structures::paging::{Page, PhysFrame};
     use x86_64::structures::paging::page_table::PageTableFlags as Flags;
@@ -57,7 +61,9 @@ pub fn ensure_phys_mapped(phys_start: u64, len: u64, uncached: bool) {
     let mut phys = start;
     while phys < end {
         let virt = page_table::phys_to_virt(PhysAddr::new(phys));
-        if page_table::translate_virtual(virt).is_none() {
+        let already_mapped = page_table::translate_virtual(virt).is_some();
+
+        if !already_mapped {
             let mut flags = Flags::PRESENT | Flags::WRITABLE | Flags::NO_EXECUTE;
             if uncached {
                 flags |= Flags::NO_CACHE | Flags::WRITE_THROUGH;
@@ -75,8 +81,30 @@ pub fn ensure_phys_mapped(phys_start: u64, len: u64, uncached: bool) {
                 }
             })
             .expect("Frame allocator not initialized");
+        } else if uncached && !page_is_uncached(virt) {
+            heap::with_frame_allocator(|fa| {
+                let mut adapter = frame_allocator::BumpFrameAllocator::new(fa);
+                unsafe {
+                    page_table::set_page_uncached(virt, &mut adapter)
+                        .expect("Failed to force UC on mapped MMIO page");
+                }
+            })
+            .expect("Frame allocator not initialized");
+
+            crate::serial::write_str("[PAGING] Forced UC on pre-mapped MMIO page phys 0x");
+            crate::serial::write_hex(phys);
+            crate::serial::write_str("\n");
         }
         phys += 4096;
+    }
+}
+
+/// Whether the mapping covering `virt` already has cache-disable set
+fn page_is_uncached(virt: x86_64::VirtAddr) -> bool {
+    use x86_64::structures::paging::page_table::PageTableFlags as Flags;
+    match page_table::query_page(virt) {
+        Some(flags) => flags.contains(Flags::NO_CACHE),
+        None => false,
     }
 }
 

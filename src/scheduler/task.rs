@@ -136,14 +136,22 @@ impl TaskControlBlock {
         // so that the first context switch into this task just returns through IRETQ.
         //
         // Stack layout (from low to high addr):
+        //   [free stack space — headroom below the context]
         //   [TaskContext] ← RSP points here (context_ptr)
-        //   [unused space toward stack_top]
+        //   = stack_top (the saved RSP; IRETQ starts the task here)
+        //
+        // The context sits at the TOP of the stack, mirroring where a
+        // preempted task's saved context lives. This headroom is
+        // load-bearing: after the switch path sets RSP = context_ptr, it
+        // calls scheduler_unlock, which pushes a return address and frame
+        // BELOW context_ptr. With the context at stack_bottom those pushes
+        // would land outside the allocation and corrupt the adjacent heap
+        // object on the first switch into every new task.
         //
         // The saved RIP should point to `entry`. The saved RFLAGS should
         // have IF set so interrupts are enabled when the task runs.
-        //
-        // We place the TaskContext at the bottom of the stack area.
-        let ctx_addr = stack_bottom;
+        let ctx_addr = (stack_top - core::mem::size_of::<TaskContext>() as u64) & !0xF;
+        debug_assert!(ctx_addr >= stack_bottom);
         unsafe {
             let ctx_ptr = ctx_addr as *mut TaskContext;
             ctx_ptr.write(TaskContext {
