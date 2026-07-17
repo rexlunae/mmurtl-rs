@@ -65,10 +65,31 @@ Originally by Richard Burgess (1994):
 | Phase | What | Status |
 |-------|------|--------|
 | 1 | Boot, serial, interrupts, GDT/IDT, PIC | ✅ Done |
-| 2 | Memory management (frame allocator, paging, heap) | 🔜 |
-| 3 | Scheduler + RQB IPC (message-passing kernel) | 🌱 |
-| 4 | Drivers (keyboard, ATA, RTC) | 🌱 |
-| 5 | Userspace + syscalls | 🌱 |
+| 2 | PCI bus scanning + xHCI USB driver skeleton | ✅ Done |
+| 3 | Memory management (frame allocator, paging, heap) | 🔜 |
+| 4 | Scheduler + RQB IPC (message-passing kernel) | 🌱 |
+| 5 | Drivers (storage, network, input) | 🌱 |
+| 6 | Userspace + syscalls | 🌱 |
+
+## USB Driver (xHCI)
+
+- PCI bus scan for USB controllers (0x0C:0x03)
+- xHCI register structures: capability, operational, port, doorbell, runtime
+- Controller init + reset + start + BIOS handoff
+- Port detection and speed reporting (Low, Full, High, Super)
+- Command ring management with TRB enqueue
+- Device context structures (Slot, Endpoint, Input contexts)
+- Control transfer TRB builders (Setup, Data, Status stages)
+- HID keyboard report parsing (boot protocol)
+- HID mouse report parsing
+- USB HID usage → ASCII translation table
+- Keyboard state machine (press/release detection)
+
+**Limitations (Phase 2):**
+- Uses fixed memory addresses (0x1000/0x2000) until frame allocator is implemented
+- No event ring processing yet (command completion is assumed)
+- No interrupt-driven transfers (polling-only for now)
+- Only xHCI controllers supported (no UHCI/EHCI fallback)
 
 ## License
 

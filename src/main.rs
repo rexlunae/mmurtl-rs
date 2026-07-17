@@ -13,6 +13,8 @@ mod interrupts;
 mod memory;
 mod scheduler;
 mod ipc;
+mod pci;
+mod usb;
 
 use bootloader_api::BootInfo;
 use bootloader_api::info::Optional;
@@ -80,6 +82,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Initialize memory management
     serial::write_str("[INIT] Memory manager...\n");
     memory::init(boot_info);
+
+    // Initialize PCI and USB
+    serial::write_str("[INIT] PCI bus...\n");
+    let _devices = pci::scan();
+
+    serial::write_str("[INIT] USB subsystem...\n");
+    usb::init();
 
     // Initialize scheduler (stub)
     serial::write_str("[INIT] Scheduler...\n");
