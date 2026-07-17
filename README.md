@@ -2,7 +2,7 @@
 
 A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting x86_64 long mode.
 
-## Status: Phase 5 (APIC + SMP) Complete ✅
+## Status: Phase 6 (SMP Scheduling) Complete ✅
 
 - ✅ Bootable via BIOS (UEFI support coming)
 - ✅ Serial output on COM1 (115200 8N1)
@@ -16,6 +16,9 @@ A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting
 - ✅ Local APIC: PIT-calibrated LAPIC timer drives the 100 Hz scheduler tick
 - ✅ I/O APIC: legacy IRQ routing (keyboard) with interrupt source overrides
 - ✅ Multi-core boot: INIT-SIPI-SIPI trampoline brings all APs into long mode
+- ✅ SMP scheduling: every CPU runs the scheduler off its own LAPIC timer;
+  tasks migrate freely between cores, idle CPUs woken by reschedule IPIs
+- ✅ Per-CPU GDT/TSS with dedicated double-fault IST stacks on every core
 
 ## Building
 
@@ -77,8 +80,8 @@ Originally by Richard Burgess (1994):
 | 3 | Physical frame allocator, paging, kernel heap | ✅ Done |
 | 4 | Scheduler + RQB IPC (message-passing kernel) | ✅ Done |
 | 5 | Local APIC, I/O APIC, multi-core boot (SMP) | ✅ Done |
-| 6 | SMP scheduling (per-CPU run queues, IPI reschedule) | 🔜 |
-| 7 | Drivers (storage, network, input) | 🌱 |
+| 6 | SMP scheduling (all CPUs schedule, IPI reschedule) | ✅ Done |
+| 7 | Drivers (storage, network, input) | 🔜 |
 | 8 | Userspace + syscalls | 🌱 |
 
 ## Memory Management (Phase 3)
@@ -154,6 +157,40 @@ Boot output with `-smp 4`:
 [SMP] Starting CPU 3 (APIC ID 3)...
 [SMP] CPU 3 online (APIC ID 3)
 [SMP] 4 CPU(s) online
+```
+
+## SMP Scheduling (Phase 6)
+
+Every online CPU runs the scheduler:
+
+- **One global run queue**, spinlock-protected; each CPU's LAPIC timer fires
+  at 100 Hz and enters `schedule_and_switch`. Unpinned tasks migrate freely
+  between cores; a global round-robin cursor spreads them out.
+- **Per-CPU idle tasks by adoption** — each CPU's boot/park HLT loop is
+  adopted into the task list as that CPU's pinned idle task, so there is
+  always something to switch to.
+- **Race-free context switch**: the scheduler lock is held *across* the
+  stack switch (released from the timer asm only after RSP points at the
+  new task's stack), so another CPU can never resume a task whose old
+  stack is still in use.
+- **Reschedule IPIs** (vector 0x30): creating a task kicks an idle CPU so
+  the work starts immediately instead of waiting for its next tick.
+- **Per-CPU GDT/TSS**: each AP gets its own GDT, TSS, and double-fault IST
+  stack (a TSS cannot be shared — `ltr` marks the descriptor busy).
+- **Interrupt-safe serial**: the serial lock is taken with interrupts
+  disabled, so a printing task can't be preempted while holding it (which
+  could deadlock a printing interrupt handler on the same CPU).
+
+Demo output with `-smp 4` — six workers migrating across four cores:
+```
+[T5 on CPU1] count=0
+[T6 on CPU3] count=0
+[T7 on CPU0] count=0
+[T8 on CPU2] count=0
+[T5 on CPU1] count=1
+[T5 on CPU0] count=2      ← task 5 migrated from CPU1 to CPU0
+[T9 on CPU3] count=1
+[T10 on CPU2] count=1
 ```
 
 ## USB Driver (xHCI)

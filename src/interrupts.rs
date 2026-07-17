@@ -262,9 +262,15 @@ core::arch::global_asm!(
     "mov rdi, rsp",
     // Call the Rust scheduler — returns new RSP in RAX.
     // (EOI is sent inside schedule_and_switch, APIC- or PIC-appropriate.)
+    // NOTE: schedule_and_switch returns with the scheduler lock still
+    // held, so no other CPU can resume the outgoing task while we are
+    // still executing on its stack.
     "call schedule_and_switch",
     // Switch to the new task's stack
     "mov rsp, rax",
+    // Now that we're off the old task's stack, release the scheduler lock
+    // (clobbers caller-saved registers — fine, we restore from the stack)
+    "call scheduler_unlock",
     // Restore registers
     "pop r15",
     "pop r14",
@@ -346,6 +352,10 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     // Hardware interrupts
     unsafe {
         idt[InterruptIndex::Timer.as_usize()].set_handler_addr(
+            x86_64::VirtAddr::new(timer_handler as usize as u64)
+        );
+        // Reschedule IPI — identical save/schedule/restore flow
+        idt[crate::apic::RESCHED_VECTOR as usize].set_handler_addr(
             x86_64::VirtAddr::new(timer_handler as usize as u64)
         );
     }

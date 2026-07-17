@@ -22,6 +22,8 @@ use x86_64::PhysAddr;
 pub const TIMER_VECTOR: u8 = crate::interrupts::PIC_1_OFFSET;
 /// Keyboard, routed through the I/O APIC (GSI 1 on QEMU/ISA)
 pub const KEYBOARD_VECTOR: u8 = crate::interrupts::PIC_1_OFFSET + 1;
+/// Reschedule IPI — kicks a CPU into the scheduler immediately
+pub const RESCHED_VECTOR: u8 = 0x30;
 /// LAPIC error interrupt
 pub const ERROR_VECTOR: u8 = 0xFE;
 /// Spurious interrupt vector (low nibble must be 0xF on some CPUs)
@@ -270,6 +272,16 @@ pub fn send_init(apic_id: u32) {
         reg_write(LAPIC_ICR_HIGH, apic_id << 24);
         // Delivery mode INIT (101), level assert, edge trigger
         reg_write(LAPIC_ICR_LOW, 0x0000_4500);
+        icr_wait();
+    }
+}
+
+/// Send a fixed-delivery IPI to the target APIC ID
+pub fn send_ipi(apic_id: u32, vector: u8) {
+    unsafe {
+        reg_write(LAPIC_ICR_HIGH, apic_id << 24);
+        // Fixed delivery, physical destination, assert
+        reg_write(LAPIC_ICR_LOW, 0x0000_4000 | vector as u32);
         icr_wait();
     }
 }
