@@ -53,6 +53,24 @@ pub struct Selectors {
     pub tss_entry: SegmentSelector,
 }
 
+/// Initialize the GDT on an application processor.
+///
+/// Loads the shared kernel GDT and segment registers but skips `ltr`: the
+/// TSS descriptor was marked busy when the BSP loaded it, and a second
+/// `ltr` of a busy TSS faults. Per-CPU TSSes come later with per-CPU IST
+/// stacks.
+pub fn init_ap() {
+    use x86_64::instructions::segmentation::{CS, DS, ES, SS, Segment};
+
+    GDT.gdt.load();
+    unsafe {
+        CS::set_reg(GDT.selectors.kernel_code);
+        SS::set_reg(GDT.selectors.kernel_data);
+        DS::set_reg(GDT.selectors.kernel_data);
+        ES::set_reg(GDT.selectors.kernel_data);
+    }
+}
+
 /// Initialize the GDT — call once at boot
 pub fn init() {
     use x86_64::instructions::segmentation::{CS, Segment};

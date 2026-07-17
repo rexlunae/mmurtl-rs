@@ -86,8 +86,12 @@ impl Scheduler {
         crate::serial::write_str(")\n");
         self.tasks.push(idle_task);
 
-        // Initialize PIT for timer interrupts
-        self.init_pit();
+        // Start the tick source: LAPIC timer in APIC mode, PIT otherwise
+        if crate::apic::enabled() {
+            crate::apic::start_timer(SCHEDULER_FREQUENCY_HZ);
+        } else {
+            self.init_pit();
+        }
 
         crate::serial::write_str("[SCHED] Scheduler ready: ");
         crate::serial::write_dec(MAX_TASKS as u64);
@@ -313,16 +317,17 @@ pub fn init() {
     let mut sched = SCHEDULER.lock();
     sched.init();
 
-    // Unmask the timer IRQ in the PIC
-    unsafe {
-        let mut pic1_data: x86_64::instructions::port::Port<u8> =
-            x86_64::instructions::port::Port::new(0x21);
-        // Clear bit 0 (IRQ0 timer) to unmask it
-        let mask = pic1_data.read();
-        pic1_data.write(mask & !0x01);
+    if !crate::apic::enabled() {
+        // Legacy mode: unmask the timer IRQ in the PIC
+        unsafe {
+            let mut pic1_data: x86_64::instructions::port::Port<u8> =
+                x86_64::instructions::port::Port::new(0x21);
+            // Clear bit 0 (IRQ0 timer) to unmask it
+            let mask = pic1_data.read();
+            pic1_data.write(mask & !0x01);
+        }
+        crate::serial::write_str("[PIC] Timer IRQ0 unmasked\n");
     }
-
-    crate::serial::write_str("[PIC] Timer IRQ0 unmasked\n");
 }
 
 /// Called from the timer interrupt's naked handler to perform scheduling.
@@ -332,6 +337,9 @@ pub fn init() {
 /// with RSP pointing to a valid TaskContext on the current task's stack.
 #[no_mangle]
 pub unsafe extern "C" fn schedule_and_switch(current_rsp: u64) -> u64 {
+    // Acknowledge the timer interrupt (LAPIC EOI in APIC mode, PIC otherwise)
+    crate::interrupts::irq_eoi(0);
+
     let mut sched = SCHEDULER.lock();
     sched.on_tick(current_rsp)
 }
