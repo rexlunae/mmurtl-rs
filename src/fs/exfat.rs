@@ -969,9 +969,23 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<(), &'static str> {
     create_file(path, data)
 }
 
-/// Append `data` to `path`, creating it if absent
+/// Append `data` to `path`, creating it if absent.
+///
+/// "File absent" and "file unreadable" are deliberately distinct here: if
+/// the file exists but its contents can't be read (transient I/O error),
+/// appending must fail rather than silently rewrite the file with only
+/// the new bytes.
 pub fn append_file(path: &str, data: &[u8]) -> Result<(), &'static str> {
-    let mut combined = read_file(path).unwrap_or_default();
+    let existing = {
+        let guard = VOLUME.lock();
+        let vol = guard.as_ref().ok_or("not mounted")?;
+        match lookup(vol, path) {
+            Some((_, f)) if f.is_dir() => return Err("is a directory"),
+            Some((_, f)) => Some(read_file_inner(vol, &f).ok_or("read failed")?),
+            None => None,
+        }
+    };
+    let mut combined = existing.unwrap_or_default();
     combined.extend_from_slice(data);
     write_file(path, &combined)
 }
