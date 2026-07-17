@@ -23,8 +23,9 @@ A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting
 - ✅ Storage: virtio-blk driver with sector read/write (verified end-to-end)
 - ✅ Network: virtio-net driver with a live ARP round trip through QEMU user-net
 - ✅ Input: PS/2 keyboard driver — scancode set 1 → ASCII with shift, char queue
-- ✅ Filesystem: exFAT (mount, list, read, create) — interoperable with Linux
-  in both directions, `fsck.exfat`-clean after kernel writes
+- ✅ Filesystem: exFAT — full API: subdirectories, mkdir, create, read,
+  overwrite, append, delete; interoperable with Linux in both directions,
+  `fsck.exfat`-clean after kernel writes
 
 ## Building
 
@@ -96,7 +97,7 @@ Originally by Richard Burgess (1994):
 | 5 | Local APIC, I/O APIC, multi-core boot (SMP) | ✅ Done |
 | 6 | SMP scheduling (all CPUs schedule, IPI reschedule) | ✅ Done |
 | 7 | Drivers: virtio-blk, virtio-net, PS/2 keyboard | ✅ Done |
-| 8 | exFAT filesystem (read + create, Linux-interoperable) | ✅ Done |
+| 8 | exFAT filesystem (full read/write API, Linux-interoperable) | ✅ Done |
 | 9 | Real RQB IPC (blocking send/receive/reply) | 🔜 |
 | 10 | Userspace + syscalls | 🌱 |
 
@@ -251,24 +252,31 @@ exFAT specification, on top of the virtio-blk driver:
 - **Mount**: boot sector parse (FAT offset, cluster heap, root directory),
   allocation bitmap + volume label discovery from the root directory
 - **Read**: directory entry sets (File 0x85 + Stream 0xC0 + FileName 0xC1),
-  FAT cluster chains *and* the NoFatChain contiguous fast path
-- **Create**: contiguous NoFatChain allocation from the allocation bitmap,
-  directory entry sets with correct rotate-right set checksums, up-cased
-  name hashes, and exFAT timestamps
+  FAT cluster chains *and* the NoFatChain contiguous fast path, path
+  traversal through subdirectories
+- **Write API**: `create_file`, `write_file` (overwrite + cluster
+  realloc), `append_file`, `delete` (files and empty directories, with
+  bitmap + FAT cleanup), `mkdir` — entry sets carry correct rotate-right
+  checksums, up-cased name hashes, and exFAT timestamps
+- **Directory management**: reuses runs of deleted entries, appends at the
+  end marker, and grows the root directory by extending its FAT chain
 
 Verified end to end against the reference implementations:
 ```
-[FS] exFAT mounted: label "MMURTL", 3584 clusters x 4 KiB, root @ cluster 5
-[FS]   README.TXT  (55 bytes)          ← written by Linux, read by MMURTL/RS
-[FS] Created MMURTL.TXT (108 bytes), read-back verified
+[FS] HOST_DIR/HELLO.TXT: Nested file seeded by the host.
+[FS] mkdir DOCS: created
+[FS] DOCS/BOOTLOG.TXT now records 3 boot(s)      ← appends once per boot
+[FS] create+delete TEMP.TXT: OK (gone after delete)
+[FS] overwrite DOCS/OVERWRITE.TXT: verified
+[FS] stress: 50 creates (root dir grown) + 50 deletes OK
 ```
-- `fsck.exfat` reports the volume **clean** after kernel writes
-- Linux mounts the image and reads `MMURTL.TXT` — content, size, and
-  timestamps all intact
-- A second kernel boot finds and reads the file it created (persistence)
+- `fsck.exfat` reports the volume **clean** after every boot's mutations
+- Linux mounts the image: `DOCS/BOOTLOG.TXT` shows one line per kernel
+  boot, the deleted file is gone, timestamps and sizes intact
 
-Current limitations: root-directory files only, ASCII names, no
-delete/rename/append, 512-byte sectors.
+Current limitations: ASCII names (≤ 255 chars), no rename, overwrites
+reallocate contiguously, non-root directories have fixed capacity,
+512-byte sectors.
 
 ## USB Driver (xHCI)
 
