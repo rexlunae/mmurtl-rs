@@ -2,7 +2,7 @@
 
 A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting x86_64 long mode.
 
-## Status: Phase 8 (exFAT Filesystem) Complete ✅
+## Status: Phase 9 (Blocking RQB IPC) Complete ✅
 
 - ✅ Bootable via BIOS (UEFI support coming)
 - ✅ Serial output on COM1 (115200 8N1)
@@ -26,6 +26,9 @@ A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting
 - ✅ Filesystem: exFAT — full API: subdirectories, mkdir, create, read,
   overwrite, append, delete; interoperable with Linux in both directions,
   `fsck.exfat`-clean after kernel writes
+- ✅ IPC: blocking RQB message passing — `send_rqb` / `receive_rqb` /
+  `reply_rqb` with per-task inboxes, a service name registry, and real
+  blocking (`sleep_ms`, voluntary yield) instead of busy-waiting
 
 ## Building
 
@@ -98,7 +101,7 @@ Originally by Richard Burgess (1994):
 | 6 | SMP scheduling (all CPUs schedule, IPI reschedule) | ✅ Done |
 | 7 | Drivers: virtio-blk, virtio-net, PS/2 keyboard | ✅ Done |
 | 8 | exFAT filesystem (full read/write API, Linux-interoperable) | ✅ Done |
-| 9 | Real RQB IPC (blocking send/receive/reply) | 🔜 |
+| 9 | Real RQB IPC (blocking send/receive/reply) | ✅ Done |
 | 10 | Userspace + syscalls | 🌱 |
 
 ## Memory Management (Phase 3)
@@ -277,6 +280,59 @@ Verified end to end against the reference implementations:
 Current limitations: ASCII names (≤ 255 chars), no rename, overwrites
 reallocate contiguously, non-root directories have fixed capacity,
 512-byte sectors.
+
+## Blocking RQB IPC (Phase 9)
+
+MMURTL's defining feature — synchronous Request/Respond message passing —
+implemented as real task-state transitions in the SMP scheduler:
+
+| Primitive | Behavior |
+|---|---|
+| `send_rqb(tid, &mut rqb)` | copies the request into the receiver's inbox, blocks the sender (`WaitingReply`) until the reply lands in its reply slot; returns the reply's status |
+| `receive_rqb()` | pops the oldest pending request, blocking (`WaitingRqb`) while the inbox is empty |
+| `reply_rqb(sender, &rqb)` | fills the blocked sender's reply slot and makes it Ready |
+| `sleep_ms(ms)` | blocks against the system clock (CPU 0's tick) |
+| `ipc::register_service` / `lookup_service` | MMURTL-style named services |
+
+Blocked tasks consume no CPU. Every blocking primitive gives up the CPU
+through a **voluntary-yield vector** (0x31) that shares the timer's
+save/switch path but sends no EOI.
+
+Correctness under SMP:
+- **`on_cpu` guard**: a task can be woken (e.g. by a reply on another
+  core) while it is still executing on its way into a yield. The scheduler
+  never picks a task that is still on a CPU, so its stale saved context
+  can't be resumed twice.
+- **Lost-wakeup free**: "check inbox / reply slot, else block" happens
+  under the scheduler lock, and the matching send/reply also runs under it.
+- **Failure is explicit, never a hang**: sending to an unknown or exited
+  task → `NotFound`; to itself → `InvalidParam`; to a full inbox →
+  `Busy`; and a receiver that exits fails every request it still owes
+  with `Aborted`.
+- **Wakeups spread across cores**: when a tick wakes several sleepers,
+  idle CPUs are kicked with reschedule IPIs.
+
+Boot demo (`-smp 4`) — a text service, three concurrent clients, and an
+error-path checker:
+```
+[IPC] client T10 (CPU0): 5/5 round trips verified, last reply "T10 MSG 4"
+[IPC] client T11 (CPU0): 5/5 round trips verified, last reply "T11 MSG 4"
+[IPC] client T12 (CPU1): 5/5 round trips verified, last reply "T12 MSG 4"
+[IPC] Error-path checks:
+[IPC]   send to self                       -> InvalidParam ✓
+[IPC]   send to unknown task               -> NotFound ✓
+[IPC]   unknown service code               -> InvalidService ✓
+[IPC]   reply to a non-waiting task        -> InvalidParam ✓
+[IPC]   sleep_ms(250)                      -> 250 ms ✓
+[IPC] textsvc: served 16 requests, shutting down
+[IPC]   receiver exits before replying     -> Aborted ✓
+[IPC]   send to exited task                -> NotFound ✓
+[IPC] ✓ All IPC checks passed
+```
+Verified at `-smp 1`, `2`, and `4`, and across six concurrent 4-CPU boots.
+
+Limitations: no send timeouts, exited tasks' stacks are not reclaimed
+yet, and the service registry is a flat list.
 
 ## USB Driver (xHCI)
 

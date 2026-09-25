@@ -5,7 +5,10 @@
 //! tasks by swapping RSP and the saved register context.
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use core::fmt;
+
+use super::rqb::Rqb;
 
 // ========================================================================
 // Task States
@@ -19,7 +22,7 @@ pub enum TaskState {
     Ready = 0,
     /// Task is currently running
     Running = 1,
-    /// Task is waiting for an RQB reply
+    /// Task is blocked in `receive`, waiting for a message to arrive
     WaitingRqb = 2,
     /// Task is waiting for a specific amount of time
     Sleeping = 3,
@@ -27,6 +30,8 @@ pub enum TaskState {
     Exited = 4,
     /// Task is blocked on a resource
     Blocked = 5,
+    /// Task sent a request and is blocked until the receiver replies
+    WaitingReply = 6,
 }
 
 impl TaskState {
@@ -109,6 +114,21 @@ pub struct TaskControlBlock {
     /// If set, this task may only run on the given CPU (used for per-CPU
     /// idle tasks). None = may run anywhere.
     pub pinned_cpu: Option<u8>,
+    /// CPU this task is executing on right now, or None when its context
+    /// is saved. A task can be made Ready (by a reply/wakeup) while it is
+    /// still executing on the way into a yield — the scheduler must not
+    /// resume its stale saved context on another CPU until it has been
+    /// switched out, so tasks with `on_cpu.is_some()` are never picked.
+    pub on_cpu: Option<u8>,
+    /// Pending requests sent to this task (delivered by `receive`)
+    pub inbox: VecDeque<Rqb>,
+    /// Reply slot, filled by the receiver's `reply` while we are in
+    /// WaitingReply
+    pub reply: Option<Rqb>,
+    /// Task ID we are blocked on while in WaitingReply
+    pub wait_for: u32,
+    /// Jiffy at which a Sleeping task becomes Ready again
+    pub wake_tick: u64,
 }
 
 impl TaskControlBlock {
@@ -188,6 +208,11 @@ impl TaskControlBlock {
             name,
             total_ticks: 0,
             pinned_cpu: None,
+            on_cpu: None,
+            inbox: VecDeque::new(),
+            reply: None,
+            wait_for: 0,
+            wake_tick: 0,
         })
     }
 
@@ -207,6 +232,11 @@ impl TaskControlBlock {
             name,
             total_ticks: 0,
             pinned_cpu: Some(cpu),
+            on_cpu: Some(cpu),
+            inbox: VecDeque::new(),
+            reply: None,
+            wait_for: 0,
+            wake_tick: 0,
         })
     }
 }
@@ -228,11 +258,12 @@ pub extern "C" fn task_wrapper(entry: extern "C" fn() -> !) -> ! {
     entry()
 }
 
-/// Current task exit — called when a task function returns or voluntarily exits
-pub fn exit_current() {
-    crate::serial::write_str("[SCHED] Task exited\n");
+/// Current task exit — called when a task function returns or voluntarily
+/// exits. Never returns: the task is marked Exited (waking anyone blocked
+/// on it) and yields; the scheduler never picks an Exited task again.
+pub fn exit_current() -> ! {
     crate::scheduler::mark_current_exited();
     loop {
-        x86_64::instructions::hlt();
+        crate::scheduler::yield_now();
     }
 }

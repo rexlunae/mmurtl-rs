@@ -266,6 +266,8 @@ core::arch::global_asm!(
     // held, so no other CPU can resume the outgoing task while we are
     // still executing on its stack.
     "call schedule_and_switch",
+    // Shared tail with yield_handler: switch stacks, unlock, restore
+    "context_switch_tail:",
     // Switch to the new task's stack
     "mov rsp, rax",
     // Now that we're off the old task's stack, release the scheduler lock
@@ -288,7 +290,31 @@ core::arch::global_asm!(
     "pop rcx",
     "pop rax",
     // Return to the next task
-    "iretq"
+    "iretq",
+
+    // Voluntary yield (int YIELD_VECTOR): identical context save, but
+    // calls yield_and_switch (no EOI — nothing to acknowledge) and then
+    // shares the switch/unlock/restore tail above.
+    ".globl yield_handler",
+    "yield_handler:",
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push rbx",
+    "push rbp",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    "mov rdi, rsp",
+    "call yield_and_switch",
+    "jmp context_switch_tail"
 );
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
@@ -320,6 +346,7 @@ extern "x86-interrupt" fn apic_error_handler(_stack_frame: InterruptStackFrame) 
 /// Timer handler — defined in global_asm above
 extern "C" {
     fn timer_handler();
+    fn yield_handler();
 }
 
 /// The IDT — initialized once at boot
@@ -355,6 +382,10 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
         // Reschedule IPI — identical save/schedule/restore flow
         idt[crate::apic::RESCHED_VECTOR as usize].set_handler_addr(
             x86_64::VirtAddr::new(timer_handler as usize as u64)
+        );
+        // Voluntary yield (blocking IPC, sleep, exit)
+        idt[crate::scheduler::YIELD_VECTOR as usize].set_handler_addr(
+            x86_64::VirtAddr::new(yield_handler as usize as u64)
         );
     }
     idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_handler);
