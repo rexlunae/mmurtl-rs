@@ -114,7 +114,37 @@ impl InterruptIndex {
 // All handlers use `extern "x86-interrupt"` calling convention
 // ========================================================================
 
+/// Whether an exception was raised by ring-3 code
+fn from_user(frame: &InterruptStackFrame) -> bool {
+    frame.code_segment & 3 == 3
+}
+
+/// A fault in user code is the task's problem, not the kernel's: report
+/// it, kill the task (waking anyone blocked on it), and switch away for
+/// good. Never returns.
+fn kill_user_task(frame: &InterruptStackFrame, what: &str, addr: Option<u64>) -> ! {
+    use core::fmt::Write;
+    let mut line: heapless::String<160> = heapless::String::new();
+    let _ = write!(
+        line,
+        "[USER] T{} \"{}\" killed: {} at rip=0x{:x}",
+        crate::scheduler::current_task_id(),
+        crate::scheduler::current_task_name(),
+        what,
+        frame.instruction_pointer.as_u64()
+    );
+    if let Some(a) = addr {
+        let _ = write!(line, ", addr=0x{:x}", a);
+    }
+    let _ = line.push('\n');
+    crate::serial::write_str(&line);
+    crate::scheduler::exit_current();
+}
+
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
+    if from_user(&stack_frame) {
+        kill_user_task(&stack_frame, "#DE divide error", None);
+    }
     panic!("DIVIDE ERROR\n{:#?}", stack_frame);
 }
 
@@ -141,6 +171,9 @@ extern "x86-interrupt" fn bound_range_handler(stack_frame: InterruptStackFrame) 
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    if from_user(&stack_frame) {
+        kill_user_task(&stack_frame, "#UD invalid opcode", None);
+    }
     panic!("INVALID OPCODE\n{:#?}", stack_frame);
 }
 
@@ -173,6 +206,9 @@ extern "x86-interrupt" fn stack_segment_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    if from_user(&stack_frame) {
+        kill_user_task(&stack_frame, "#SS stack fault", None);
+    }
     panic!("STACK SEGMENT FAULT error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
 
@@ -180,15 +216,27 @@ extern "x86-interrupt" fn general_protection_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    if from_user(&stack_frame) {
+        kill_user_task(&stack_frame, "#GP general protection fault", None);
+    }
     panic!("GENERAL PROTECTION FAULT error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
 
 extern "x86-interrupt" fn page_fault_handler(
-    _stack_frame: InterruptStackFrame,
+    stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
     let address = Cr2::read();
+
+    if from_user(&stack_frame) {
+        let what = if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+            "#PF protection violation"
+        } else {
+            "#PF not-present page"
+        };
+        kill_user_task(&stack_frame, what, Some(address.as_u64()));
+    }
 
     crate::serial::write_str("\n[PAGE FAULT]\n");
     crate::serial::write_str("  Address: 0x");
@@ -266,6 +314,8 @@ core::arch::global_asm!(
     // held, so no other CPU can resume the outgoing task while we are
     // still executing on its stack.
     "call schedule_and_switch",
+    // Shared tail with yield_handler: switch stacks, unlock, restore
+    "context_switch_tail:",
     // Switch to the new task's stack
     "mov rsp, rax",
     // Now that we're off the old task's stack, release the scheduler lock
@@ -288,7 +338,31 @@ core::arch::global_asm!(
     "pop rcx",
     "pop rax",
     // Return to the next task
-    "iretq"
+    "iretq",
+
+    // Voluntary yield (int YIELD_VECTOR): identical context save, but
+    // calls yield_and_switch (no EOI — nothing to acknowledge) and then
+    // shares the switch/unlock/restore tail above.
+    ".globl yield_handler",
+    "yield_handler:",
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push rbx",
+    "push rbp",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    "mov rdi, rsp",
+    "call yield_and_switch",
+    "jmp context_switch_tail"
 );
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
@@ -320,6 +394,7 @@ extern "x86-interrupt" fn apic_error_handler(_stack_frame: InterruptStackFrame) 
 /// Timer handler — defined in global_asm above
 extern "C" {
     fn timer_handler();
+    fn yield_handler();
 }
 
 /// The IDT — initialized once at boot
@@ -356,6 +431,14 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
         idt[crate::apic::RESCHED_VECTOR as usize].set_handler_addr(
             x86_64::VirtAddr::new(timer_handler as usize as u64)
         );
+        // Voluntary yield (blocking IPC, sleep, exit) — kernel only (DPL 0)
+        idt[crate::scheduler::YIELD_VECTOR as usize].set_handler_addr(
+            x86_64::VirtAddr::new(yield_handler as usize as u64)
+        );
+        // Syscalls — the only gate ring 3 may invoke (DPL 3)
+        idt[crate::syscall::SYSCALL_VECTOR as usize]
+            .set_handler_addr(x86_64::VirtAddr::new(crate::syscall::entry_address()))
+            .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
     }
     idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_handler);
 

@@ -23,6 +23,11 @@ const HEAP_START: u64 = 0xFFFF_9000_0000_0000;
 /// Global frame allocator pointer — set once during memory init
 static mut FRAME_ALLOC_PTR: *mut frame_allocator::FrameAllocator = core::ptr::null_mut();
 
+/// Serializes every use of the frame allocator across CPUs. Always taken
+/// with interrupts disabled. Closures run under it must not allocate from
+/// the kernel heap (heap growth takes this lock too).
+static FRAME_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 /// Set the global frame allocator reference (called during memory init)
 pub unsafe fn set_frame_allocator(fa: *mut frame_allocator::FrameAllocator) {
     FRAME_ALLOC_PTR = fa;
@@ -30,20 +35,23 @@ pub unsafe fn set_frame_allocator(fa: *mut frame_allocator::FrameAllocator) {
 
 /// Run a closure with mutable access to the global frame allocator.
 ///
-/// Returns None if memory management is not yet initialized. Callers must
-/// run with interrupts disabled or during single-threaded init (the frame
-/// allocator itself is not locked).
+/// Returns None if memory management is not yet initialized. Safe to call
+/// from any CPU: access is serialized by FRAME_LOCK (interrupts disabled
+/// while held). The closure must not allocate from the kernel heap.
 pub fn with_frame_allocator<R>(
     f: impl FnOnce(&mut frame_allocator::FrameAllocator) -> R,
 ) -> Option<R> {
-    unsafe {
-        let ptr = FRAME_ALLOC_PTR;
-        if ptr.is_null() {
-            None
-        } else {
-            Some(f(&mut *ptr))
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let _guard = FRAME_LOCK.lock();
+        unsafe {
+            let ptr = FRAME_ALLOC_PTR;
+            if ptr.is_null() {
+                None
+            } else {
+                Some(f(&mut *ptr))
+            }
         }
-    }
+    })
 }
 
 // ========================================================================
@@ -126,29 +134,40 @@ impl BumpAllocator {
                 continue;
             }
 
-            // Need to extend — grab the frame allocator (single-core OK)
-            unsafe {
-                let fa = FRAME_ALLOC_PTR;
-                if fa.is_null() {
-                    return core::ptr::null_mut();
+            // Need to extend. Two CPUs can get here at once, so extension
+            // happens under FRAME_LOCK, and only if nobody else extended
+            // the heap since we sampled heap_end (otherwise just retry).
+            let extended = x86_64::instructions::interrupts::without_interrupts(|| {
+                let _guard = FRAME_LOCK.lock();
+                if self.heap_end.load(Ordering::Acquire) != heap_end {
+                    return Some(0); // raced: someone else grew the heap
                 }
-                let fa = &mut *fa;
+                unsafe {
+                    let fa = FRAME_ALLOC_PTR;
+                    if fa.is_null() {
+                        return None;
+                    }
+                    let fa = &mut *fa;
 
-                // Calculate how many pages we need
-                let needed = new_free - current;
-                let total_extend = ((needed + (512 * FRAME_SIZE as usize) - 1) / (512 * FRAME_SIZE as usize))
-                    * (512 * FRAME_SIZE as usize);
+                    // Calculate how many pages we need
+                    let needed = new_free - current;
+                    let total_extend = ((needed + (512 * FRAME_SIZE as usize) - 1)
+                        / (512 * FRAME_SIZE as usize))
+                        * (512 * FRAME_SIZE as usize);
 
-                let old_end = heap_end;
-                let new_end = old_end + total_extend;
-
-                crate::serial::write_str("[HEAP] Extending by ");
-                crate::serial::write_dec((total_extend / 1024) as u64);
-                crate::serial::write_str(" KiB\n");
-
-                map_pages(old_end as u64, total_extend as u64, fa);
-
-                self.heap_end.store(new_end, Ordering::SeqCst);
+                    map_pages(heap_end as u64, total_extend as u64, fa);
+                    self.heap_end.store(heap_end + total_extend, Ordering::SeqCst);
+                    Some(total_extend)
+                }
+            });
+            match extended {
+                None => return core::ptr::null_mut(),
+                Some(0) => {}
+                Some(bytes) => {
+                    crate::serial::write_str("[HEAP] Extended by ");
+                    crate::serial::write_dec((bytes / 1024) as u64);
+                    crate::serial::write_str(" KiB\n");
+                }
             }
             // Loop back and retry the allocation
         }

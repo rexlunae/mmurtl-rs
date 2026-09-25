@@ -278,12 +278,15 @@ pub fn send_init(apic_id: u32) {
 
 /// Send a fixed-delivery IPI to the target APIC ID
 pub fn send_ipi(apic_id: u32, vector: u8) {
-    unsafe {
+    // The ICR_HIGH/ICR_LOW pair must not be split by an interrupt on this
+    // CPU: the scheduler also sends IPIs from interrupt context, and would
+    // overwrite the destination between our two writes.
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
         reg_write(LAPIC_ICR_HIGH, apic_id << 24);
         // Fixed delivery, physical destination, assert
         reg_write(LAPIC_ICR_LOW, 0x0000_4000 | vector as u32);
         icr_wait();
-    }
+    });
 }
 
 /// Send a Startup IPI to the target APIC ID.

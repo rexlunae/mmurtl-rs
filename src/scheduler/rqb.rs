@@ -1,11 +1,10 @@
 //! RQB (Request Block) — Message-passing IPC for MMURTL/RS.
 //!
-//! RQBs are fixed-size messages (128 bytes) that tasks exchange for IPC.
-//! The core primitives are:
-//!   - SendRQB(to_task, rqb) — send a message and block until reply
-//!   - WaitRQB() — wait for a message
-//!   - SendRQBWait(to_task, rqb) — send then wait (for request-response pairs)
-//!   - ReplyRQB(from_task, rqb) — reply to a waiting sender
+//! RQBs are fixed-size messages that tasks exchange for IPC. The blocking
+//! primitives live in the scheduler (they need its task states):
+//!   - `send_rqb(to, &mut rqb)` — queue a request, block until the reply
+//!   - `receive_rqb()` — block until a request arrives
+//!   - `reply_rqb(sender, &rqb)` — answer a sender blocked in send_rqb
 //!
 //! This is the heart of MMURTL's IPC model. Everything is message-passing.
 
@@ -147,41 +146,9 @@ pub const SVC_CONSOLE_READ: RqbServiceCode = 0x0101;
 pub const SVC_MEM_ALLOC: RqbServiceCode = 0x0200;
 /// Memory service: free memory
 pub const SVC_MEM_FREE: RqbServiceCode = 0x0201;
-
-// ========================================================================
-// IPC Primitives (called by tasks, executed by kernel)
-// ========================================================================
-
-/// Send a message to another task and wait for a reply.
-///
-/// Returns the reply status. The caller's RQB is overwritten with the reply.
-/// The calling task blocks until the receiver replies.
-pub fn send_rqb(receiver_id: u32, rqb: &mut Rqb) -> RqbStatus {
-    rqb.sender_id = crate::scheduler::current_task_id();
-
-    // In MMURTL, the kernel copies the RQB to the receiver and blocks the sender.
-    // For now, our scheduler manages this.
-    crate::scheduler::send_message(receiver_id, rqb);
-
-    // After the receiver replies, the scheduler wakes us and copies the reply back.
-    // (The actual blocking happens inside send_message)
-    crate::scheduler::current_rqb_status()
-}
-
-/// Wait to receive a message from another task.
-///
-/// Blocks the current task until a message arrives.
-/// The received RQB is written to the provided buffer.
-pub fn wait_rqb(rqb: &mut Rqb) {
-    crate::scheduler::receive_message(rqb);
-}
-
-/// Send a message and immediately wait for a reply (convenience for RPC).
-pub fn send_rqb_wait(receiver_id: u32, rqb: &mut Rqb) -> RqbStatus {
-    send_rqb(receiver_id, rqb)
-}
-
-/// Reply to a sender with a response RQB.
-pub fn reply_rqb(sender_id: u32, rqb: &Rqb) {
-    crate::scheduler::reply_message(sender_id, rqb);
-}
+/// Demo text service: upper-case the payload
+pub const SVC_TEXT_UPPER: RqbServiceCode = 0x0300;
+/// Demo text service: reverse the payload
+pub const SVC_TEXT_REVERSE: RqbServiceCode = 0x0301;
+/// Demo text service: shut the service down (exits without replying)
+pub const SVC_TEXT_SHUTDOWN: RqbServiceCode = 0x03FF;

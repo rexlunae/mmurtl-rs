@@ -23,6 +23,8 @@ mod smp;
 mod virtio;
 mod keyboard;
 mod fs;
+mod syscall;
+mod userspace;
 
 use bootloader_api::BootInfo;
 use bootloader_api::info::Optional;
@@ -135,7 +137,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::write_str("[TEST] exFAT filesystem...\n");
     fs::exfat::demo();
 
-    // Initialize IPC (stub)
+    // Initialize IPC (blocking RQB message passing)
     serial::write_str("[INIT] IPC subsystem...\n");
     ipc::init();
 
@@ -177,9 +179,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // start running these immediately, even before the BSP enables
     // interrupts for itself
     serial::write_str("[SCHED] Creating demo worker tasks...\n");
-    for _ in 0..6 {
+    for _ in 0..4 {
         scheduler::create_task(worker_task, scheduler::PRIORITY_DEFAULT, "worker");
     }
+    // RQB IPC demo: a text service, concurrent clients, error-path checks
+    serial::write_str("[IPC] Starting IPC demo tasks...\n");
+    ipc::demo();
+
+    // Userspace: ring-3 programs talking to the kernel via int 0x80
+    syscall::init();
+    serial::write_str("[USER] Loading ring-3 programs...\n");
+    userspace::demo();
     // Keyboard echo task — consumes the keyboard driver's char queue
     scheduler::create_task(kbd_echo_task, scheduler::PRIORITY_DEFAULT, "kbd_echo");
 
@@ -215,10 +225,12 @@ extern "C" fn worker_task() -> ! {
         serial::write_str(&line);
         count += 1;
 
-        // Busy-wait to eat up our time slice
-        for _ in 0..5000000 {
+        // Burn part of a time slice (so preemption + migration still
+        // show), then block — sleeping tasks cost no CPU
+        for _ in 0..2000000 {
             core::hint::spin_loop();
         }
+        scheduler::sleep_ms(1000);
     }
 }
 
@@ -238,10 +250,8 @@ extern "C" fn kbd_echo_task() -> ! {
             }
             serial::write_str(&line);
         }
-        // Nothing pending — let the time slice go by
-        for _ in 0..100000 {
-            core::hint::spin_loop();
-        }
+        // Nothing pending — block briefly instead of spinning
+        scheduler::sleep_ms(20);
     }
 }
 
