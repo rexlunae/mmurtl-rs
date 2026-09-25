@@ -302,7 +302,7 @@ fn wait_for_ap(timeout_ms: u32) -> bool {
 #[no_mangle]
 pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
     // Per-CPU GDT/TSS/IST, shared IDT, then enable this CPU's LAPIC
-    crate::gdt::init_ap();
+    crate::gdt::init_ap(cpu_num as usize);
     crate::interrupts::init_ap();
     crate::apic::enable_current_cpu();
 

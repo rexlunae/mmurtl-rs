@@ -215,6 +215,10 @@ impl Scheduler {
         let t = &mut self.tasks[next];
         t.state = TaskState::Running;
         t.on_cpu = Some(cpu as u8);
+        if t.user {
+            // Traps from ring 3 must land on this task's own kernel stack
+            crate::gdt::set_kernel_stack(cpu, t.kernel_stack_top);
+        }
         self.cpus[cpu].current = Some(next);
         self.tasks[next].context_ptr
     }
@@ -557,6 +561,41 @@ pub fn create_task(entry: extern "C" fn() -> !, priority: TaskPriority, name: &'
     }
 
     tid
+}
+
+/// Create a ring-3 task that starts at `entry` on `user_rsp`, with `arg`
+/// in RDI. The caller has already mapped the code and stack as user pages.
+pub fn create_user_task(entry: u64, user_rsp: u64, arg: u64, name: &'static str) -> u32 {
+    let stack = alloc_stack();
+    let task = TaskControlBlock::new_user(entry, user_rsp, arg, stack, PRIORITY_DEFAULT, name);
+    let (tid, ipi_target) = with_scheduler(|sched| {
+        let tid = sched.add_task(task);
+        (tid, sched.find_idle_cpu(current_cpu()))
+    });
+
+    crate::serial::write_str("[SCHED] Created user task \"");
+    crate::serial::write_str(name);
+    crate::serial::write_str("\" TID=");
+    crate::serial::write_dec(tid as u64);
+    crate::serial::write_str(" entry=0x");
+    crate::serial::write_hex(entry);
+    crate::serial::write_str(" (ring 3)\n");
+
+    kick(ipi_target);
+    tid
+}
+
+/// State of a task by ID (None if no such task)
+pub fn task_state(tid: u32) -> Option<TaskState> {
+    with_scheduler(|s| s.tasks.iter().find(|t| t.id == tid).map(|t| t.state))
+}
+
+/// Name of the task running on this CPU
+pub fn current_task_name() -> &'static str {
+    with_scheduler(|s| {
+        let cpu = current_cpu();
+        s.cpus[cpu].current.map(|i| s.tasks[i].name).unwrap_or("?")
+    })
 }
 
 /// Allocate a task stack from the kernel heap

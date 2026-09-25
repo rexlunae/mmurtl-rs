@@ -125,6 +125,18 @@ pub unsafe fn map_page(
 ) -> Result<(), &'static str> {
     let pml4 = active_pml4();
 
+    // A user-accessible leaf needs USER on every level above it too (the
+    // CPU ANDs the permission bits down the walk). Setting USER on a
+    // shared intermediate entry exposes nothing by itself: kernel leaves
+    // stay supervisor-only.
+    let user = flags & Flags::USER_ACCESSIBLE;
+    let table_flags = Flags::PRESENT | Flags::WRITABLE | Flags::ACCESSED | user;
+    let widen = |e: &mut x86_64::structures::paging::page_table::PageTableEntry| {
+        if !user.is_empty() && !e.flags().contains(Flags::USER_ACCESSIBLE) {
+            e.set_flags(e.flags() | Flags::USER_ACCESSIBLE);
+        }
+    };
+
     // Level 3: PDP (Page Directory Pointer Table)
     let pml4e = &mut pml4[page.p4_index()];
     let pdpt: &mut PageTable = if !pml4e.flags().contains(Flags::PRESENT) {
@@ -132,9 +144,10 @@ pub unsafe fn map_page(
         let pdpt_virt = phys_to_virt(new_frame.start_address());
         let pdpt = &mut *pdpt_virt.as_mut_ptr::<PageTable>();
         pdpt.zero();
-        pml4e.set_addr(new_frame.start_address(), Flags::PRESENT | Flags::WRITABLE | Flags::ACCESSED);
+        pml4e.set_addr(new_frame.start_address(), table_flags);
         pdpt
     } else {
+        widen(pml4e);
         &mut *phys_to_virt(pml4e.addr()).as_mut_ptr::<PageTable>()
     };
 
@@ -145,9 +158,10 @@ pub unsafe fn map_page(
         let pd_virt = phys_to_virt(new_frame.start_address());
         let pd = &mut *pd_virt.as_mut_ptr::<PageTable>();
         pd.zero();
-        pdpe.set_addr(new_frame.start_address(), Flags::PRESENT | Flags::WRITABLE | Flags::ACCESSED);
+        pdpe.set_addr(new_frame.start_address(), table_flags);
         pd
     } else {
+        widen(pdpe);
         &mut *phys_to_virt(pdpe.addr()).as_mut_ptr::<PageTable>()
     };
 
@@ -158,9 +172,10 @@ pub unsafe fn map_page(
         let pt_virt = phys_to_virt(new_frame.start_address());
         let pt = &mut *pt_virt.as_mut_ptr::<PageTable>();
         pt.zero();
-        pde.set_addr(new_frame.start_address(), Flags::PRESENT | Flags::WRITABLE | Flags::ACCESSED);
+        pde.set_addr(new_frame.start_address(), table_flags);
         pt
     } else {
+        widen(pde);
         &mut *phys_to_virt(pde.addr()).as_mut_ptr::<PageTable>()
     };
 

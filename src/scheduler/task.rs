@@ -129,6 +129,9 @@ pub struct TaskControlBlock {
     pub wait_for: u32,
     /// Jiffy at which a Sleeping task becomes Ready again
     pub wake_tick: u64,
+    /// Ring-3 task: runs user code, enters the kernel via interrupts and
+    /// `int 0x80` on its kernel stack (TSS.RSP0 = kernel_stack_top)
+    pub user: bool,
 }
 
 impl TaskControlBlock {
@@ -213,7 +216,36 @@ impl TaskControlBlock {
             reply: None,
             wait_for: 0,
             wake_tick: 0,
+            user: false,
         })
+    }
+
+    /// Create a ring-3 task. `stack` becomes its kernel stack (used for
+    /// syscalls and interrupts taken from user mode); the initial context
+    /// IRETQs to `entry` at CPL 3 on `user_rsp`, with `arg` in RDI.
+    pub fn new_user(
+        entry: u64,
+        user_rsp: u64,
+        arg: u64,
+        stack: Box<[u8]>,
+        priority: TaskPriority,
+        name: &'static str,
+    ) -> Box<Self> {
+        // Reuse the kernel-task constructor for the stack bookkeeping, then
+        // rewrite its initial frame for a privilege-level change
+        let dummy: extern "C" fn() -> ! = user_entry_placeholder;
+        let mut tcb = Self::new(dummy, stack, priority, name);
+        unsafe {
+            let ctx = &mut *(tcb.context_ptr as *mut TaskContext);
+            ctx.rip = entry;
+            ctx.cs = crate::gdt::USER_CS;
+            ctx.rflags = 0x202; // IF set, IOPL 0: no port I/O from ring 3
+            ctx.rsp = user_rsp;
+            ctx.ss = crate::gdt::USER_SS;
+            ctx.rdi = arg;
+        }
+        tcb.user = true;
+        tcb
     }
 
     /// Adopt the currently-executing context as a task.
@@ -237,6 +269,7 @@ impl TaskControlBlock {
             reply: None,
             wait_for: 0,
             wake_tick: 0,
+            user: false,
         })
     }
 }
@@ -251,6 +284,11 @@ impl fmt::Debug for TaskControlBlock {
 // ========================================================================
 // Task Entry/Exit Helpers
 // =======================================================================+
+
+/// Never runs: `new_user` overwrites the RIP it seeds
+extern "C" fn user_entry_placeholder() -> ! {
+    unreachable!("user task entered through its kernel placeholder")
+}
 
 /// The default initial entry point for tasks.
 /// This calls the user's entry function and, if it returns, marks the task as exited.

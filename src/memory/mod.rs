@@ -10,6 +10,7 @@ use bootloader_api::info::Optional;
 pub mod frame_allocator;
 pub mod page_table;
 pub mod heap;
+pub mod user;
 
 /// Initialize memory management from bootloader info
 ///

@@ -2,7 +2,7 @@
 
 A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting x86_64 long mode.
 
-## Status: Phase 9 (Blocking RQB IPC) Complete ✅
+## Status: Phase 10 (Userspace + Syscalls) Complete ✅ — roadmap finished
 
 - ✅ Bootable via BIOS (UEFI support coming)
 - ✅ Serial output on COM1 (115200 8N1)
@@ -29,6 +29,9 @@ A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting
 - ✅ IPC: blocking RQB message passing — `send_rqb` / `receive_rqb` /
   `reply_rqb` with per-task inboxes, a service name registry, and real
   blocking (`sleep_ms`, voluntary yield) instead of busy-waiting
+- ✅ Userspace: ring-3 tasks with their own user pages, an `int 0x80`
+  syscall gate with validated user pointers, and fault isolation — a
+  misbehaving program is killed, the kernel keeps running
 
 ## Building
 
@@ -67,17 +70,20 @@ gracefully when the devices are absent.)
 src/
 ├── main.rs        — Entry point, kernel init sequence
 ├── serial.rs      — UART 16550 serial output
-├── gdt.rs         — Global Descriptor Table + TSS
-├── interrupts.rs  — IDT, exception handlers, PIC, timer/keyboard
+├── gdt.rs         — GDT + per-CPU TSS (RSP0 per user task)
+├── interrupts.rs  — IDT, exception handlers, PIC, timer/yield/keyboard
+├── syscall.rs     — int 0x80 syscall gate + dispatch
+├── userspace.rs   — ring-3 demo programs + kernel-side checks
 ├── acpi.rs        — ACPI table parsing (RSDP/RSDT/XSDT/MADT)
 ├── apic.rs        — Local APIC + I/O APIC driver, LAPIC timer, IPIs
 ├── smp.rs         — Multi-core boot (AP trampoline, INIT-SIPI-SIPI)
 ├── memory/
-│   └── mod.rs     — Frame allocator, paging, kernel heap
+│   ├── mod.rs     — Frame allocator, paging, kernel heap
+│   └── user.rs    — User window: program loading, pointer validation
 ├── scheduler/
-│   └── mod.rs     — Preemptive round-robin scheduler
+│   └── mod.rs     — SMP scheduler + blocking RQB IPC primitives
 └── ipc/
-    └── mod.rs     — RQB message-passing IPC (stub)
+    └── mod.rs     — Service registry + IPC demo
 ```
 
 ## Architecture
@@ -102,7 +108,7 @@ Originally by Richard Burgess (1994):
 | 7 | Drivers: virtio-blk, virtio-net, PS/2 keyboard | ✅ Done |
 | 8 | exFAT filesystem (full read/write API, Linux-interoperable) | ✅ Done |
 | 9 | Real RQB IPC (blocking send/receive/reply) | ✅ Done |
-| 10 | Userspace + syscalls | 🌱 |
+| 10 | Userspace + syscalls (ring 3, int 0x80) | ✅ Done |
 
 ## Memory Management (Phase 3)
 
@@ -333,6 +339,69 @@ Verified at `-smp 1`, `2`, and `4`, and across six concurrent 4-CPU boots.
 
 Limitations: no send timeouts, exited tasks' stacks are not reclaimed
 yet, and the service registry is a flat list.
+
+## Userspace + Syscalls (Phase 10)
+
+Tasks can now run in **ring 3**:
+
+- **User window** (`memory/user.rs`): user programs live in a dedicated
+  lower-half region whose pages carry the USER bit — code read+execute,
+  stack read+write+no-execute, with unmapped guard pages. Every other
+  mapping (kernel image, heap, physical-memory window) stays
+  supervisor-only.
+- **Per-CPU TSS.RSP0**: on every switch to a user task, the scheduler
+  points that CPU's TSS at the task's own kernel stack, so interrupts and
+  syscalls from ring 3 land on the right stack — even as tasks migrate.
+- **`int 0x80` syscall gate** (DPL 3 — the only gate ring 3 may invoke).
+  The handler runs on the caller's kernel stack with interrupts on, so a
+  syscall can block in IPC or sleep and be preempted like kernel code.
+  The `syscall` instruction stays disabled: it doesn't switch stacks.
+- **Validated user pointers**: every pointer argument is checked against
+  the user window *and* the page tables (present + user + writable where
+  needed) before the kernel touches it; RQBs cross the boundary in an
+  explicit 96-byte wire format. STAC/CLAC are used when SMAP is on.
+- **Fault isolation**: #PF, #GP, #UD, #DE, or #SS raised by ring-3 code
+  kills that task (failing any requests it owes with `Aborted`) instead
+  of panicking the kernel.
+
+| # | Syscall | | # | Syscall |
+|---|---|---|---|---|
+| 0 | `exit()` | | 5 | `get_tid()` |
+| 1 | `log(ptr, len)` | | 6 | `sleep_ms(ms)` |
+| 2 | `send_rqb(tid, rqb*)` | | 7 | `lookup_service(name*, len)` |
+| 3 | `receive_rqb(rqb*)` | | 8 | `register_service(name*, len)` |
+| 4 | `reply_rqb(tid, rqb*)` | | 9 | `yield()` |
+
+The demo programs are position-independent assembly blobs, copied into
+user pages at boot:
+```
+[USER T17 CPL3] Hello from ring 3! Asking the kernel's sysinfo service over RQB IPC...
+[USER T17 CPL3] MMURTL/RS v0.1.0: 4 CPUs, up 30 ms
+[USER T16 CPL3] uecho: user-mode service registered, serving requests
+[USER T19 CPL3] rogue_read: reading kernel memory...
+[USER] T19 "rogue_read" killed: #PF protection violation at rip=0x640000301016, addr=0x10000013d4d
+[USER T20 CPL3] rogue_priv: executing cli...
+[USER] T20 "rogue_priv" killed: #GP general protection fault at rip=0x640000401013
+[USER T21 CPL3] rogue_ptr: kernel refused a kernel pointer with EFAULT
+[USER T18 CPL3] spinner: 150M-iteration ring-3 loop done (preempted, never yielded)
+[USER] Userspace checks:
+[USER]   kernel -> ring-3 service (3 round trips) ✓
+[USER]   hello finished                           ✓
+[USER]   spinner preempted in ring 3, finished    ✓
+[USER]   rogue_read killed, kernel alive          ✓
+[USER]   rogue_priv killed, kernel alive          ✓
+[USER]   rogue_ptr refused, exited                ✓
+[USER]   ring-3 receiver exits -> sender gets Aborted ✓
+[USER] ✓ All userspace checks passed
+```
+Verified at `-smp 1` (the spinner can only finish alongside everything
+else if the timer preempts ring 3), `-smp 2`, and `-smp 4`, including
+concurrent runs.
+
+Limitations: all tasks share one page table, so user programs are
+isolated from the kernel but not yet from each other (per-task address
+spaces are the next step); programs are flat binaries, not ELF; exited
+tasks' memory is not reclaimed.
 
 ## USB Driver (xHCI)
 

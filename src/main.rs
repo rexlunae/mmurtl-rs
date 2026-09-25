@@ -23,6 +23,8 @@ mod smp;
 mod virtio;
 mod keyboard;
 mod fs;
+mod syscall;
+mod userspace;
 
 use bootloader_api::BootInfo;
 use bootloader_api::info::Optional;
@@ -183,6 +185,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // RQB IPC demo: a text service, concurrent clients, error-path checks
     serial::write_str("[IPC] Starting IPC demo tasks...\n");
     ipc::demo();
+
+    // Userspace: ring-3 programs talking to the kernel via int 0x80
+    syscall::init();
+    serial::write_str("[USER] Loading ring-3 programs...\n");
+    userspace::demo();
     // Keyboard echo task — consumes the keyboard driver's char queue
     scheduler::create_task(kbd_echo_task, scheduler::PRIORITY_DEFAULT, "kbd_echo");
 
