@@ -3,11 +3,16 @@ KERNEL_BIN = target/x86_64-unknown-none/release/mmurtl-rs
 BIOS_IMG = target/mmurtl-rs-bios.img
 UEFI_IMG = target/mmurtl-rs-uefi.img
 
-.PHONY: all build bios uefi run-bios run-uefi clean
+# arm64 port: a bootable ELF for QEMU virt (no image step needed)
+ARM64_TARGET = aarch64-unknown-none-softfloat
+ARM64_KERNEL = target/$(ARM64_TARGET)/release/mmurtl-rs
+ARM64_SMP ?= 4
+
+.PHONY: all build bios uefi run-bios run-uefi arm64 run-arm64 clean
 
 all: build
 
-# Build the kernel ELF
+# Build the amd64 kernel ELF
 build:
 	cargo build -Z build-std=core,compiler_builtins,alloc -Z json-target-spec \
 		--target $(TARGET) \
@@ -36,6 +41,25 @@ run-uefi: uefi
 		-drive format=raw,file=$(UEFI_IMG) \
 		-serial stdio \
 		-m 256M
+
+# Build the arm64 kernel ELF
+arm64:
+	cargo build -Z build-std=core,compiler_builtins,alloc \
+		--target $(ARM64_TARGET) \
+		--release
+
+# Run the arm64 kernel on QEMU virt (GICv2, $(ARM64_SMP) CPUs). Add a disk
+# and NIC with e.g.:
+#   -drive if=none,format=raw,file=disk.img,id=hd0 -device virtio-blk-device,drive=hd0
+#   -netdev user,id=n0 -device virtio-net-device,netdev=n0
+run-arm64: arm64
+	qemu-system-aarch64 \
+		-machine virt,gic-version=2 \
+		-cpu cortex-a72 \
+		-smp $(ARM64_SMP) \
+		-m 256M \
+		-nographic \
+		-kernel $(ARM64_KERNEL)
 
 # Run with debug symbols
 run-debug: build

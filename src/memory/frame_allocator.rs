@@ -177,6 +177,22 @@ impl FrameAllocator {
         None
     }
 
+    /// Claim the specific frames `[start, start + count * FRAME_SIZE)` if
+    /// they are all free (used to grow a physically contiguous heap in
+    /// place). All-or-nothing.
+    #[allow(dead_code)]
+    pub fn claim_range(&mut self, start: u64, count: usize) -> bool {
+        let first = (start / FRAME_SIZE) as usize;
+        if first + count > self.total_frames || !(first..first + count).all(|i| self.is_free(i)) {
+            return false;
+        }
+        for i in first..first + count {
+            self.mark(i);
+        }
+        self.free_frames -= count;
+        true
+    }
+
     /// Free a previously allocated frame
     #[allow(dead_code)]
     pub fn deallocate_frame(&mut self, phys: u64) {
@@ -193,6 +209,7 @@ impl FrameAllocator {
     }
 
     /// Number of frames covered by usable RAM
+    #[allow(dead_code)]
     pub fn total_count(&self) -> usize {
         self.total_frames
     }

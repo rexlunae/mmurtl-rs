@@ -1,8 +1,10 @@
-//! PS/2 keyboard driver — scancode set 1 → characters.
+//! Console input — a lock-free character queue, plus the amd64 PS/2
+//! keyboard driver (scancode set 1 → characters) that feeds it.
 //!
-//! The IRQ1 handler feeds raw scancodes in; this module tracks modifier
-//! state (shift), translates make codes to ASCII, and queues characters
-//! in a small lock-free ring buffer for tasks to consume.
+//! On amd64 the IRQ1 handler feeds raw scancodes in; this module tracks
+//! modifier state (shift) and translates make codes to ASCII. On arm64 the
+//! PL011 UART's RX interrupt pushes characters directly. Either way, tasks
+//! consume them with `pop_char`.
 
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -51,14 +53,18 @@ pub fn pop_char() -> Option<u8> {
 }
 
 // ========================================================================
-// Scancode set 1 translation
+// Scancode set 1 translation (amd64 PS/2; arm64 feeds characters from
+// the UART straight into the queue)
 // ========================================================================
 
 /// Modifier state bits
+#[cfg(target_arch = "x86_64")]
 const MOD_SHIFT: u8 = 1;
+#[cfg(target_arch = "x86_64")]
 static MODIFIERS: AtomicU8 = AtomicU8::new(0);
 
 /// Scancode set 1, unshifted (index = make code, 0 = no mapping)
+#[cfg(target_arch = "x86_64")]
 #[rustfmt::skip]
 static MAP_LOWER: [u8; 0x40] = [
     0, 0x1B, b'1', b'2', b'3', b'4', b'5', b'6',       // 00-07 (esc, 1-6)
@@ -71,6 +77,7 @@ static MAP_LOWER: [u8; 0x40] = [
     0, b' ', 0, 0, 0, 0, 0, 0,                          // 38-3F (alt, space, caps, F1-F5)
 ];
 
+#[cfg(target_arch = "x86_64")]
 #[rustfmt::skip]
 static MAP_UPPER: [u8; 0x40] = [
     0, 0x1B, b'!', b'@', b'#', b'$', b'%', b'^',
@@ -84,6 +91,7 @@ static MAP_UPPER: [u8; 0x40] = [
 ];
 
 /// Feed one raw scancode from the IRQ1 handler
+#[cfg(target_arch = "x86_64")]
 pub fn handle_scancode(scancode: u8) {
     // Extended-key prefix (arrows, right ctrl, ...) — next byte is E0-coded;
     // we don't map those yet, and the prefix itself needs no state.

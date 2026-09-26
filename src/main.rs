@@ -105,9 +105,9 @@ pub fn kernel_run() -> ! {
     serial::write_str("[IPC] Starting IPC demo tasks...\n");
     ipc::demo();
 
-    // Userspace: ring-3 programs talking to the kernel via int 0x80
+    // Userspace: user-mode programs talking to the kernel via syscalls
     syscall::init();
-    serial::write_str("[USER] Loading ring-3 programs...\n");
+    serial::write_str("[USER] Loading user-mode programs...\n");
     userspace::demo();
     // Keyboard echo task — consumes the keyboard driver's char queue
     scheduler::create_task(kbd_echo_task, scheduler::PRIORITY_DEFAULT, "kbd_echo");

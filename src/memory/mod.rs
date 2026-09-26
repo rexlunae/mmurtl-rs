@@ -23,10 +23,10 @@ pub fn init(usable: &[PhysRange], reserved: &[PhysRange], min_addr: u64) {
     heap::init_heap(frame_allocator);
 
     let free_mib = (frame_allocator.free_count() as u64 * frame_allocator::FRAME_SIZE) / (1024 * 1024);
-    let total_mib = (frame_allocator.total_count() as u64 * frame_allocator::FRAME_SIZE) / (1024 * 1024);
+    let usable_mib = usable.iter().map(|r| r.end - r.start).sum::<u64>() / (1024 * 1024);
     crate::serial::write_str("[MEM] Memory manager initialized: ");
     crate::serial::write_dec(free_mib);
     crate::serial::write_str(" MiB free / ");
-    crate::serial::write_dec(total_mib);
-    crate::serial::write_str(" MiB tracked\n");
+    crate::serial::write_dec(usable_mib);
+    crate::serial::write_str(" MiB usable RAM\n");
 }

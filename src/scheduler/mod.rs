@@ -491,15 +491,17 @@ pub fn create_task(entry: extern "C" fn() -> !, priority: TaskPriority, name: &'
         (tid, sched.find_idle_cpu(current_cpu()))
     });
 
-    crate::serial::write_str("[SCHED] Created task \"");
-    crate::serial::write_str(name);
-    crate::serial::write_str("\" TID=");
-    crate::serial::write_dec(tid as u64);
-    crate::serial::write_str(" prio=");
-    crate::serial::write_dec(priority as u64);
-    crate::serial::write_str(" stack=0x");
-    crate::serial::write_hex(stack_bottom);
-    crate::serial::write_str("\n");
+    // One write, so the line can't interleave with tasks on other CPUs
+    {
+        use core::fmt::Write;
+        let mut line: heapless::String<96> = heapless::String::new();
+        let _ = write!(
+            line,
+            "[SCHED] Created task \"{}\" TID={} prio={} stack=0x{:x}\n",
+            name, tid, priority, stack_bottom
+        );
+        crate::serial::write_str(&line);
+    }
 
     // Kick an idle CPU so it picks the task up right away
     kick(ipi_target);
@@ -507,7 +509,7 @@ pub fn create_task(entry: extern "C" fn() -> !, priority: TaskPriority, name: &'
     tid
 }
 
-/// Create a ring-3 task that starts at `entry` on `user_rsp`, with `arg`
+/// Create a user-mode task that starts at `entry` on `user_rsp`, with `arg`
 /// in RDI. The caller has already mapped the code and stack as user pages.
 pub fn create_user_task(entry: u64, user_rsp: u64, arg: u64, name: &'static str) -> u32 {
     let stack = alloc_stack();
@@ -517,13 +519,16 @@ pub fn create_user_task(entry: u64, user_rsp: u64, arg: u64, name: &'static str)
         (tid, sched.find_idle_cpu(current_cpu()))
     });
 
-    crate::serial::write_str("[SCHED] Created user task \"");
-    crate::serial::write_str(name);
-    crate::serial::write_str("\" TID=");
-    crate::serial::write_dec(tid as u64);
-    crate::serial::write_str(" entry=0x");
-    crate::serial::write_hex(entry);
-    crate::serial::write_str(" (ring 3)\n");
+    {
+        use core::fmt::Write;
+        let mut line: heapless::String<96> = heapless::String::new();
+        let _ = write!(
+            line,
+            "[SCHED] Created user task \"{}\" TID={} entry=0x{:x} (user mode)\n",
+            name, tid, entry
+        );
+        crate::serial::write_str(&line);
+    }
 
     kick(ipi_target);
     tid

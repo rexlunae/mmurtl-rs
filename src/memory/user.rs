@@ -1,10 +1,10 @@
-//! User address-space region: loading ring-3 programs and validating user
+//! User address-space region: loading user-mode programs and validating user
 //! pointers passed to syscalls.
 //!
 //! All tasks share one page table (MMURTL's flat model). User programs
 //! live in a dedicated lower-half window whose pages carry the USER bit;
 //! every other mapping — kernel image, heap, physical-memory window — is
-//! supervisor-only, so ring-3 code can't read, write, or jump into the
+//! kernel-only, so user code can't read, write, or jump into the
 //! kernel. Each user task gets its own 1 MiB slot:
 //!
 //! ```text
@@ -122,7 +122,7 @@ pub fn load_program(code: &[u8]) -> Result<UserImage, &'static str> {
 
 /// Whether `[ptr, ptr+len)` lies entirely in user-accessible memory
 /// (writable too, if `write`). A syscall must pass this before the kernel
-/// touches a user pointer — otherwise ring 3 could make the kernel read or
+/// touches a user pointer — otherwise user code could make the kernel read or
 /// write kernel memory on its behalf.
 pub fn range_ok(ptr: u64, len: u64, write: bool) -> bool {
     if len == 0 {
