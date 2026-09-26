@@ -15,8 +15,12 @@
 //!   slot + 0xFF000   unmapped (guard above the stack)
 //! ```
 //!
-//! Slots are not yet isolated from each other (one shared address space);
-//! per-task page tables are the natural next step.
+//! Every user task has its own address space (`crate::arch::
+//! new_address_space`): the kernel's mappings are shared, but the user
+//! window contains only that task's own pages. Slots still give each
+//! program a distinct virtual range, so a program that reaches for another
+//! program's address finds nothing mapped there. Slots and spaces are
+//! recycled when the task is reaped.
 //!
 //! Architecture-neutral: page mapping/query and the user-access window
 //! (SMAP on amd64) come from `crate::arch`.
@@ -40,7 +44,28 @@ const STACK_PAGES: u64 = 4;
 const STACK_TOP_OFFSET: u64 = USER_SLOT_SIZE - 0x1000;
 const PAGE: u64 = 4096;
 
-static NEXT_SLOT: AtomicU64 = AtomicU64::new(0);
+/// Slot allocation bitmap (bit set = in use)
+static SLOTS: AtomicU64 = AtomicU64::new(0);
+
+fn alloc_slot() -> Option<u64> {
+    loop {
+        let cur = SLOTS.load(Ordering::Acquire);
+        if cur == u64::MAX {
+            return None;
+        }
+        let slot = (!cur).trailing_zeros() as u64;
+        if SLOTS
+            .compare_exchange(cur, cur | 1 << slot, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Some(slot);
+        }
+    }
+}
+
+fn free_slot(slot: u64) {
+    SLOTS.fetch_and(!(1 << slot), Ordering::AcqRel);
+}
 
 /// A loaded user program
 pub struct UserImage {
@@ -48,6 +73,15 @@ pub struct UserImage {
     pub entry: u64,
     /// Initial user stack pointer
     pub stack_top: u64,
+    /// Its address space (page-table root)
+    pub space: u64,
+    /// Its slot in the user window
+    pub slot: u64,
+}
+
+/// Base address of `slot` (e.g. to point a test at another program)
+pub fn slot_base(slot: u64) -> u64 {
+    USER_BASE + slot * USER_SLOT_SIZE
 }
 
 /// Check the user window is free before first use
@@ -67,9 +101,9 @@ pub fn init() -> bool {
     free
 }
 
-/// Map one fresh, zeroed frame at `va`, optionally copying `data` into
-/// it first.
-fn map_fresh(va: u64, data: &[u8], writable: bool, executable: bool) -> Result<(), &'static str> {
+/// Map one fresh, zeroed frame at `va` in address space `space`,
+/// optionally copying `data` into it first.
+pub fn map_fresh(space: u64, va: u64, data: &[u8], writable: bool, executable: bool) -> Result<(), &'static str> {
     let pa = heap::with_frame_allocator(|fa| fa.allocate_frame())
         .ok_or("frame allocator not initialized")?
         .ok_or("out of memory")?;
@@ -78,26 +112,53 @@ fn map_fresh(va: u64, data: &[u8], writable: bool, executable: bool) -> Result<(
         core::ptr::write_bytes(kva, 0, PAGE as usize);
         core::ptr::copy_nonoverlapping(data.as_ptr(), kva, data.len().min(PAGE as usize));
     }
-    crate::arch::map_user_page(va, pa, writable, executable)
+    crate::arch::map_user_page(space, va, pa, writable, executable).map_err(|e| {
+        heap::with_frame_allocator(|fa| fa.deallocate_frame(pa));
+        e
+    })
 }
 
-/// Load a position-independent flat binary into a fresh slot: code pages
-/// read-only + executable, a writable non-executable stack.
+/// Release a program's address space and slot; returns frames freed.
+/// The space must no longer be loaded on any CPU (see the reaper).
+pub fn release(space: u64, slot: u64) -> usize {
+    let freed = crate::arch::free_address_space(space);
+    free_slot(slot);
+    freed
+}
+
+/// Load a position-independent flat binary into a fresh address space
+/// and slot: code pages read-only + executable, a writable
+/// non-executable stack.
 pub fn load_program(code: &[u8]) -> Result<UserImage, &'static str> {
     let code_pages = (code.len() as u64 + PAGE - 1) / PAGE;
     if code.is_empty() || CODE_OFFSET + code_pages * PAGE > STACK_TOP_OFFSET - STACK_PAGES * PAGE {
         return Err("program too large for a user slot");
     }
-    let slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed);
-    if slot >= USER_MAX_SLOTS {
-        return Err("no free user slots");
+    let slot = alloc_slot().ok_or("no free user slots")?;
+    let space = match crate::arch::new_address_space() {
+        Ok(s) => s,
+        Err(e) => {
+            free_slot(slot);
+            return Err(e);
+        }
+    };
+    match populate(space, slot, code, code_pages) {
+        Ok(img) => Ok(img),
+        Err(e) => {
+            release(space, slot);
+            Err(e)
+        }
     }
-    let base = USER_BASE + slot * USER_SLOT_SIZE;
+}
+
+fn populate(space: u64, slot: u64, code: &[u8], code_pages: u64) -> Result<UserImage, &'static str> {
+    let base = slot_base(slot);
 
     for i in 0..code_pages {
         let start = (i * PAGE) as usize;
         let end = (start + PAGE as usize).min(code.len());
         map_fresh(
+            space,
             base + CODE_OFFSET + i * PAGE,
             &code[start..end],
             false,
@@ -107,6 +168,7 @@ pub fn load_program(code: &[u8]) -> Result<UserImage, &'static str> {
     let stack_top = base + STACK_TOP_OFFSET;
     for i in 1..=STACK_PAGES {
         map_fresh(
+            space,
             stack_top - i * PAGE,
             &[],
             true,
@@ -117,6 +179,8 @@ pub fn load_program(code: &[u8]) -> Result<UserImage, &'static str> {
     Ok(UserImage {
         entry: base + CODE_OFFSET,
         stack_top,
+        space,
+        slot,
     })
 }
 

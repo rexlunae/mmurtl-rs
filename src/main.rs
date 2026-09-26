@@ -105,6 +105,9 @@ pub fn kernel_run() -> ! {
     serial::write_str("[IPC] Starting IPC demo tasks...\n");
     ipc::demo();
 
+    // Reclaims exited tasks' kernel stacks and address spaces
+    scheduler::start_reaper();
+
     // Userspace: user-mode programs talking to the kernel via syscalls
     syscall::init();
     serial::write_str("[USER] Loading user-mode programs...\n");

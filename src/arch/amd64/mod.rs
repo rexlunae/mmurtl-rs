@@ -25,8 +25,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 pub use context::{kernel_context, on_switch_to_user, user_context, yield_now, TaskContext};
 pub use memory::{
-    heap_extend, heap_init, map_user_page, phys_to_virt, query_page, user_access_begin,
-    user_access_end,
+    free_address_space, heap_extend, heap_init, map_user_page, new_address_space, phys_to_virt,
+    query_page, switch_address_space, user_access_begin, user_access_end,
 };
 
 /// Architecture name for the boot log

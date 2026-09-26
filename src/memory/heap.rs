@@ -22,6 +22,20 @@ static mut FRAME_ALLOC_PTR: *mut frame_allocator::FrameAllocator = core::ptr::nu
 /// the kernel heap (heap growth takes this lock too).
 static FRAME_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
+/// Frames the heap has taken from the frame allocator by growing (so
+/// frame accounting can tell heap growth apart from leaks)
+static GROWN_FRAMES: AtomicUsize = AtomicUsize::new(0);
+
+/// Frames consumed by heap growth since boot
+pub fn grown_frames() -> usize {
+    GROWN_FRAMES.load(Ordering::Relaxed)
+}
+
+/// Free frames in the frame allocator
+pub fn free_frames() -> usize {
+    with_frame_allocator(|fa| fa.free_count()).unwrap_or(0)
+}
+
 /// Set the global frame allocator reference (called during memory init)
 pub unsafe fn set_frame_allocator(fa: *mut frame_allocator::FrameAllocator) {
     FRAME_ALLOC_PTR = fa;
@@ -133,6 +147,7 @@ impl BumpAllocator {
                 None => return core::ptr::null_mut(),
                 Some(0) => {}
                 Some(bytes) => {
+                    GROWN_FRAMES.fetch_add((bytes / 4096) as usize, Ordering::Relaxed);
                     crate::serial::write_str("[HEAP] Extended by ");
                     crate::serial::write_dec(bytes / 1024);
                     crate::serial::write_str(" KiB\n");

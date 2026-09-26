@@ -141,10 +141,32 @@ impl Scheduler {
     }
 
     /// Add a prepared task to the run queue
+    /// Add a task, reusing the slot of one the reaper has released
     fn add_task(&mut self, task: Box<TaskControlBlock>) -> u32 {
         let tid = task.id;
-        self.tasks.push(task);
+        match self.tasks.iter().position(|t| t.state == TaskState::Exited && t.reaped) {
+            Some(i) => self.tasks[i] = task,
+            None => self.tasks.push(task),
+        }
         tid
+    }
+
+    /// Hand the reaper the resources of exited tasks that no CPU is still
+    /// running on (their stacks and address spaces are no longer in use)
+    fn collect_exited(&mut self, out: &mut heapless::Vec<Reapable, 16>) {
+        for t in self.tasks.iter_mut() {
+            if t.state == TaskState::Exited && !t.reaped && t.on_cpu.is_none() {
+                if out.is_full() {
+                    break;
+                }
+                t.reaped = true;
+                let _ = out.push(Reapable {
+                    kstack_phys: core::mem::take(&mut t.kstack_phys),
+                    space: core::mem::take(&mut t.address_space),
+                    slot: t.user_slot.take(),
+                });
+            }
+        }
     }
 
     /// Called on each timer tick, reschedule IPI, or voluntary yield on
@@ -207,6 +229,11 @@ impl Scheduler {
         let t = &mut self.tasks[next];
         t.state = TaskState::Running;
         t.on_cpu = Some(cpu as u8);
+        // Each task runs in its own address space (kernel tasks in the
+        // kernel's). Loading the incoming task's space on every switch also
+        // guarantees an exited task's space is loaded nowhere once it has
+        // been switched out, so the reaper can free it.
+        crate::arch::switch_address_space(cpu, t.address_space);
         if t.user {
             // Traps from user mode must land on this task's own kernel stack
             crate::arch::on_switch_to_user(cpu, t.kernel_stack_top);
@@ -511,9 +538,17 @@ pub fn create_task(entry: extern "C" fn() -> !, priority: TaskPriority, name: &'
 
 /// Create a user-mode task that starts at `entry` on `user_rsp`, with `arg`
 /// in RDI. The caller has already mapped the code and stack as user pages.
-pub fn create_user_task(entry: u64, user_rsp: u64, arg: u64, name: &'static str) -> u32 {
+pub fn create_user_task(
+    entry: u64,
+    user_rsp: u64,
+    arg: u64,
+    space: u64,
+    slot: u64,
+    name: &'static str,
+) -> u32 {
     let stack = alloc_stack();
-    let task = TaskControlBlock::new_user(entry, user_rsp, arg, stack, PRIORITY_DEFAULT, name);
+    let task =
+        TaskControlBlock::new_user(entry, user_rsp, arg, space, slot, stack, PRIORITY_DEFAULT, name);
     let (tid, ipi_target) = with_scheduler(|sched| {
         let tid = sched.add_task(task);
         (tid, sched.find_idle_cpu(current_cpu()))
@@ -548,14 +583,69 @@ pub fn current_task_name() -> &'static str {
 }
 
 /// Allocate a task stack from the kernel heap
-fn alloc_stack() -> Box<[u8]> {
-    let layout = alloc::alloc::Layout::from_size_align(TASK_STACK_SIZE, 16)
-        .expect("Invalid stack layout");
-    let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
-    assert!(!ptr.is_null(), "OOM allocating task stack");
-    unsafe {
-        let slice = core::slice::from_raw_parts_mut(ptr, TASK_STACK_SIZE);
-        Box::from_raw(slice)
+fn alloc_stack() -> KernelStack {
+    let pages = TASK_STACK_SIZE / 4096;
+    let phys = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_contiguous(pages))
+        .flatten()
+        .expect("OOM allocating task stack");
+    let virt = crate::arch::phys_to_virt(phys);
+    unsafe { core::ptr::write_bytes(virt, 0, TASK_STACK_SIZE) };
+    KernelStack { virt: virt as u64, phys, size: TASK_STACK_SIZE as u64 }
+}
+
+// ========================================================================
+// Reaper: frees exited tasks' kernel stacks and address spaces
+// ========================================================================
+
+/// Resources of an exited task, handed to the reaper
+struct Reapable {
+    kstack_phys: u64,
+    space: u64,
+    slot: Option<u64>,
+}
+
+static REAPED_TASKS: AtomicU64 = AtomicU64::new(0);
+static REAPED_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// (tasks reaped, frames returned) since boot
+pub fn reaper_stats() -> (u64, u64) {
+    (REAPED_TASKS.load(Ordering::Relaxed), REAPED_FRAMES.load(Ordering::Relaxed))
+}
+
+/// Exited tasks the reaper hasn't released yet
+pub fn unreaped_tasks() -> usize {
+    with_scheduler(|s| {
+        s.tasks.iter().filter(|t| t.state == TaskState::Exited && !t.reaped).count()
+    })
+}
+
+/// Start the reaper task
+pub fn start_reaper() {
+    create_task(reaper_task, PRIORITY_DEFAULT, "reaper");
+}
+
+extern "C" fn reaper_task() -> ! {
+    loop {
+        sleep_ms(50);
+        let mut batch: heapless::Vec<Reapable, 16> = heapless::Vec::new();
+        with_scheduler(|s| s.collect_exited(&mut batch));
+        for r in &batch {
+            let mut frames = 0u64;
+            if r.kstack_phys != 0 {
+                let pages = (TASK_STACK_SIZE / 4096) as u64;
+                crate::memory::heap::with_frame_allocator(|fa| {
+                    for i in 0..pages {
+                        fa.deallocate_frame(r.kstack_phys + i * 4096);
+                    }
+                });
+                frames += pages;
+            }
+            if let Some(slot) = r.slot {
+                frames += crate::memory::user::release(r.space, slot) as u64;
+            }
+            REAPED_FRAMES.fetch_add(frames, Ordering::Relaxed);
+        }
+        REAPED_TASKS.fetch_add(batch.len() as u64, Ordering::Relaxed);
     }
 }
 

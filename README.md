@@ -365,8 +365,7 @@ error-path checker:
 ```
 Verified at `-smp 1`, `2`, and `4`, and across six concurrent 4-CPU boots.
 
-Limitations: no send timeouts, exited tasks' stacks are not reclaimed
-yet, and the service registry is a flat list.
+Limitations: no send timeouts, and the service registry is a flat list.
 
 ## Userspace + Syscalls (Phase 10)
 
@@ -426,10 +425,33 @@ Verified at `-smp 1` (the spinner can only finish alongside everything
 else if the timer preempts ring 3), `-smp 2`, and `-smp 4`, including
 concurrent runs.
 
-Limitations: all tasks share one page table, so user programs are
-isolated from the kernel but not yet from each other (per-task address
-spaces are the next step); programs are flat binaries, not ELF; exited
-tasks' memory is not reclaimed.
+### Per-task address spaces and reclamation
+
+Every user task gets **its own address space**: a page-table root that
+shares all of the kernel's mappings but whose user window holds only that
+task's pages. The scheduler loads the incoming task's space on every
+switch (CR3 on amd64, TTBR0 + a local TLB flush on arm64; kernel tasks
+run in the kernel's own tables). A program that reaches for another
+program's memory now finds nothing mapped there:
+```
+[USER] T23 "rogue_peek" killed: #PF not-present page at pc=0x640000601016          (amd64)
+[USER] T23 "rogue_peek" killed: data abort (translation fault) at pc=0x640000601018 (arm64)
+```
+
+**Exited tasks are reclaimed.** Kernel stacks now come from the frame
+allocator, and a reaper task frees an exited task's stack, user pages,
+page tables, and user-window slot once no CPU is running it — which is
+guaranteed after it has been switched out, since every switch loads the
+incoming task's space. Task slots are reused. A churn test runs 16
+short-lived user tasks and checks that every frame comes back (heap
+growth is accounted for separately, so it can't mask a leak):
+```
+[USER]   16 churn tasks reclaimed (272 frames)      ✓
+```
+
+Limitations: programs are flat binaries, not ELF; the kernel heap is a
+bump allocator, so small kernel-side task metadata is not recycled; no
+ASIDs on arm64 (each address-space switch flushes the local TLB).
 
 ## Architecture ports (amd64 + arm64)
 

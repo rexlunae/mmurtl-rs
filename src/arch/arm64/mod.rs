@@ -22,7 +22,7 @@ use core::arch::asm;
 
 pub use exceptions::{kernel_context, user_context, TaskContext};
 pub use memory::{heap_extend, heap_init, phys_to_virt, user_access_begin, user_access_end};
-pub use mmu::{map_user_page, query_page};
+pub use mmu::{free_address_space, map_user_page, new_address_space, query_page, switch_address_space};
 
 /// Architecture name for the boot log
 pub const NAME: &str = "arm64";
