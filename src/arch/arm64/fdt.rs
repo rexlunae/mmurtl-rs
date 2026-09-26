@@ -12,7 +12,8 @@ const FDT_PROP: u32 = 3;
 const FDT_NOP: u32 = 4;
 const FDT_END: u32 = 9;
 
-pub const MAX_CPUS: usize = 8; // GICv2 targets at most 8 CPU interfaces
+/// CPUs we track (GICv2 can target only 8; GICv3 routes by affinity)
+pub const MAX_CPUS: usize = 64;
 pub const MAX_RAM: usize = 4;
 pub const MAX_VIRTIO: usize = 32;
 
@@ -31,15 +32,19 @@ pub struct MachineInfo {
     pub cpus: [u64; MAX_CPUS], // MPIDR affinity values
     pub cpu_count: usize,
     pub psci: PsciConduit,
+    /// GIC architecture version (2 or 3)
+    pub gic_version: u8,
     pub gicd: u64,
+    /// GICv2 CPU interface base
     pub gicc: u64,
+    /// GICv3 redistributor region (first region)
+    pub gicr: u64,
+    pub gicr_size: u64,
     pub uart: u64,
     pub uart_irq: u32, // GIC INTID
     pub timer_irq: u32, // virtual timer GIC INTID
     pub virtio: [u64; MAX_VIRTIO],
     pub virtio_count: usize,
-    /// The tree describes a GICv3, which this port doesn't drive
-    pub gic_v3: bool,
 }
 
 impl MachineInfo {
@@ -51,14 +56,16 @@ impl MachineInfo {
             cpus: [0; MAX_CPUS],
             cpu_count: 0,
             psci: PsciConduit::None,
+            gic_version: 2,
             gicd: 0x0800_0000,
             gicc: 0x0801_0000,
+            gicr: 0,
+            gicr_size: 0,
             uart: 0x0900_0000,
             uart_irq: 33,
             timer_irq: 27,
             virtio: [0; MAX_VIRTIO],
             virtio_count: 0,
-            gic_v3: false,
         }
     }
 }
@@ -113,6 +120,7 @@ struct Node {
     is_cpu: bool,
     is_memory: bool,
     is_gic: bool,
+    is_gicv3: bool,
     is_uart: bool,
     is_virtio: bool,
     is_timer: bool,
@@ -134,6 +142,7 @@ impl Node {
             is_cpu: false,
             is_memory: false,
             is_gic: false,
+            is_gicv3: false,
             is_uart: false,
             is_virtio: false,
             is_timer: false,
@@ -217,7 +226,14 @@ pub fn parse(addr: u64) -> MachineInfo {
                         info.cpus[info.cpu_count] = read_cells(b, n.reg_off, ac);
                         info.cpu_count += 1;
                     }
+                } else if n.is_gicv3 && n.reg_len >= 2 * entry {
+                    // reg = <GICD>, <GICR region>, [GICC, GICH, GICV]
+                    info.gic_version = 3;
+                    info.gicd = read_cells(b, n.reg_off, ac);
+                    info.gicr = read_cells(b, n.reg_off + entry, ac);
+                    info.gicr_size = read_cells(b, n.reg_off + entry + 4 * ac as usize, sc);
                 } else if n.is_gic && n.reg_len >= 2 * entry {
+                    info.gic_version = 2;
                     info.gicd = read_cells(b, n.reg_off, ac);
                     info.gicc = read_cells(b, n.reg_off + entry, ac);
                 } else if n.is_uart && n.reg_len >= entry {
@@ -282,7 +298,7 @@ pub fn parse(addr: u64) -> MachineInfo {
                             || strlist_contains(v, b"arm,psci-0.2")
                             || strlist_contains(v, b"arm,psci");
                         n.is_psci |= psci;
-                        info.gic_v3 |= strlist_contains(v, b"arm,gic-v3");
+                        n.is_gicv3 |= strlist_contains(v, b"arm,gic-v3");
                     }
                     _ => {}
                 }

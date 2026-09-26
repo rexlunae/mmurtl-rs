@@ -2,7 +2,7 @@
 //!
 //! Boot from an ELF at EL1 (dropping from EL2 if needed); PL011 serial;
 //! the device tree for RAM, CPUs, and devices; an identity-mapped MMU
-//! with EL0/EL1 permission bits; an EL1 vector table; GICv2 + the generic
+//! with EL0/EL1 permission bits; an EL1 vector table; GICv2/GICv3 + the generic
 //! timer; PSCI multi-core boot; virtio-mmio devices; EL0 userspace via
 //! `svc #0`.
 
@@ -14,6 +14,7 @@ pub mod memory;
 pub mod mmu;
 pub mod serial;
 pub mod smp;
+pub mod timer;
 pub mod user_programs;
 pub mod virtio_mmio;
 
@@ -73,16 +74,17 @@ pub fn set_cpu_index(cpu: usize) {
     unsafe { asm!("msr tpidr_el1, {}", in(reg) cpu as u64) };
 }
 
-/// The calling CPU's GIC CPU interface number (the SGI target)
+/// The calling CPU's IPI target (GICv2 interface number or GICv3
+/// affinity)
 pub fn hw_cpu_id() -> u32 {
-    gic::cpu_interface_id()
+    gic::cpu_target_id()
 }
 
 pub fn ipi_available() -> bool {
     true
 }
 
-/// Kick the CPU with GIC interface number `hw_id` into its scheduler
+/// Kick the CPU identified by `hw_id` into its scheduler
 pub fn send_resched_ipi(hw_id: u32) {
     gic::send_resched(hw_id);
 }
@@ -97,11 +99,11 @@ pub fn cpus_online() -> usize {
 
 /// Start the calling CPU's scheduler tick (the EL1 virtual timer)
 pub fn start_tick(hz: u32, _boot_cpu: bool) {
-    gic::start_timer(hz);
+    timer::start(hz);
 }
 
 pub fn delay_ms(ms: u32) {
-    gic::delay_ms(ms);
+    timer::delay_ms(ms);
 }
 
 /// Give up the CPU: `svc` from EL1 enters the vector table's yield path

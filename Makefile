@@ -7,6 +7,7 @@ UEFI_IMG = target/mmurtl-rs-uefi.img
 ARM64_TARGET = aarch64-unknown-none-softfloat
 ARM64_KERNEL = target/$(ARM64_TARGET)/release/mmurtl-rs
 ARM64_SMP ?= 4
+ARM64_GIC ?= 3
 
 .PHONY: all build bios uefi run-bios run-uefi arm64 run-arm64 clean
 
@@ -48,13 +49,14 @@ arm64:
 		--target $(ARM64_TARGET) \
 		--release
 
-# Run the arm64 kernel on QEMU virt (GICv2, $(ARM64_SMP) CPUs). Add a disk
+# Run the arm64 kernel on QEMU virt (GICv$(ARM64_GIC), $(ARM64_SMP) CPUs; GICv2
+# works too, up to 8 CPUs). Add a disk
 # and NIC with e.g.:
 #   -drive if=none,format=raw,file=disk.img,id=hd0 -device virtio-blk-device,drive=hd0
 #   -netdev user,id=n0 -device virtio-net-device,netdev=n0
 run-arm64: arm64
 	qemu-system-aarch64 \
-		-machine virt,gic-version=2 \
+		-machine virt,gic-version=$(ARM64_GIC) \
 		-cpu cortex-a72 \
 		-smp $(ARM64_SMP) \
 		-m 256M \

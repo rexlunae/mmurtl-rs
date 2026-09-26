@@ -60,6 +60,15 @@ drop_to_el1:
     mov x9, #3                  // CNTHCTL_EL2: EL1 physical timer/counter access
     msr cnthctl_el2, x9
     msr cntvoff_el2, xzr
+    // If the GICv3 system-register interface exists, let EL1 use it:
+    // ICC_SRE_EL2 = Enable | DIB | DFB | SRE
+    mrs x9, id_aa64pfr0_el1
+    ubfx x9, x9, #24, #4
+    cbz x9, 4f
+    mov x9, #0xF
+    msr S3_4_C12_C9_5, x9
+    isb
+4:
     mov x9, #0x3C5              // SPSR_EL2: EL1h, DAIF masked
     msr spsr_el2, x9
     mov x9, sp
@@ -143,9 +152,6 @@ extern "C" fn arm64_boot_main(dtb_arg: u64) -> ! {
         fdt::PsciConduit::None => "absent",
     });
     crate::serial::write_str("\n");
-    if info.gic_v3 {
-        panic!("GICv3 is not supported yet — run QEMU with -machine virt,gic-version=2");
-    }
 
     // RAM
     let ram = &info.ram[..info.ram_count];
@@ -168,16 +174,28 @@ extern "C" fn arm64_boot_main(dtb_arg: u64) -> ! {
     super::memory::init(ram, dtb, kernel_start, kernel_end);
 
     // Interrupts: GIC distributor + this CPU, UART RX, the generic timer
-    crate::serial::write_str("[GIC] GICv2: distributor 0x");
-    crate::serial::write_hex(info.gicd);
-    crate::serial::write_str(", CPU interface 0x");
-    crate::serial::write_hex(info.gicc);
-    crate::serial::write_str("; timer INTID ");
-    crate::serial::write_dec(info.timer_irq as u64);
-    crate::serial::write_str(" @ ");
-    crate::serial::write_dec(super::gic::frequency() / 1_000_000);
-    crate::serial::write_str(" MHz\n");
-    super::gic::init(info.gicd, info.gicc, info.timer_irq, info.uart_irq);
+    {
+        use core::fmt::Write;
+        let mut line: heapless::String<160> = heapless::String::new();
+        if info.gic_version == 3 {
+            let _ = write!(line, "[GIC] GICv3: distributor 0x{:x}, redistributors 0x{:x} (+0x{:x})",
+                info.gicd, info.gicr, info.gicr_size);
+        } else {
+            let _ = write!(line, "[GIC] GICv2: distributor 0x{:x}, CPU interface 0x{:x}",
+                info.gicd, info.gicc);
+        }
+        let _ = write!(line, "; timer INTID {} @ {} MHz\n",
+            info.timer_irq, super::timer::frequency() / 1_000_000);
+        crate::serial::write_str(&line);
+    }
+    super::gic::init(&super::gic::GicConfig {
+        version: info.gic_version,
+        gicd: info.gicd,
+        gicc_or_gicr: if info.gic_version == 3 { info.gicr } else { info.gicc },
+        gicr_size: info.gicr_size,
+        timer_irq: info.timer_irq,
+        uart_irq: info.uart_irq,
+    });
     super::serial::enable_rx_irq();
 
     crate::serial::write_str("[INIT] Scheduler...\n");

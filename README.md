@@ -31,7 +31,7 @@ is common to both unless marked.
 - ✅ Network: virtio-net driver with a live ARP round trip through QEMU user-net
 - ✅ **(arm64)** Boots on QEMU `virt` from an ELF at EL1 (or EL2); PL011
   console; RAM, CPUs, and devices from the device tree
-- ✅ **(arm64)** Identity-mapped MMU, EL1 vector table, GICv2 + generic
+- ✅ **(arm64)** Identity-mapped MMU, EL1 vector table, GICv2/GICv3 + generic
   timer tick, PSCI multi-core boot, virtio-mmio (legacy + modern)
 - ✅ **(amd64)** Input: PS/2 keyboard driver — scancode set 1 → ASCII with shift, char queue
 - ✅ Filesystem: exFAT — full API: subdirectories, mkdir, create, read,
@@ -60,10 +60,10 @@ make arm64
 ### arm64
 
 ```bash
-make run-arm64              # QEMU virt, GICv2, 4 CPUs (ARM64_SMP=N to change)
+make run-arm64              # QEMU virt, GICv3, 4 CPUs (ARM64_SMP=N, ARM64_GIC=2|3)
 
 # With a disk and NIC (virtio-mmio):
-qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a72 -smp 4 -m 256M \
+qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -smp 4 -m 256M \
     -nographic -kernel target/aarch64-unknown-none-softfloat/release/mmurtl-rs \
     -drive if=none,format=raw,file=test-disk.img,id=hd0 -device virtio-blk-device,drive=hd0 \
     -netdev user,id=n0 -device virtio-net-device,netdev=n0
@@ -107,7 +107,7 @@ src/
     │                    SMP trampoline, paging, PCI, virtio-pci, xHCI,
     │                    int 0x80, ring-3 programs
     └── arm64/         — _start + linker script, PL011, device tree, MMU,
-                         vectors, GICv2 + timer, PSCI SMP, virtio-mmio,
+                         vectors, GICv2/v3 + timer, PSCI SMP, virtio-mmio,
                          svc #0, EL0 programs
 ```
 
@@ -446,9 +446,9 @@ own boot path.
 | Discovery | ACPI MADT, PCI | Device tree (RAM, CPUs, PSCI, GIC, UART, virtio) |
 | Console | 16550 COM1 | PL011 (RX interrupt feeds console input) |
 | Paging | bootloader tables + offset window | own identity map; EL0/EL1 AP bits, PXN/UXN |
-| Interrupts | IDT; PIC → Local/I/O APIC | EL1 vector table; GICv2 |
+| Interrupts | IDT; PIC → Local/I/O APIC | EL1 vector table; GICv2 or GICv3 (redistributors, ICC system registers) |
 | Tick | LAPIC timer (PIT fallback) | generic virtual timer (PPI 27) |
-| Reschedule IPI | vector 0x30 | SGI 1 |
+| Reschedule IPI | vector 0x30 | SGI 1 (GICv3: routed by MPIDR affinity) |
 | Yield | `int 0x31` | `svc` from EL1 |
 | Multi-core | INIT-SIPI-SIPI trampoline | PSCI `CPU_ON` (HVC/SMC per DT) |
 | Syscalls | `int 0x80` (DPL 3), TSS.RSP0 per task | `svc #0` from EL0 (x8 = number) |
@@ -475,9 +475,17 @@ The same exFAT disk image can be booted alternately on both: its
 per-boot log keeps counting across architectures and stays
 `fsck.exfat`-clean.
 
-arm64 limitations: GICv2 only (so at most 8 CPUs; run QEMU with
-`gic-version=2`), RAM beyond the first 4 GiB above 1 GiB is ignored,
-and no PCI (devices come from virtio-mmio).
+With GICv3 the port runs well past GICv2's 8-CPU limit — verified at
+16 and 32 CPUs, where CPUs 16-31 sit in a second affinity cluster
+(MPIDR 0x100+) and are reached by affinity-routed SGIs:
+```
+[GIC] GICv3: distributor 0x8000000, redistributors 0x80a0000 (+0xf60000); timer INTID 27 @ 62 MHz
+[SMP] CPU 16 online (MPIDR 0x100), scheduling
+[SMP] 32 CPU(s) online
+```
+
+arm64 limitations: RAM beyond the first 4 GiB above 1 GiB is ignored;
+GICv3 support covers the first redistributor region (no ITS/LPIs).
 
 ## USB Driver (xHCI)
 
