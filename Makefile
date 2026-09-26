@@ -9,7 +9,7 @@ ARM64_KERNEL = target/$(ARM64_TARGET)/release/mmurtl-rs
 ARM64_SMP ?= 4
 ARM64_GIC ?= 3
 
-.PHONY: all build bios uefi run-bios run-uefi arm64 run-arm64 clean
+.PHONY: all build bios uefi run-bios run-uefi arm64 run-arm64 user user-arm64 disk disk-arm64 clean
 
 all: build
 
@@ -64,6 +64,23 @@ run-arm64: arm64
 		-m 256M \
 		-nographic \
 		-kernel $(ARM64_KERNEL)
+
+# User programs (Rust, ELF) for the kernel to load from /BIN on its disk.
+# amd64 uses the large code model: the user window sits above 2 GiB.
+user:
+	cd user && RUSTFLAGS="-C code-model=large -C relocation-model=static" \
+		cargo build -Z build-std=core --target x86_64-unknown-none --release
+
+user-arm64:
+	cd user && RUSTFLAGS="-C relocation-model=static" \
+		cargo build -Z build-std=core --target aarch64-unknown-none-softfloat --release
+
+# exFAT disk images with the programs in /BIN (needs root for the loop device)
+disk: user
+	./tools/make-disk.sh disk-amd64.img x86_64-unknown-none
+
+disk-arm64: user-arm64
+	./tools/make-disk.sh disk-arm64.img aarch64-unknown-none-softfloat
 
 # Run with debug symbols
 run-debug: build

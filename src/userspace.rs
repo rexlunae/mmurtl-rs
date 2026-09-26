@@ -74,6 +74,8 @@ static TID_ROGUE_READ: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PRIV: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PTR: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PEEK: AtomicU32 = AtomicU32::new(0);
+/// ELF programs loaded from /BIN on the exFAT disk
+static ELF_TIDS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 
 /// Load a program into its own address space and start it as a user-mode
 /// task; returns (task ID, entry address)
@@ -118,6 +120,50 @@ pub fn demo() {
     // The same reader, aimed at another program's code: with per-task
     // address spaces those pages simply aren't mapped for it
     TID_ROGUE_PEEK.store(spawn("rogue_peek", prog::rogue_read(), uecho_code), Ordering::SeqCst);
+
+    spawn_elf_programs();
+}
+
+/// Load every `*.ELF` in /BIN on the exFAT disk and run it as a user task
+fn spawn_elf_programs() {
+    use alloc::string::String;
+    let entries = match crate::fs::exfat::read_dir("BIN") {
+        Some(e) => e,
+        None => {
+            crate::serial::write_line("[USER] No /BIN directory on disk — no ELF programs to run");
+            return;
+        }
+    };
+    let mut n = 0;
+    for (name, is_dir, size) in entries {
+        if is_dir || !name.to_ascii_uppercase().ends_with(".ELF") || n >= ELF_TIDS.len() {
+            continue;
+        }
+        let mut path = String::from("BIN/");
+        path.push_str(&name);
+        let mut line: heapless::String<128> = heapless::String::new();
+        let tid = match crate::fs::exfat::read_file(&path)
+            .ok_or("read failed")
+            .and_then(|img| crate::memory::user::load_elf(&img))
+        {
+            Ok(img) => {
+                // Task names live forever; ELF names come from disk
+                let task_name: &'static str = alloc::boxed::Box::leak(name.clone().into_boxed_str());
+                let tid = scheduler::create_user_task(img.entry, img.stack_top, 0, img.space, img.slot, task_name);
+                let _ = write!(line, "[USER] Loaded /{} ({} bytes) as T{}, entry 0x{:x}\n", path, size, tid, img.entry);
+                tid
+            }
+            Err(e) => {
+                let _ = write!(line, "[USER] /{}: not loaded: {}\n", path, e);
+                0
+            }
+        };
+        crate::serial::write_str(&line);
+        if tid != 0 {
+            ELF_TIDS[n].store(tid, Ordering::SeqCst);
+            n += 1;
+        }
+    }
 }
 
 // ========================================================================
@@ -170,6 +216,47 @@ fn exited(tid: &AtomicU32) -> bool {
 
 fn killed(tid: &AtomicU32) -> bool {
     was_killed(tid.load(Ordering::SeqCst))
+}
+
+/// Build a minimal one-segment ELF image for loader tests
+fn test_elf(machine: u16, vaddr: u64, flags: u32, entry: u64) -> alloc::vec::Vec<u8> {
+    let mut img = alloc::vec![0u8; 64 + 56 + 16];
+    img[0..4].copy_from_slice(b"\x7fELF");
+    img[4] = 2; // 64-bit
+    img[5] = 1; // little-endian
+    img[6] = 1;
+    img[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    img[18..20].copy_from_slice(&machine.to_le_bytes());
+    img[24..32].copy_from_slice(&entry.to_le_bytes());
+    img[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
+    img[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
+    img[56..58].copy_from_slice(&1u16.to_le_bytes()); // phnum
+    let ph = 64;
+    img[ph..ph + 4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+    img[ph + 4..ph + 8].copy_from_slice(&flags.to_le_bytes());
+    img[ph + 8..ph + 16].copy_from_slice(&120u64.to_le_bytes()); // offset
+    img[ph + 16..ph + 24].copy_from_slice(&vaddr.to_le_bytes());
+    img[ph + 32..ph + 40].copy_from_slice(&16u64.to_le_bytes()); // filesz
+    img[ph + 40..ph + 48].copy_from_slice(&16u64.to_le_bytes()); // memsz
+    img
+}
+
+/// The ELF loader must accept a well-formed image and reject malformed
+/// ones (images come from disk: untrusted input)
+fn elf_loader_tests() -> (usize, usize) {
+    use crate::memory::user::check_elf;
+    let base = crate::memory::user::USER_BASE + 0x300_0000;
+    let m = crate::arch::ELF_MACHINE;
+    let good = check_elf(&test_elf(m, base, 5, base)).is_ok();
+    let bad = [
+        check_elf(b"definitely not an ELF image, just some bytes of text......................"),
+        check_elf(&test_elf(m ^ 0x1, base, 5, base)), // other architecture
+        check_elf(&test_elf(m, 0xFFFF_8000_0000_0000, 5, 0xFFFF_8000_0000_0000)), // kernel space
+        check_elf(&test_elf(m, base, 7, base)), // writable + executable
+        check_elf(&test_elf(m, base, 4, base)), // entry not executable
+    ];
+    let rejected = bad.iter().filter(|r| r.is_err()).count();
+    (good as usize, rejected)
 }
 
 /// Churn: run short-lived tasks in waves and verify every frame they used
@@ -256,6 +343,24 @@ extern "C" fn user_check_task() -> ! {
     let mut rqb = Rqb::with_service(SVC_TEXT_SHUTDOWN);
     let status = scheduler::send_rqb(uecho, &mut rqb);
     pass &= report("user receiver exits -> sender gets Aborted", status == RqbStatus::Aborted);
+
+    // ELF programs from the disk ran to completion (not killed)
+    let elfs: heapless::Vec<u32, 8> = ELF_TIDS
+        .iter()
+        .map(|t| t.load(Ordering::SeqCst))
+        .filter(|&t| t != 0)
+        .collect();
+    if !elfs.is_empty() {
+        let done = wait_until(10_000, || {
+            elfs.iter().all(|&t| matches!(scheduler::task_state(t), Some(TaskState::Exited) | None))
+        });
+        let clean = elfs.iter().all(|&t| !was_killed(t));
+        let mut what: heapless::String<64> = heapless::String::new();
+        let _ = write!(what, "{} ELF programs from /BIN ran to completion", elfs.len());
+        pass &= report(&what, done && clean);
+    }
+    let (good, rejected) = elf_loader_tests();
+    pass &= report("ELF loader: accepts valid, rejects 5 bad", good == 1 && rejected == 5);
 
     // Exited tasks' stacks and address spaces are reclaimed
     let (ran, frames, leaked) = churn_test();

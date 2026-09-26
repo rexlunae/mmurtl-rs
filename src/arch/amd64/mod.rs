@@ -32,6 +32,9 @@ pub use memory::{
 /// Architecture name for the boot log
 pub const NAME: &str = "amd64";
 
+/// ELF e_machine for user programs (EM_X86_64)
+pub const ELF_MACHINE: u16 = 0x3E;
+
 /// How user code enters the kernel
 pub const SYSCALL_MECHANISM: &str = "int 0x80 gate (DPL 3)";
 

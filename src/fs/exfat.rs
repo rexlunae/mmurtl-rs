@@ -616,6 +616,27 @@ pub fn mounted() -> bool {
 // ========================================================================
 
 /// Print a directory listing ("" or "/" for root)
+/// Entries of a directory as (name, is_directory, size in bytes)
+pub fn read_dir(path: &str) -> Option<Vec<(String, bool, u64)>> {
+    let guard = VOLUME.lock();
+    let vol = guard.as_ref()?;
+    let dir = if components(path).is_empty() {
+        root_ref(vol)
+    } else {
+        lookup(vol, path).filter(|(_, f)| f.is_dir()).map(|(_, f)| dir_ref_of(&f))?
+    };
+    let (_, data) = load_dir(vol, &dir)?;
+    Some(
+        parse_entries(&data)
+            .into_iter()
+            .map(|f| {
+                let is_dir = f.is_dir();
+                (f.name, is_dir, f.data_length)
+            })
+            .collect(),
+    )
+}
+
 pub fn list_dir(path: &str) {
     let guard = VOLUME.lock();
     let vol = match guard.as_ref() {

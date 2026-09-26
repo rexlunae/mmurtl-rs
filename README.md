@@ -111,6 +111,8 @@ src/
     └── arm64/         — _start + linker script, PL011, device tree, MMU,
                          vectors, GICv2/v3 + timer, PSCI SMP, virtio-mmio,
                          svc #0, EL0 programs
+user/                  — user-program runtime + Rust programs (ELF)
+tools/                 — boot-image builder, disk-image + dependency scripts
 ```
 
 ## Architecture
@@ -449,9 +451,41 @@ growth is accounted for separately, so it can't mask a leak):
 [USER]   16 churn tasks reclaimed (272 frames)      ✓
 ```
 
-Limitations: programs are flat binaries, not ELF; the kernel heap is a
-bump allocator, so small kernel-side task metadata is not recycled; no
-ASIDs on arm64 (each address-space switch flushes the local TLB).
+### ELF programs from disk (written in Rust)
+
+User programs no longer have to be assembly blobs inside the kernel. The
+`user/` crate is a small runtime (the syscall ABI for both
+architectures, RQB messages, `println!`, `entry!`) plus programs written
+in ordinary Rust, built as ELF executables linked into the user window.
+At boot the kernel loads every `*.ELF` in `/BIN` on the exFAT disk,
+each into its own address space:
+
+```bash
+make user && make disk          # amd64: builds user/ and disk-amd64.img
+make user-arm64 && make disk-arm64
+```
+```
+[USER] Loaded /BIN/HELLO.ELF (19104 bytes) as T24, entry 0x640003000000
+[USER T24 CPL3] Rust ELF program running as task 24
+[USER T24 CPL3] sysinfo (task 15) replied, status 0: MMURTL/RS v0.1.0: 4 CPUs, up 0 ms
+[USER T24 CPL3] longest Collatz chain below 20000 starts at 17647 (279 steps)
+[USER T25 CPL3] sieve: 1229 primes below 10000 (data segment says 8)
+[USER]   2 ELF programs from /BIN ran to completion ✓
+[USER]   ELF loader: accepts valid, rejects 5 bad ✓
+```
+
+The loader treats the image as untrusted: it checks the ELF identity,
+type, and machine, requires every `PT_LOAD` segment to lie inside the
+user window (below the stack) and inside the file, refuses
+writable+executable segments and segments that share a page, and
+requires the entry point to be in an executable segment — all before
+mapping anything. Segments are mapped with exactly their permissions,
+zero-filled past their file data (`.bss`).
+
+Limitations: the kernel heap is a bump allocator, so small kernel-side
+task metadata is not recycled; no ASIDs on arm64 (each address-space
+switch flushes the local TLB); ELF programs are static executables (no
+dynamic linking or relocation).
 
 ## Architecture ports (amd64 + arm64)
 

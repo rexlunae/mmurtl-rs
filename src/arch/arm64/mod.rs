@@ -27,6 +27,9 @@ pub use mmu::{free_address_space, map_user_page, new_address_space, query_page, 
 /// Architecture name for the boot log
 pub const NAME: &str = "arm64";
 
+/// ELF e_machine for user programs (EM_AARCH64)
+pub const ELF_MACHINE: u16 = 0xB7;
+
 /// How user code enters the kernel
 pub const SYSCALL_MECHANISM: &str = "svc #0 from EL0";
 
