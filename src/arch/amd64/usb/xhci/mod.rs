@@ -503,7 +503,7 @@ impl XhciDriver {
 pub fn init_xhci() {
     crate::serial::write_str("[USB] Scanning for xHCI controllers...\n");
 
-    let controllers = crate::pci::find_usb_controllers();
+    let controllers = crate::arch::pci::find_usb_controllers();
     if controllers.is_empty() {
         crate::serial::write_str("[USB] No USB controllers found.\n");
         return;

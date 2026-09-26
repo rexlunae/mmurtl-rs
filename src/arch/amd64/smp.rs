@@ -154,7 +154,7 @@ extern "C" {
 unsafe fn tramp_field_ptr(field: *const u8) -> *mut u64 {
     let start = &ap_trampoline_start as *const u8 as u64;
     let offset = field as u64 - start;
-    let virt = crate::memory::page_table::phys_to_virt(
+    let virt = crate::arch::page_table::phys_to_virt(
         x86_64::PhysAddr::new(TRAMPOLINE_PHYS + offset),
     );
     virt.as_mut_ptr()
@@ -169,9 +169,9 @@ unsafe fn install_trampoline() {
 
     // The AP enables paging while executing at 0x8000, so the kernel page
     // tables must identity-map that page (and it must be executable).
-    crate::memory::identity_map_executable(TRAMPOLINE_PHYS);
+    crate::arch::memory::identity_map_executable(TRAMPOLINE_PHYS);
 
-    let dst = crate::memory::page_table::phys_to_virt(
+    let dst = crate::arch::page_table::phys_to_virt(
         x86_64::PhysAddr::new(TRAMPOLINE_PHYS),
     )
     .as_mut_ptr::<u8>();
@@ -196,16 +196,16 @@ unsafe fn install_trampoline() {
 ///
 /// Must be called with interrupts disabled, after APIC + heap init.
 pub fn boot_aps() {
-    if !crate::apic::enabled() {
+    if !crate::arch::apic::enabled() {
         crate::serial::write_line("[SMP] APIC not enabled — cannot boot APs");
         return;
     }
-    let madt = match crate::acpi::madt() {
+    let madt = match crate::arch::acpi::madt() {
         Some(m) => m,
         None => return,
     };
 
-    let bsp_id = crate::apic::local_apic_id();
+    let bsp_id = crate::arch::apic::local_apic_id();
     let ap_count = madt
         .cpu_apic_ids
         .iter()
@@ -261,19 +261,19 @@ fn boot_one_ap(apic_id: u32, cpu_num: u64) {
     crate::serial::write_str(")...\n");
 
     // INIT — put the AP into wait-for-SIPI state
-    crate::apic::send_init(apic_id);
-    crate::apic::pit_wait_ms(10);
+    crate::arch::apic::send_init(apic_id);
+    crate::arch::apic::pit_wait_ms(10);
 
     // First SIPI: real-mode entry at (vector << 12) = 0x8000
     let sipi_vector = (TRAMPOLINE_PHYS >> 12) as u8;
-    crate::apic::send_sipi(apic_id, sipi_vector);
+    crate::arch::apic::send_sipi(apic_id, sipi_vector);
 
     if wait_for_ap(20) {
         return;
     }
 
     // Slow starter — the spec says send a second SIPI
-    crate::apic::send_sipi(apic_id, sipi_vector);
+    crate::arch::apic::send_sipi(apic_id, sipi_vector);
     if !wait_for_ap(1000) {
         crate::serial::write_str("[SMP] CPU ");
         crate::serial::write_dec(cpu_num);
@@ -289,7 +289,7 @@ fn wait_for_ap(timeout_ms: u32) -> bool {
         if AP_READY.load(Ordering::SeqCst) {
             return true;
         }
-        crate::apic::pit_wait_ms(1);
+        crate::arch::apic::pit_wait_ms(1);
     }
     AP_READY.load(Ordering::SeqCst)
 }
@@ -302,15 +302,15 @@ fn wait_for_ap(timeout_ms: u32) -> bool {
 #[no_mangle]
 pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
     // Per-CPU GDT/TSS/IST, shared IDT, then enable this CPU's LAPIC
-    crate::gdt::init_ap(cpu_num as usize);
-    crate::interrupts::init_ap();
-    crate::apic::enable_current_cpu();
+    crate::arch::gdt::init_ap(cpu_num as usize);
+    crate::arch::interrupts::init_ap();
+    crate::arch::apic::enable_current_cpu();
 
     // Join the scheduler: this park loop becomes the CPU's idle task, and
     // the per-CPU LAPIC timer starts delivering 100 Hz scheduler ticks.
     crate::scheduler::register_ap(cpu_num as usize);
 
-    let apic_id = crate::apic::local_apic_id();
+    let apic_id = crate::arch::apic::local_apic_id();
     CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
 
     crate::serial::write_str("[SMP] CPU ");

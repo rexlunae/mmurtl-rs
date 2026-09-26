@@ -34,7 +34,7 @@ const SERVICE_NAME_MAX: usize = 16;
 static SERVICES: Mutex<Vec<(heapless::String<SERVICE_NAME_MAX>, u32)>> = Mutex::new(Vec::new());
 
 fn with_services<R>(f: impl FnOnce(&mut Vec<(heapless::String<SERVICE_NAME_MAX>, u32)>) -> R) -> R {
-    x86_64::instructions::interrupts::without_interrupts(|| f(&mut SERVICES.lock()))
+    crate::arch::without_interrupts(|| f(&mut SERVICES.lock()))
 }
 
 /// Register `tid` under `name` (replacing any previous owner of the name)

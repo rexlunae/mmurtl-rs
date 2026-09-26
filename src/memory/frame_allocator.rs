@@ -1,22 +1,14 @@
 //! Physical Frame Allocator — Manages 4 KiB physical memory frames.
 //!
-//! On boot, the bootloader provides a memory map. We build a bitmap tracking
-//! every 4 KiB frame in physical memory. Frames marked as usable can be
-//! allocated; all other regions (kernel, bootloader, MMIO, ACPI, etc.) are
-//! marked as used.
+//! Architecture-neutral: the boot code hands in the list of usable RAM
+//! ranges (from the bootloader's memory map on amd64, from the device tree
+//! on arm64). A bitmap tracks every 4 KiB frame from physical address 0;
+//! only frames inside a usable range start out free, so MMIO holes, the
+//! kernel image, firmware tables, etc. are never handed out.
 //!
-//! IMPORTANT: All physical addresses are converted to virtual addresses using
-//! `phys_to_virt()` + physical memory offset, since the kernel runs in the
-//! higher half and physical addresses are not identity-mapped.
-
-use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
-use x86_64::PhysAddr;
-use x86_64::structures::paging::{PhysFrame, Size4KiB};
-
-/// Convert a physical address to a kernel-accessible virtual address
-fn phys_to_virt(phys: u64) -> u64 {
-    phys + crate::memory::page_table::physical_memory_offset()
-}
+//! Physical addresses are plain `u64`s; the CPU reaches a frame through
+//! `crate::arch::phys_to_virt` (an offset window on amd64, identity on
+//! arm64).
 
 /// Size of one physical frame
 pub const FRAME_SIZE: u64 = 4096; // 4 KiB
@@ -28,281 +20,180 @@ pub const MAX_PHYSICAL_MEMORY: u64 = 32 * 1024 * 1024 * 1024; // 32 GiB
 /// Number of bitmap entries needed
 const BITMAP_ENTRIES: usize = (MAX_PHYSICAL_MEMORY / FRAME_SIZE / 32) as usize;
 
+/// A physical address range `[start, end)`
+#[derive(Clone, Copy, Debug)]
+pub struct PhysRange {
+    pub start: u64,
+    pub end: u64,
+}
+
 /// Bitmap-based frame allocator
 pub struct FrameAllocator {
     /// Bitmap: 1 bit per frame (1 = allocated/used, 0 = free)
     bitmap: &'static mut [u32; BITMAP_ENTRIES],
-    /// Total number of physical frames tracked
+    /// Number of frames covered by usable RAM (scan limit)
     total_frames: usize,
     /// Number of free frames
     free_frames: usize,
-    /// Hints for faster allocation (last allocated frame index)
+    /// Hint for faster allocation (last allocated frame index)
     last_search: usize,
 }
 
+fn virt(phys: u64) -> u64 {
+    crate::arch::phys_to_virt(phys) as u64
+}
+
+/// Mark whole frames overlapping `[start, end)` used, or free only the
+/// frames lying entirely inside it
+fn set_range(bitmap: &mut [u32; BITMAP_ENTRIES], start: u64, end: u64, used: bool) {
+    let end = end.min(MAX_PHYSICAL_MEMORY);
+    let (first, last) = if used {
+        (start / FRAME_SIZE, (end + FRAME_SIZE - 1) / FRAME_SIZE)
+    } else {
+        ((start + FRAME_SIZE - 1) / FRAME_SIZE, end / FRAME_SIZE)
+    };
+    for idx in first as usize..(last as usize).min(BITMAP_ENTRIES * 32) {
+        if used {
+            bitmap[idx / 32] |= 1 << (idx % 32);
+        } else {
+            bitmap[idx / 32] &= !(1 << (idx % 32));
+        }
+    }
+}
+
 impl FrameAllocator {
-    /// Initialize the frame allocator from the bootloader's memory map.
-    ///
-    /// The bitmap itself is placed at the start of the first usable memory region.
-    /// All physical addresses are converted to virtual via phys_to_virt.
-    pub fn init(memory_regions: &MemoryRegions) -> &'static mut Self {
-        let (header_addr, reserved_frames, total_frames) = Self::build_bitmap(memory_regions);
+    /// Build the allocator from the usable RAM ranges, then mark `reserved`
+    /// ranges (e.g. low memory, boot structures) as used. The allocator's
+    /// own header + bitmap are placed in, and reserved from, the first
+    /// usable range with room for them at or above `min_addr`.
+    pub fn init(usable: &[PhysRange], reserved: &[PhysRange], min_addr: u64) -> &'static mut Self {
+        let top = usable.iter().map(|r| r.end).max().unwrap_or(0).min(MAX_PHYSICAL_MEMORY);
+        let total_frames = (top / FRAME_SIZE) as usize;
 
-        // Layout: [FrameAllocator header: 1 frame][bitmap: N frames]
+        let bitmap_bytes = BITMAP_ENTRIES as u64 * 4;
+        let reserved_frames = 1 + (bitmap_bytes + FRAME_SIZE - 1) / FRAME_SIZE; // header + bitmap
+        let reserved_bytes = reserved_frames * FRAME_SIZE;
+
+        let header_addr = usable
+            .iter()
+            .find_map(|r| {
+                let start = (r.start.max(min_addr) + FRAME_SIZE - 1) & !(FRAME_SIZE - 1);
+                (start + reserved_bytes <= r.end).then_some(start)
+            })
+            .expect("No usable region large enough for the frame bitmap");
+
         let bitmap_addr = header_addr + FRAME_SIZE;
-        let bitmap_virt = phys_to_virt(bitmap_addr);
-        let bitmap_ptr = bitmap_virt as *mut u32;
-        let bitmap_slice = unsafe {
-            core::slice::from_raw_parts_mut(bitmap_ptr, BITMAP_ENTRIES)
-        };
+        let bitmap: &'static mut [u32; BITMAP_ENTRIES] =
+            unsafe { &mut *(virt(bitmap_addr) as *mut [u32; BITMAP_ENTRIES]) };
 
-        // Zero out the entire bitmap
-        for entry in bitmap_slice.iter_mut() {
-            *entry = 0;
+        // Everything starts used; only usable ranges are freed
+        bitmap.fill(u32::MAX);
+        for r in usable {
+            set_range(bitmap, r.start, r.end, false);
         }
-
-        let mark_frame_used = |bitmap: &mut [u32], frame_idx: usize| {
-            if frame_idx < BITMAP_ENTRIES * 32 {
-                bitmap[frame_idx / 32] |= 1 << (frame_idx % 32);
-            }
-        };
-
-        // Mark all frames beyond the actual RAM as "used" (so they can't be allocated)
-        let actual_frames = (Self::detect_top_of_ram(memory_regions) / FRAME_SIZE) as usize;
-        if actual_frames < total_frames {
-            for frame_idx in actual_frames..total_frames {
-                mark_frame_used(bitmap_slice, frame_idx);
-            }
+        for r in reserved {
+            set_range(bitmap, r.start, r.end, true);
         }
+        // The header + bitmap's own frames
+        set_range(bitmap, header_addr, header_addr + reserved_bytes, true);
 
-        // Mark all non-usable regions as used
-        Self::mark_used(memory_regions, bitmap_slice);
+        let free_count = (0..total_frames)
+            .filter(|&i| bitmap[i / 32] & (1 << (i % 32)) == 0)
+            .count();
 
-        // Reserve the first MiB: real-mode IVT, BDA, EBDA, and the SMP AP
-        // trampoline at 0x8000 all live here.
-        for frame_idx in 0..(0x10_0000 / FRAME_SIZE) as usize {
-            mark_frame_used(bitmap_slice, frame_idx);
-        }
+        crate::serial::write_str("[FRAME] Bitmap at physical 0x");
+        crate::serial::write_hex(bitmap_addr);
+        crate::serial::write_str(", tracking ");
+        crate::serial::write_dec(total_frames as u64);
+        crate::serial::write_str(" frames, free=");
+        crate::serial::write_dec(free_count as u64);
+        crate::serial::write_str(" (");
+        crate::serial::write_dec((free_count as u64 * FRAME_SIZE) / (1024 * 1024));
+        crate::serial::write_str(" MiB)\n");
 
-        // Reserve the allocator header + bitmap's own frames so they are
-        // never handed out (previously they were left allocatable and could
-        // be clobbered by heap pages).
-        let first_reserved = (header_addr / FRAME_SIZE) as usize;
-        for frame_idx in first_reserved..first_reserved + reserved_frames as usize {
-            mark_frame_used(bitmap_slice, frame_idx);
-        }
-
-        // Count free frames
-        let mut free_count = 0;
-        for frame_idx in 0..actual_frames {
-            let word = frame_idx / 32;
-            let bit = frame_idx % 32;
-            if bitmap_slice[word] & (1 << bit) == 0 {
-                free_count += 1;
-            }
-        }
-
-        serial_write_str("[FRAME] Bitmap at physical 0x");
-        serial_write_hex(bitmap_addr);
-        serial_write_str(" (virt 0x");
-        serial_write_hex(bitmap_virt);
-        serial_write_str("), total=");
-        serial_write_dec(total_frames as u64);
-        serial_write_str(", free=");
-        serial_write_dec(free_count as u64);
-        serial_write_str(" (");
-        serial_write_dec((free_count as u64 * FRAME_SIZE) / (1024 * 1024));
-        serial_write_str(" MiB)\n");
-
-        // Place the FrameAllocator header in its own frame, just before the bitmap
-        let allocator_virt = phys_to_virt(header_addr) as *mut FrameAllocator;
+        let header = virt(header_addr) as *mut FrameAllocator;
         unsafe {
-            allocator_virt.write(FrameAllocator {
-                bitmap: core::mem::transmute(bitmap_slice.as_mut_ptr()),
+            header.write(FrameAllocator {
+                bitmap,
                 total_frames,
                 free_frames: free_count,
                 last_search: 0,
             });
-            &mut *allocator_virt
+            &mut *header
         }
     }
 
-    /// Find the top of usable RAM (highest usable address)
-    fn detect_top_of_ram(memory_regions: &MemoryRegions) -> u64 {
-        let mut top = 0u64;
-        for region in memory_regions.iter() {
-            if region.kind == MemoryRegionKind::Usable {
-                if region.end > top {
-                    top = region.end;
-                }
-            }
-        }
-        top
+    fn is_free(&self, idx: usize) -> bool {
+        self.bitmap[idx / 32] & (1 << (idx % 32)) == 0
     }
 
-    /// Calculate bitmap size and find placement.
-    ///
-    /// Returns (header physical address, total reserved frames, total tracked frames).
-    /// The reservation is one frame for the FrameAllocator header followed by
-    /// the bitmap frames.
-    fn build_bitmap(memory_regions: &MemoryRegions) -> (u64, u64, usize) {
-        let total_frames = (MAX_PHYSICAL_MEMORY / FRAME_SIZE) as usize;
-        let bitmap_bytes = (total_frames + 7) / 8;
-        let bitmap_frames = (bitmap_bytes as u64 + FRAME_SIZE - 1) / FRAME_SIZE;
-        let reserved_frames = 1 + bitmap_frames; // header + bitmap
-        let reserved_bytes = reserved_frames * FRAME_SIZE;
-
-        // Find the first usable region (above 1 MiB) large enough to hold
-        // the header + bitmap contiguously.
-        let header_addr = memory_regions
-            .iter()
-            .filter(|r| r.kind == MemoryRegionKind::Usable)
-            .find_map(|r| {
-                let start = r.start.max(0x10_0000);
-                let aligned = (start + FRAME_SIZE - 1) & !(FRAME_SIZE - 1);
-                if aligned + reserved_bytes <= r.end {
-                    Some(aligned)
-                } else {
-                    None
-                }
-            })
-            .expect("No usable region large enough for the frame bitmap");
-
-        (header_addr, reserved_frames, total_frames)
+    fn mark(&mut self, idx: usize) {
+        self.bitmap[idx / 32] |= 1 << (idx % 32);
     }
 
-    /// Mark all non-usable frames as allocated in the bitmap
-    fn mark_used(memory_regions: &MemoryRegions, bitmap: &mut [u32]) {
-        for region in memory_regions.iter() {
-            if region.kind != MemoryRegionKind::Usable {
-                let start_frame = (region.start / FRAME_SIZE) as usize;
-                let end_frame = ((region.end + FRAME_SIZE - 1) / FRAME_SIZE) as usize;
-                for frame_idx in start_frame..end_frame {
-                    if frame_idx < BITMAP_ENTRIES * 32 {
-                        let word = frame_idx / 32;
-                        let bit = frame_idx % 32;
-                        bitmap[word] |= 1 << bit;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Allocate a single physical frame (returns None if OOM)
-    pub fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        let total_frames = self.total_frames;
+    /// Allocate a single physical frame; returns its physical address
+    pub fn allocate_frame(&mut self) -> Option<u64> {
+        let total = self.total_frames;
         let start = self.last_search;
-
-        for i in 0..total_frames {
-            let frame_idx = (start + i) % total_frames;
-            let word = frame_idx / 32;
-            let bit = frame_idx % 32;
-            if self.bitmap[word] & (1 << bit) == 0 {
-                // Found a free frame — mark it used
-                self.bitmap[word] |= 1 << bit;
+        for i in 0..total {
+            let idx = (start + i) % total;
+            if self.is_free(idx) {
+                self.mark(idx);
                 self.free_frames -= 1;
-                self.last_search = frame_idx + 1;
-                let phys_addr = PhysAddr::new(frame_idx as u64 * FRAME_SIZE);
-                return Some(PhysFrame::<Size4KiB>::containing_address(phys_addr));
+                self.last_search = idx + 1;
+                return Some(idx as u64 * FRAME_SIZE);
             }
         }
-
-        serial_write_str("[FRAME] Out of memory!\n");
+        crate::serial::write_str("[FRAME] Out of memory!\n");
         None
     }
 
-    /// Allocate `count` physically contiguous frames (for DMA rings and
-    /// buffers). Returns the physical address of the first frame.
-    pub fn allocate_contiguous(&mut self, count: usize) -> Option<PhysAddr> {
+    /// Allocate `count` physically contiguous frames (for DMA rings,
+    /// buffers, and the arm64 heap). Returns the first frame's address.
+    pub fn allocate_contiguous(&mut self, count: usize) -> Option<u64> {
         if count == 0 {
             return None;
         }
-        let total = self.total_frames;
         let mut run_start = 0usize;
         let mut run_len = 0usize;
-
-        for frame_idx in 0..total {
-            let word = frame_idx / 32;
-            let bit = frame_idx % 32;
-            if self.bitmap[word] & (1 << bit) == 0 {
+        for idx in 0..self.total_frames {
+            if self.is_free(idx) {
                 if run_len == 0 {
-                    run_start = frame_idx;
+                    run_start = idx;
                 }
                 run_len += 1;
                 if run_len == count {
-                    // Mark the whole run used
-                    for idx in run_start..run_start + count {
-                        self.bitmap[idx / 32] |= 1 << (idx % 32);
+                    for i in run_start..run_start + count {
+                        self.mark(i);
                     }
                     self.free_frames -= count;
-                    return Some(PhysAddr::new(run_start as u64 * FRAME_SIZE));
+                    return Some(run_start as u64 * FRAME_SIZE);
                 }
             } else {
                 run_len = 0;
             }
         }
-
-        serial_write_str("[FRAME] No contiguous run found!\n");
+        crate::serial::write_str("[FRAME] No contiguous run found!\n");
         None
     }
 
     /// Free a previously allocated frame
-    pub fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
-        let addr = frame.start_address().as_u64();
-        let frame_idx = (addr / FRAME_SIZE) as usize;
-        let word = frame_idx / 32;
-        let bit = frame_idx % 32;
-
-        if self.bitmap[word] & (1 << bit) != 0 {
-            self.bitmap[word] &= !(1 << bit);
+    #[allow(dead_code)]
+    pub fn deallocate_frame(&mut self, phys: u64) {
+        let idx = (phys / FRAME_SIZE) as usize;
+        if !self.is_free(idx) {
+            self.bitmap[idx / 32] &= !(1 << (idx % 32));
             self.free_frames += 1;
         }
     }
 
-    /// Return the number of free frames remaining
+    /// Number of free frames remaining
     pub fn free_count(&self) -> usize {
         self.free_frames
     }
 
-    /// Return total frames tracked
+    /// Number of frames covered by usable RAM
     pub fn total_count(&self) -> usize {
         self.total_frames
     }
-}
-
-// ========================================================================
-// x86_64 crate FrameAllocator trait implementation
-// ========================================================================
-
-/// Adapter that wraps our FrameAllocator for the x86_64 crate's paging API
-pub struct BumpFrameAllocator {
-    inner: *mut FrameAllocator,
-}
-
-impl BumpFrameAllocator {
-    pub fn new(inner: &mut FrameAllocator) -> Self {
-        Self { inner: inner as *mut FrameAllocator }
-    }
-}
-
-unsafe impl x86_64::structures::paging::FrameAllocator<Size4KiB> for BumpFrameAllocator {
-    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        unsafe { (*self.inner).allocate_frame() }
-    }
-}
-
-// ========================================================================
-// Inline serial helpers (avoid circular deps)
-// ========================================================================
-
-fn serial_write_str(s: &str) {
-    crate::serial::write_str(s);
-}
-
-fn serial_write_hex(v: u64) {
-    crate::serial::write_hex(v);
-}
-
-fn serial_write_dec(v: u64) {
-    crate::serial::write_dec(v);
 }

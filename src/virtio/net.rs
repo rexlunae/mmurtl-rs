@@ -10,19 +10,23 @@
 
 use spin::Mutex;
 
-use super::{DmaRegion, VirtioLegacy, Virtqueue};
+use alloc::boxed::Box;
+
+use super::{DmaRegion, Transport, Virtqueue};
 
 /// VIRTIO_NET_F_MAC — device has a valid MAC in config space
 const FEATURE_MAC: u32 = 1 << 5;
 
-/// Legacy virtio-net header size (no MRG_RXBUF)
-const NET_HDR_LEN: usize = 10;
+/// virtio-net header size: 10 bytes on legacy devices; modern (virtio
+/// 1.0) devices always include the 2-byte num_buffers field
+const NET_HDR_LEN_LEGACY: usize = 10;
+const NET_HDR_LEN_MODERN: usize = 12;
 
 const RX_BUFFERS: usize = 8;
 const RX_BUF_LEN: usize = 2048;
 
 struct NetDevice {
-    transport: VirtioLegacy,
+    transport: Box<dyn Transport>,
     rx: Virtqueue,
     tx: Virtqueue,
     /// RX_BUFFERS × RX_BUF_LEN receive area (device writes)
@@ -30,6 +34,8 @@ struct NetDevice {
     /// One page TX staging area (header + frame)
     tx_buf: DmaRegion,
     mac: [u8; 6],
+    /// Size of the virtio-net header preceding every frame
+    hdr_len: usize,
     /// Poisoned after a TX timeout or mismatched TX completion: the
     /// device still owns the TX descriptor and the shared tx_buf, so a
     /// late completion would be misattributed to the next send (and the
@@ -58,29 +64,21 @@ fn write_mac(mac: &[u8; 6]) {
     }
 }
 
-/// Initialize a transitional virtio-net PCI device
-pub fn init(dev: &crate::pci::PciDevice) {
-    let transport = match VirtioLegacy::new(dev) {
-        Some(t) => t,
-        None => {
-            crate::serial::write_line("[NET] virtio-net has no I/O BAR — skipped");
-            return;
-        }
-    };
-
+/// Initialize a virtio-net device on any transport
+pub fn init(transport: Box<dyn Transport>) {
     let host = transport.host_features();
     transport.set_guest_features(host & FEATURE_MAC);
 
-    let rx_size = transport.queue_size(0);
-    let tx_size = transport.queue_size(1);
+    let rx_size = transport.queue_max(0);
+    let tx_size = transport.queue_max(1);
     if rx_size == 0 || tx_size == 0 {
         crate::serial::write_line("[NET] Missing RX/TX queue — skipped");
         return;
     }
     let mut rx = Virtqueue::new(rx_size);
     let tx = Virtqueue::new(tx_size);
-    transport.set_queue_pfn(0, rx.ring_phys);
-    transport.set_queue_pfn(1, tx.ring_phys);
+    transport.setup_queue(0, &rx);
+    transport.setup_queue(1, &tx);
 
     // MAC address: config bytes 0..6
     let mut mac = [0u8; 6];
@@ -97,8 +95,11 @@ pub fn init(dev: &crate::pci::PciDevice) {
 
     transport.driver_ok();
     transport.notify(0); // RX buffers are available
+    let hdr_len = if transport.modern() { NET_HDR_LEN_MODERN } else { NET_HDR_LEN_LEGACY };
 
-    crate::serial::write_str("[NET] virtio-net ready, MAC ");
+    crate::serial::write_str("[NET] virtio-net (");
+    crate::serial::write_str(transport.name());
+    crate::serial::write_str(") ready, MAC ");
     write_mac(&mac);
     crate::serial::write_str(", RX/TX queues ");
     crate::serial::write_dec(rx_size as u64);
@@ -113,6 +114,7 @@ pub fn init(dev: &crate::pci::PciDevice) {
         rx_buf,
         tx_buf: super::dma_alloc(1),
         mac,
+        hdr_len,
         failed: false,
     });
 }
@@ -122,18 +124,18 @@ fn send_frame(dev: &mut NetDevice, frame: &[u8]) -> bool {
     if dev.failed {
         return false;
     }
-    assert!(NET_HDR_LEN + frame.len() <= dev.tx_buf.size);
+    assert!(dev.hdr_len + frame.len() <= dev.tx_buf.size);
     unsafe {
-        // 10-byte legacy header, all zero (no checksum offload, no GSO)
-        core::ptr::write_bytes(dev.tx_buf.virt, 0, NET_HDR_LEN);
+        // virtio-net header, all zero (no checksum offload, no GSO)
+        core::ptr::write_bytes(dev.tx_buf.virt, 0, dev.hdr_len);
         core::ptr::copy_nonoverlapping(
             frame.as_ptr(),
-            dev.tx_buf.virt.add(NET_HDR_LEN),
+            dev.tx_buf.virt.add(dev.hdr_len),
             frame.len(),
         );
     }
 
-    let chain = [(dev.tx_buf.phys, (NET_HDR_LEN + frame.len()) as u32, false)];
+    let chain = [(dev.tx_buf.phys, (dev.hdr_len + frame.len()) as u32, false)];
     let head = match dev.tx.submit(&chain) {
         Some(h) => h,
         None => return false,
@@ -170,10 +172,10 @@ fn recv_frame(dev: &mut NetDevice, out: &mut [u8], timeout_ms: u32) -> Option<us
     // Which RX buffer completed? Descriptor heads for the prefilled
     // single-descriptor chains are 0..RX_BUFFERS in submit order.
     let buf_off = (head as usize % RX_BUFFERS) * RX_BUF_LEN;
-    let frame_len = written.saturating_sub(NET_HDR_LEN).min(out.len());
+    let frame_len = written.saturating_sub(dev.hdr_len).min(out.len());
     unsafe {
         core::ptr::copy_nonoverlapping(
-            dev.rx_buf.virt.add(buf_off + NET_HDR_LEN),
+            dev.rx_buf.virt.add(buf_off + dev.hdr_len),
             out.as_mut_ptr(),
             frame_len,
         );

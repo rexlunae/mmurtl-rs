@@ -10,7 +10,9 @@
 
 use spin::Mutex;
 
-use super::{DmaRegion, VirtioLegacy, Virtqueue};
+use alloc::boxed::Box;
+
+use super::{DmaRegion, Transport, Virtqueue};
 
 pub const SECTOR_SIZE: usize = 512;
 
@@ -21,7 +23,7 @@ const REQ_TYPE_WRITE: u32 = 1;
 const MAX_SECTORS_PER_REQ: usize = 8;
 
 struct BlkDevice {
-    transport: VirtioLegacy,
+    transport: Box<dyn Transport>,
     queue: Virtqueue,
     /// One page: request header (16 B) + status byte (offset 16)
     req: DmaRegion,
@@ -50,33 +52,27 @@ pub fn capacity_sectors() -> u64 {
     BLK.lock().as_ref().map_or(0, |d| d.capacity_sectors)
 }
 
-/// Initialize a transitional virtio-blk PCI device
-pub fn init(dev: &crate::pci::PciDevice) {
-    let transport = match VirtioLegacy::new(dev) {
-        Some(t) => t,
-        None => {
-            crate::serial::write_line("[BLK] virtio-blk has no I/O BAR — skipped");
-            return;
-        }
-    };
-
+/// Initialize a virtio-blk device on any transport
+pub fn init(transport: Box<dyn Transport>) {
     // No features needed for basic reads/writes
     let _host = transport.host_features();
     transport.set_guest_features(0);
 
-    let qsize = transport.queue_size(0);
+    let qsize = transport.queue_max(0);
     if qsize == 0 {
         crate::serial::write_line("[BLK] Queue 0 missing — skipped");
         return;
     }
     let queue = Virtqueue::new(qsize);
-    transport.set_queue_pfn(0, queue.ring_phys);
+    transport.setup_queue(0, &queue);
     transport.driver_ok();
 
     // Device config: capacity (le64) at offset 0
     let capacity_sectors = transport.config_read64(0);
 
-    crate::serial::write_str("[BLK] virtio-blk ready: ");
+    crate::serial::write_str("[BLK] virtio-blk (");
+    crate::serial::write_str(transport.name());
+    crate::serial::write_str(") ready: ");
     crate::serial::write_dec(capacity_sectors);
     crate::serial::write_str(" sectors (");
     crate::serial::write_dec(capacity_sectors * SECTOR_SIZE as u64 / 1024);

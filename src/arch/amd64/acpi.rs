@@ -76,8 +76,8 @@ const SDT_HEADER_LEN: usize = core::mem::size_of::<SdtHeader>();
 
 /// Access a physical address as a virtual pointer, mapping it if needed
 unsafe fn phys_ptr(phys: u64, len: u64) -> *const u8 {
-    crate::memory::ensure_phys_mapped(phys, len, false);
-    crate::memory::page_table::phys_to_virt(x86_64::PhysAddr::new(phys)).as_ptr()
+    crate::arch::memory::ensure_phys_mapped(phys, len, false);
+    crate::arch::page_table::phys_to_virt(x86_64::PhysAddr::new(phys)).as_ptr()
 }
 
 /// Read an SDT header at a physical address, returning (header ptr, table length)

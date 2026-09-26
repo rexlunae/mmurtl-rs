@@ -17,15 +17,16 @@
 //!
 //! Slots are not yet isolated from each other (one shared address space);
 //! per-task page tables are the natural next step.
+//!
+//! Architecture-neutral: page mapping/query and the user-access window
+//! (SMAP on amd64) come from `crate::arch`.
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::structures::paging::page_table::PageTableFlags as Flags;
-use x86_64::structures::paging::{Page, PhysFrame};
-use x86_64::VirtAddr;
 
-use super::{frame_allocator, heap, page_table};
+use super::heap;
 
-/// Start of the user window (PML4 slot 200 — unused by the kernel)
+/// Start of the user window (top-level table slot 200 on both amd64 and
+/// arm64 — unused by the kernel, inside a 48-bit lower-half VA space)
 pub const USER_BASE: u64 = 0x0000_6400_0000_0000;
 /// Size of each task's slot
 pub const USER_SLOT_SIZE: u64 = 0x10_0000;
@@ -52,7 +53,7 @@ pub struct UserImage {
 /// Check the user window is free before first use
 pub fn init() -> bool {
     use core::fmt::Write;
-    let free = page_table::query_page(VirtAddr::new(USER_BASE)).is_none();
+    let free = crate::arch::query_page(USER_BASE).is_none();
     // One write, so the line can't interleave with tasks already running
     let mut line: heapless::String<96> = heapless::String::new();
     let _ = write!(
@@ -66,25 +67,18 @@ pub fn init() -> bool {
     free
 }
 
-/// Map one fresh, zeroed frame at `va` with `flags`, optionally copying
-/// `data` into it first.
-fn map_fresh(va: u64, data: &[u8], flags: Flags) -> Result<(), &'static str> {
-    heap::with_frame_allocator(|fa| {
-        let frame = fa.allocate_frame().ok_or("out of memory")?;
-        let kva = page_table::phys_to_virt(frame.start_address()).as_u64() as *mut u8;
-        unsafe {
-            core::ptr::write_bytes(kva, 0, PAGE as usize);
-            core::ptr::copy_nonoverlapping(data.as_ptr(), kva, data.len().min(PAGE as usize));
-            let mut adapter = frame_allocator::BumpFrameAllocator::new(fa);
-            page_table::map_page(
-                Page::containing_address(VirtAddr::new(va)),
-                PhysFrame::containing_address(frame.start_address()),
-                flags,
-                &mut adapter,
-            )
-        }
-    })
-    .ok_or("frame allocator not initialized")?
+/// Map one fresh, zeroed frame at `va`, optionally copying `data` into
+/// it first.
+fn map_fresh(va: u64, data: &[u8], writable: bool, executable: bool) -> Result<(), &'static str> {
+    let pa = heap::with_frame_allocator(|fa| fa.allocate_frame())
+        .ok_or("frame allocator not initialized")?
+        .ok_or("out of memory")?;
+    let kva = crate::arch::phys_to_virt(pa);
+    unsafe {
+        core::ptr::write_bytes(kva, 0, PAGE as usize);
+        core::ptr::copy_nonoverlapping(data.as_ptr(), kva, data.len().min(PAGE as usize));
+    }
+    crate::arch::map_user_page(va, pa, writable, executable)
 }
 
 /// Load a position-independent flat binary into a fresh slot: code pages
@@ -106,7 +100,8 @@ pub fn load_program(code: &[u8]) -> Result<UserImage, &'static str> {
         map_fresh(
             base + CODE_OFFSET + i * PAGE,
             &code[start..end],
-            Flags::PRESENT | Flags::USER_ACCESSIBLE,
+            false,
+            true,
         )?;
     }
     let stack_top = base + STACK_TOP_OFFSET;
@@ -114,7 +109,8 @@ pub fn load_program(code: &[u8]) -> Result<UserImage, &'static str> {
         map_fresh(
             stack_top - i * PAGE,
             &[],
-            Flags::PRESENT | Flags::WRITABLE | Flags::USER_ACCESSIBLE | Flags::NO_EXECUTE,
+            true,
+            false,
         )?;
     }
 
@@ -141,9 +137,9 @@ pub fn range_ok(ptr: u64, len: u64, write: bool) -> bool {
     }
     let mut page = ptr & !(PAGE - 1);
     while page < end {
-        match page_table::query_page(VirtAddr::new(page)) {
-            Some(f) if f.contains(Flags::PRESENT | Flags::USER_ACCESSIBLE) => {
-                if write && !f.contains(Flags::WRITABLE) {
+        match crate::arch::query_page(page) {
+            Some((true, writable)) => {
+                if write && !writable {
                     return false;
                 }
             }
@@ -159,9 +155,9 @@ pub fn copy_from_user(dst: &mut [u8], src: u64) -> bool {
     if !range_ok(src, dst.len() as u64, false) {
         return false;
     }
-    smap_open();
+    crate::arch::user_access_begin();
     unsafe { core::ptr::copy_nonoverlapping(src as *const u8, dst.as_mut_ptr(), dst.len()) };
-    smap_close();
+    crate::arch::user_access_end();
     true
 }
 
@@ -170,28 +166,8 @@ pub fn copy_to_user(dst: u64, src: &[u8]) -> bool {
     if !range_ok(dst, src.len() as u64, true) {
         return false;
     }
-    smap_open();
+    crate::arch::user_access_begin();
     unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len()) };
-    smap_close();
+    crate::arch::user_access_end();
     true
-}
-
-/// If the CPU enforces SMAP (CR4.SMAP), deliberate kernel accesses to user
-/// pages must be bracketed by STAC/CLAC. Without SMAP these instructions
-/// would #UD, so they are only issued when the feature is on.
-fn smap_enabled() -> bool {
-    use x86_64::registers::control::{Cr4, Cr4Flags};
-    Cr4::read().contains(Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION)
-}
-
-fn smap_open() {
-    if smap_enabled() {
-        unsafe { core::arch::asm!("stac", options(nomem, nostack)) };
-    }
-}
-
-fn smap_close() {
-    if smap_enabled() {
-        unsafe { core::arch::asm!("clac", options(nomem, nostack)) };
-    }
 }

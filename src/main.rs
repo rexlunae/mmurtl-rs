@@ -1,33 +1,28 @@
 //! MMURTL/RS — Message-passing multitasking real-time kernel in Rust
 //!
 //! A Rust port inspired by Richard Burgess's MMURTL kernel (1994).
-//! Architecture: x86_64 long mode, UEFI boot, message-passing IPC.
+//! Architectures: amd64 (x86_64 long mode, BIOS/UEFI via `bootloader`) and
+//! arm64 (AArch64 EL1, QEMU `virt`). Everything outside `arch/` —
+//! scheduler, RQB IPC, memory management, virtio drivers, exFAT, syscalls,
+//! userspace — is shared by both ports.
 
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
+#![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 
 extern crate alloc;
 
+mod arch;
 mod serial;
-mod gdt;
-mod interrupts;
 mod memory;
 mod scheduler;
 mod ipc;
-mod pci;
-mod usb;
-mod acpi;
-mod apic;
-mod smp;
 mod virtio;
 mod keyboard;
 mod fs;
 mod syscall;
 mod userspace;
 
-use bootloader_api::BootInfo;
-use bootloader_api::info::Optional;
 use core::panic::PanicInfo;
 
 /// MMURTL/RS version info
@@ -35,98 +30,22 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const KERNEL_NAME: &str = "MMURTL/RS";
 pub const BOOT_BANNER: &str = include_str!("banner.txt");
 
-/// Kernel entry point — called by bootloader
-fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    // Initialize serial early for debugging
-    serial::init();
+/// Print the boot banner (right after the console comes up)
+pub fn print_banner() {
     serial::write_str(KERNEL_NAME);
     serial::write_str(" v");
     serial::write_str(VERSION);
-    serial::write_str(" booting...\n\n");
-
-    // Print banner
+    serial::write_str(" (");
+    serial::write_str(arch::NAME);
+    serial::write_str(") booting...\n\n");
     serial::write_str(BOOT_BANNER);
     serial::write_str("\n");
+}
 
-    // Log boot info — memory regions
-    let region_count = boot_info.memory_regions.len();
-    serial::write_str("[INFO] Memory regions: ");
-    serial::write_dec(region_count as u64);
-    serial::write_str("\n");
-
-    // Log physical memory offset
-    match boot_info.physical_memory_offset {
-        Optional::Some(offset) => {
-            serial::write_str("[INFO] Physical memory offset: 0x");
-            serial::write_hex(offset);
-            serial::write_str("\n");
-        }
-        Optional::None => {
-            serial::write_str("[WARN] Physical memory not mapped by bootloader\n");
-        }
-    }
-
-    // Count usable memory
-    let mut total_usable: u64 = 0;
-    for region in boot_info.memory_regions.iter() {
-        use bootloader_api::info::MemoryRegionKind;
-        if region.kind == MemoryRegionKind::Usable {
-            total_usable += region.end - region.start;
-        }
-    }
-    serial::write_str("[INFO] Usable memory: ");
-    serial::write_dec(total_usable / (1024 * 1024));
-    serial::write_str(" MiB\n");
-
-    // Initialize CPU structures
-    serial::write_str("[INIT] GDT...\n");
-    gdt::init();
-
-    serial::write_str("[INIT] IDT...\n");
-    interrupts::init();
-
-    // Initialize PIC (Programmable Interrupt Controller)
-    serial::write_str("[INIT] PIC...\n");
-    interrupts::init_pic();
-
-    // Save the RSDP address before memory takes ownership of boot_info
-    let rsdp_addr = match boot_info.rsdp_addr {
-        Optional::Some(addr) => Some(addr),
-        Optional::None => None,
-    };
-
-    // Initialize memory management
-    serial::write_str("[INIT] Memory manager...\n");
-    memory::init(boot_info);
-
-    // Parse ACPI tables (MADT: CPUs, Local APIC, I/O APIC)
-    serial::write_str("[INIT] ACPI...\n");
-    acpi::init(rsdp_addr);
-
-    // Switch from PIC/PIT to Local APIC + I/O APIC
-    serial::write_str("[INIT] APIC...\n");
-    apic::init();
-
-    // Initialize the scheduler on the BSP (must precede AP boot: APs
-    // register themselves and start their timers as they come up)
-    serial::write_str("[INIT] Scheduler...\n");
-    scheduler::init();
-
-    // Boot the application processors — each joins the scheduler
-    serial::write_str("[INIT] SMP...\n");
-    smp::boot_aps();
-
-    // Initialize PCI and USB
-    serial::write_str("[INIT] PCI bus...\n");
-    let devices = pci::scan();
-
-    serial::write_str("[INIT] USB subsystem...\n");
-    usb::init();
-
-    // Virtio drivers: storage (virtio-blk) + network (virtio-net)
-    serial::write_str("[INIT] Virtio drivers...\n");
-    virtio::init(&devices);
-
+/// Architecture-neutral second half of boot. The architecture has brought
+/// up the console, memory, interrupts, the scheduler, all CPUs, and the
+/// devices it found; this runs the self-tests and starts the tasks.
+pub fn kernel_run() -> ! {
     // Driver proof-of-life: block device write/read/verify + ARP round trip
     serial::write_str("[TEST] Storage self-test...\n");
     virtio::blk::self_test();
@@ -196,15 +115,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Print before sti: once the BSP joins the rotation, this boot context
     // is the BSP's idle task and only runs when the BSP has nothing to do
     serial::write_str("\n✓ MMURTL/RS kernel ready — ");
-    serial::write_dec(smp::cpus_online() as u64);
+    serial::write_dec(arch::cpus_online() as u64);
     serial::write_str(" CPU(s) scheduling.\n");
 
-    // Enable interrupts — the BSP joins the scheduling rotation
-    x86_64::instructions::interrupts::enable();
+    // Enable interrupts — the boot CPU joins the scheduling rotation
+    arch::enable_interrupts();
 
     // Idle loop
     loop {
-        x86_64::instructions::hlt();
+        arch::halt();
     }
 }
 
@@ -255,18 +174,6 @@ extern "C" fn kbd_echo_task() -> ! {
     }
 }
 
-/// Bootloader config that enables physical memory offset mapping
-use bootloader_api::config::{BootloaderConfig, Mappings, Mapping};
-
-const BOOTLOADER_CONFIG: BootloaderConfig = {
-    let mut config = BootloaderConfig::new_default();
-    config.mappings.physical_memory = Option::Some(Mapping::Dynamic);
-    config
-};
-
-// Define entry point using bootloader_api macro with custom config
-bootloader_api::entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
-
 /// Panic handler
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -284,6 +191,6 @@ fn panic(info: &PanicInfo) -> ! {
         serial::write_str("\n");
     }
     loop {
-        x86_64::instructions::hlt();
+        arch::halt();
     }
 }

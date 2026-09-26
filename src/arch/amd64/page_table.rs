@@ -17,7 +17,24 @@ use x86_64::{
     },
 };
 
-use crate::memory::frame_allocator::BumpFrameAllocator;
+/// Adapter that lets the x86_64 crate's paging code draw page-table frames
+/// from the portable frame allocator
+pub struct BumpFrameAllocator {
+    inner: *mut crate::memory::frame_allocator::FrameAllocator,
+}
+
+impl BumpFrameAllocator {
+    pub fn new(inner: &mut crate::memory::frame_allocator::FrameAllocator) -> Self {
+        Self { inner: inner as *mut _ }
+    }
+}
+
+unsafe impl FrameAllocator<x86_64::structures::paging::Size4KiB> for BumpFrameAllocator {
+    fn allocate_frame(&mut self) -> Option<PhysFrame<x86_64::structures::paging::Size4KiB>> {
+        let pa = unsafe { (*self.inner).allocate_frame()? };
+        Some(PhysFrame::containing_address(PhysAddr::new(pa)))
+    }
+}
 
 /// Global physical memory offset — set once during init
 pub static mut PHYSICAL_MEMORY_OFFSET: u64 = 0;
@@ -27,11 +44,9 @@ pub fn physical_memory_offset() -> u64 {
     unsafe { PHYSICAL_MEMORY_OFFSET }
 }
 
-/// Initialize page table management from boot info
-pub fn init(
-    physical_memory_offset: Option<u64>,
-    _boot_info: &bootloader_api::BootInfo,
-) {
+/// Initialize page table management with the bootloader's physical
+/// memory offset
+pub fn init(physical_memory_offset: Option<u64>) {
     if let Some(offset) = physical_memory_offset {
         crate::serial::write_str("[PAGING] Physical memory offset: 0x");
         crate::serial::write_hex(offset);

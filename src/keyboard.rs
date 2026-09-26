@@ -20,7 +20,9 @@ static QUEUE: [AtomicU8; QUEUE_SIZE] = {
 static HEAD: AtomicUsize = AtomicUsize::new(0); // next write
 static TAIL: AtomicUsize = AtomicUsize::new(0); // next read
 
-fn push_char(c: u8) {
+/// Queue one character of console input (keyboard IRQ on amd64, UART RX
+/// on arm64)
+pub fn push_char(c: u8) {
     let head = HEAD.load(Ordering::Relaxed);
     let tail = TAIL.load(Ordering::Acquire);
     if head.wrapping_sub(tail) >= QUEUE_SIZE {
