@@ -49,6 +49,8 @@ is common to both unless marked.
 
 ```bash
 # amd64: build the kernel and create BIOS/UEFI boot images
+# (runs tools/patch-bootloader-deps.sh first: bootloader 0.11.17's stage
+# builds need two small source patches to compile on the pinned nightly)
 make bios
 
 # arm64: build the kernel ELF (QEMU loads it directly)

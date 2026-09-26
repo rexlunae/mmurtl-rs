@@ -19,8 +19,10 @@ build:
 		--target $(TARGET) \
 		--release
 
-# Create BIOS and UEFI boot images
+# Create BIOS and UEFI boot images. The dependency patch keeps the
+# bootloader's stage builds compiling on the pinned nightly (see the script).
 bios uefi: build
+	./tools/patch-bootloader-deps.sh
 	cd tools/image-builder && CARGO_BUILD_STD="" CARGO_BUILD_STD_FEATURES="" \
 		cargo run --release \
 		--target-dir target \
