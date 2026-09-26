@@ -129,6 +129,9 @@ pub unsafe fn enable(r: &MmuRegs) {
         "isb",
         "msr sctlr_el1, {sctlr}",
         "isb",
+        "ic iallu",
+        "dsb nsh",
+        "isb",
         mair = in(reg) r.mair,
         tcr = in(reg) r.tcr,
         ttbr0 = in(reg) r.ttbr0,
@@ -179,6 +182,24 @@ pub fn map_device(pa: u64, size: u64) -> Result<(), &'static str> {
         asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb");
     }
     Ok(())
+}
+
+/// Make instructions the kernel just wrote (through its identity map)
+/// visible to instruction fetch — e.g. user program code. The I-cache is
+/// not coherent with data writes on ARM: clean the data to the point of
+/// unification, then invalidate the instruction caches of every CPU.
+pub fn sync_icache(kva: *const u8, len: usize) {
+    let ctr: u64;
+    unsafe { asm!("mrs {}, ctr_el0", out(reg) ctr) };
+    let line = 4u64 << ((ctr >> 16) & 0xF);
+    let start = kva as u64 & !(line - 1);
+    let end = kva as u64 + len as u64;
+    let mut a = start;
+    while a < end {
+        unsafe { asm!("dc cvau, {}", in(reg) a) };
+        a += line;
+    }
+    unsafe { asm!("dsb ish", "ic ialluis", "dsb ish", "isb") };
 }
 
 /// Highest RAM address the early map covers

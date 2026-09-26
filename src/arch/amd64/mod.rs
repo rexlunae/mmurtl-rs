@@ -81,6 +81,10 @@ pub fn io_write32(port: u16, v: u32) {
     unsafe { x86_64::instructions::port::Port::<u32>::new(port).write(v) }
 }
 
+/// Make freshly written code visible to instruction fetch: nothing to do
+/// on x86, whose instruction caches snoop data writes
+pub fn sync_icache(_kva: *const u8, _len: usize) {}
+
 /// ELF e_machine for user programs (EM_X86_64)
 pub const ELF_MACHINE: u16 = 0x3E;
 

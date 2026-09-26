@@ -12,6 +12,7 @@
 //! | CPUs | `cpu_index`, `set_cpu_index`, `hw_cpu_id`, `ipi_available`, `send_resched_ipi` |
 //! | time | `start_tick(hz, boot_cpu)`, `delay_ms` |
 //! | tasks | `TaskContext`, `kernel_context`, `user_context`, `yield_now`, `on_switch_to_user` |
+//! | caches | `sync_icache` (after writing code) |
 //! | memory | `phys_to_virt`, `heap_init`, `heap_extend`, `map_user_page(space, ..)`, `query_page` (current space), `user_access_begin/end` |
 //! | address spaces | `new_address_space`, `free_address_space`, `switch_address_space` |
 //! | userspace | `user_programs::{hello, echo, spinner, rogue_read, rogue_priv, rogue_ptr, exit_only}` |

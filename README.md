@@ -63,6 +63,7 @@ make arm64
 
 ```bash
 make run-arm64              # QEMU virt, GICv3, 4 CPUs (ARM64_SMP=N, ARM64_GIC=2|3)
+make arm64-image            # target/mmurtl-rs-arm64.Image (Linux Image format)
 
 # With a disk and NIC (virtio-mmio):
 qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -smp 4 -m 256M \
@@ -554,6 +555,35 @@ through the bridge's memory-mapped I/O window — so `virtio-blk-pci` and
 [PCI] ECAM host bridge at 0x4010000000 (buses 0-255); I/O window 0x3eff0000, MMIO window 0x10000000; 6 BARs assigned
 [BLK] virtio-blk (legacy virtio-pci) ready: 32768 sectors (16384 KiB), queue size 256
 ```
+
+### arm64 on real hardware
+
+Steps toward booting on physical boards (QEMU can boot these paths but
+does not model caches, so the cache fixes are unverified on silicon):
+
+- **Standard `Image` format**: the kernel starts with the arm64 Linux
+  `Image` header, so U-Boot `booti`, firmware, or `qemu -kernel` can load
+  `make arm64-image`'s output and pass the device tree in `x0` (the ELF
+  still boots too).
+- **Cache maintenance**: the kernel image range is invalidated to the
+  point of coherency before caches are enabled (so no pre-boot cache line
+  can shadow `.bss`, the stack, or the page tables written with caches
+  off); every CPU invalidates its I-cache after enabling the MMU; and
+  code the kernel copies into user pages is cleaned to the point of
+  unification with the I-caches invalidated before it runs — ARM's
+  I-cache does not snoop data writes, so without this a user program
+  could execute stale instructions.
+- Already hardware-shaped: everything comes from the device tree (RAM,
+  CPUs, GIC v2/v3, UART, timer interrupt, PCIe), PSCI via HVC or SMC,
+  EL2 entry.
+
+What a Raspberry Pi 4 would still need (not done, and untested on real
+hardware): a **relocatable load address** — the kernel is linked and
+identity-mapped at 0x4020_0000 (RAM at 1 GiB, as on QEMU `virt`), while
+the Pi's RAM starts at 0; **spin-table SMP** (the Pi firmware's default
+secondary-CPU release method; only PSCI is implemented); and UART
+clock/pin setup if the firmware doesn't leave the PL011 configured. The
+Pi 4's GIC-400 is a GICv2 and is supported; a Pi 3 has no GIC at all.
 
 arm64 limitations: RAM beyond the first 4 GiB above 1 GiB is ignored;
 GICv3 support covers the first redistributor region (no ITS/LPIs); PCI

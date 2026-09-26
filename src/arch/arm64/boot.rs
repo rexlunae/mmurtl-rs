@@ -16,6 +16,21 @@ global_asm!(
     .section .text.boot, "ax"
     .globl _start
 _start:
+    // arm64 Linux "Image" header (Documentation/arch/arm64/booting.rst),
+    // so standard loaders (U-Boot booti, firmware, QEMU -kernel Image)
+    // can boot us and pass the device tree in x0. The first word is
+    // also the first instruction.
+    b primary_entry                 // code0
+    .long 0                         // code1
+    .quad 0x200000                  // text_offset: RAM base + 2 MiB
+    .quad __image_size              // image_size (includes .bss + stack)
+    .quad 0b0010                    // flags: little-endian, 4 KiB pages,
+                                    //   2 MiB-aligned base near DRAM start
+    .quad 0, 0, 0                   // reserved
+    .ascii "ARM\x64"                // magic
+    .long 0                         // reserved (no PE/COFF header)
+
+primary_entry:
     // x0 = device tree (if the loader passed one); keep it in x19
     mov x19, x0
 
@@ -40,6 +55,27 @@ _start:
     str xzr, [x1], #8
     b 1b
 2:
+    // The boot protocol hands us the image cleaned to the point of
+    // coherency, but clean lines may still hold pre-boot contents of
+    // addresses we just wrote with caches off (.bss, the stack, and the
+    // page tables to come). Invalidate the whole image range so nothing
+    // stale can be hit once the caches are on.
+    adrp x1, __kernel_start
+    add x1, x1, :lo12:__kernel_start
+    adrp x2, __kernel_end
+    add x2, x2, :lo12:__kernel_end
+    mrs x3, ctr_el0
+    ubfx x3, x3, #16, #4        // DminLine: log2(words) of the smallest D-line
+    mov x4, #4
+    lsl x4, x4, x3              // line size in bytes
+    sub x5, x4, #1
+    bic x1, x1, x5
+3:  dc ivac, x1
+    add x1, x1, x4
+    cmp x1, x2
+    b.lo 3b
+    dsb sy
+
     msr tpidr_el1, xzr          // scheduler CPU index 0
     mov x0, x19
     bl arm64_boot_main
@@ -54,7 +90,7 @@ drop_to_el1:
     mrs x9, CurrentEL
     lsr x9, x9, #2
     cmp x9, #2
-    b.ne 3f
+    b.ne 5f
     mov x9, #(1 << 31)          // HCR_EL2.RW: EL1 is AArch64
     msr hcr_el2, x9
     mov x9, #3                  // CNTHCTL_EL2: EL1 physical timer/counter access
@@ -75,7 +111,7 @@ drop_to_el1:
     msr sp_el1, x9
     msr elr_el2, x30
     eret
-3:  ret
+5:  ret
 
     // Secondary CPU entry (PSCI CPU_ON): x0 = &ApBoot, MMU off
     .globl secondary_start
@@ -98,6 +134,9 @@ secondary_start:
     dsb ish
     isb
     msr sctlr_el1, x5
+    isb
+    ic iallu                    // drop any stale instructions
+    dsb nsh
     isb
     mov x0, x1
     bl arm64_secondary_main

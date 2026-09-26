@@ -6,10 +6,11 @@ UEFI_IMG = target/mmurtl-rs-uefi.img
 # arm64 port: a bootable ELF for QEMU virt (no image step needed)
 ARM64_TARGET = aarch64-unknown-none-softfloat
 ARM64_KERNEL = target/$(ARM64_TARGET)/release/mmurtl-rs
+ARM64_IMAGE = target/mmurtl-rs-arm64.Image
 ARM64_SMP ?= 4
 ARM64_GIC ?= 3
 
-.PHONY: all build bios uefi run-bios run-uefi arm64 run-arm64 user user-arm64 disk disk-arm64 clean
+.PHONY: all build bios uefi run-bios run-uefi arm64 arm64-image run-arm64 user user-arm64 disk disk-arm64 clean
 
 all: build
 
@@ -50,6 +51,13 @@ arm64:
 	cargo build -Z build-std=core,compiler_builtins,alloc \
 		--target $(ARM64_TARGET) \
 		--release
+
+# arm64 Linux-style "Image" (raw binary with the standard header), for
+# U-Boot booti, firmware, or QEMU -kernel. llvm-objcopy comes with the
+# toolchain's llvm-tools component.
+LLVM_BIN = $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/host: //p')/bin
+arm64-image: arm64
+	$(LLVM_BIN)/llvm-objcopy -O binary $(ARM64_KERNEL) $(ARM64_IMAGE)
 
 # Run the arm64 kernel on QEMU virt (GICv$(ARM64_GIC), $(ARM64_SMP) CPUs; GICv2
 # works too, up to 8 CPUs). Add a disk

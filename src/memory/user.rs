@@ -120,6 +120,9 @@ pub fn map_fresh(
         let n = data.len().min(PAGE as usize - offset.min(PAGE as usize));
         core::ptr::copy_nonoverlapping(data.as_ptr(), kva.add(offset), n);
     }
+    if executable {
+        crate::arch::sync_icache(kva, PAGE as usize);
+    }
     crate::arch::map_user_page(space, va, pa, writable, executable).map_err(|e| {
         heap::with_frame_allocator(|fa| fa.deallocate_frame(pa));
         e

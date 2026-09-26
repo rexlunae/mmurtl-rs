@@ -42,6 +42,9 @@ SECTIONS
     . = ALIGN(4096);
     __kernel_end = .;
 
+    /* For the arm64 Image header: bytes the loader must reserve */
+    __image_size = __kernel_end - __kernel_start;
+
     /DISCARD/ : {
         *(.comment)
         *(.eh_frame*)

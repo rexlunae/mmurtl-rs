@@ -27,7 +27,10 @@ pub use pcie::{
     pci_config_write,
 };
 pub use memory::{heap_extend, heap_init, phys_to_virt, user_access_begin, user_access_end};
-pub use mmu::{free_address_space, map_user_page, new_address_space, query_page, switch_address_space};
+pub use mmu::{
+    free_address_space, map_user_page, new_address_space, query_page, switch_address_space,
+    sync_icache,
+};
 
 /// Architecture name for the boot log
 pub const NAME: &str = "arm64";
