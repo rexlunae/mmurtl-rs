@@ -7,12 +7,20 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 const DR: u64 = 0x00; // data
 const FR: u64 = 0x18; // flags
+const LCR_H: u64 = 0x2C; // line control
+const CR: u64 = 0x30; // control
 const IMSC: u64 = 0x38; // interrupt mask set/clear
 const ICR: u64 = 0x44; // interrupt clear
+const FR_BUSY: u32 = 1 << 3;
 const FR_RXFE: u32 = 1 << 4; // receive FIFO empty
 const FR_TXFF: u32 = 1 << 5; // transmit FIFO full
 const INT_RX: u32 = 1 << 4;
 const INT_RT: u32 = 1 << 6; // receive timeout
+const LCR_H_FEN: u32 = 1 << 4; // FIFOs enabled
+const LCR_H_WLEN8: u32 = 0b11 << 5;
+const CR_UARTEN: u32 = 1 << 0;
+const CR_TXE: u32 = 1 << 8;
+const CR_RXE: u32 = 1 << 9;
 
 static BASE: AtomicU64 = AtomicU64::new(0x0900_0000);
 
@@ -29,9 +37,20 @@ pub fn set_base(base: u64) {
     BASE.store(base, Ordering::Relaxed);
 }
 
-/// Initialize the UART. QEMU's PL011 needs no baud setup; firmware on real
-/// boards leaves it configured.
-pub fn init() {}
+/// Initialize the UART: keep the baud rate the firmware chose (QEMU needs
+/// none), but make sure the FIFOs are on — out of reset the PL011 has a
+/// one-character receive holding register, and input typed faster than
+/// the interrupt is serviced would be dropped.
+pub fn init() {
+    let cr = rd(CR);
+    wr(CR, 0); // the line control register may only change while disabled
+    while rd(FR) & FR_BUSY != 0 {
+        core::hint::spin_loop();
+    }
+    let lcr = rd(LCR_H);
+    wr(LCR_H, lcr | LCR_H_FEN | if lcr & LCR_H_WLEN8 == 0 { LCR_H_WLEN8 } else { 0 });
+    wr(CR, cr | CR_UARTEN | CR_TXE | CR_RXE);
+}
 
 /// Transmit one byte. Callers serialize (see `crate::serial`).
 pub fn putc(byte: u8) {
