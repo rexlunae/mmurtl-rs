@@ -1,15 +1,19 @@
-//! arm64 (AArch64) port — QEMU `virt` and similar device-tree machines.
+//! arm64 (AArch64) port — QEMU `virt`, the Raspberry Pi 3, and similar
+//! device-tree machines.
 //!
-//! Boot from an ELF at EL1 (dropping from EL2 if needed); PL011 serial;
-//! the device tree for RAM, CPUs, and devices; an identity-mapped MMU
-//! with EL0/EL1 permission bits; an EL1 vector table; GICv2/GICv3 + the generic
-//! timer; PSCI multi-core boot; virtio-mmio and PCIe (ECAM) devices; EL0 userspace via
-//! `svc #0`.
+//! A self-relocating kernel (ELF or `Image`, loaded anywhere) entered at
+//! EL3, EL2, or EL1; PL011 serial; the device tree for RAM, CPUs, and
+//! devices; an identity-mapped MMU with EL0/EL1 permission bits; an EL1
+//! vector table; GICv2/GICv3 or the BCM2836 controller + the generic
+//! timer; PSCI or spin-table multi-core boot; virtio-mmio and PCIe (ECAM)
+//! devices; EL0 userspace via `svc #0`.
 
+pub mod bcm2836;
 pub mod boot;
 pub mod exceptions;
 pub mod fdt;
 pub mod gic;
+pub mod irq;
 pub mod memory;
 pub mod mmu;
 pub mod pcie;
@@ -88,7 +92,7 @@ pub fn set_cpu_index(cpu: usize) {
 /// The calling CPU's IPI target (GICv2 interface number or GICv3
 /// affinity)
 pub fn hw_cpu_id() -> u32 {
-    gic::cpu_target_id()
+    irq::cpu_target_id()
 }
 
 pub fn ipi_available() -> bool {
@@ -97,7 +101,7 @@ pub fn ipi_available() -> bool {
 
 /// Kick the CPU identified by `hw_id` into its scheduler
 pub fn send_resched_ipi(hw_id: u32) {
-    gic::send_resched(hw_id);
+    irq::send_resched(hw_id);
 }
 
 pub fn cpus_online() -> usize {

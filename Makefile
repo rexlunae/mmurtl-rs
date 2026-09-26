@@ -10,7 +10,7 @@ ARM64_IMAGE = target/mmurtl-rs-arm64.Image
 ARM64_SMP ?= 4
 ARM64_GIC ?= 3
 
-.PHONY: all build bios uefi run-bios run-uefi arm64 arm64-image run-arm64 user user-arm64 disk disk-arm64 clean
+.PHONY: all build bios uefi run-bios run-uefi arm64 arm64-image run-arm64 run-rpi3 user user-arm64 disk disk-arm64 clean
 
 all: build
 
@@ -72,6 +72,17 @@ run-arm64: arm64
 		-m 256M \
 		-nographic \
 		-kernel $(ARM64_KERNEL)
+
+# Run on QEMU's Raspberry Pi 3 (BCM2837: 4 cores, spin-table SMP, no GIC).
+# QEMU has no device tree for it: use the Pi firmware's, from
+# https://github.com/raspberrypi/firmware/raw/master/boot/bcm2710-rpi-3-b.dtb
+RPI3_DTB ?= bcm2710-rpi-3-b.dtb
+run-rpi3: arm64-image
+	qemu-system-aarch64 \
+		-machine raspi3b \
+		-nographic \
+		-kernel $(ARM64_IMAGE) \
+		-dtb $(RPI3_DTB)
 
 # User programs (Rust, ELF) for the kernel to load from /BIN on its disk.
 # amd64 uses the large code model: the user window sits above 2 GiB.

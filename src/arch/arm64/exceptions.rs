@@ -186,7 +186,7 @@ unsafe extern "C" fn arm64_exception(kind: u64, frame: *mut TaskContext) -> u64 
             kernel_fault("synchronous exception", esr, &*frame)
         }
         // IRQ from kernel or user code
-        5 | 9 => super::gic::handle_irq(sp),
+        5 | 9 => super::irq::handle_irq(sp),
         // User sync: syscall or fault
         8 => {
             let esr = esr();

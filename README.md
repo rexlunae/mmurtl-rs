@@ -29,10 +29,12 @@ is common to both unless marked.
 - ✅ **(amd64)** Virtio core: legacy PCI transport, split virtqueues, contiguous DMA allocator
 - ✅ Storage: virtio-blk driver with sector read/write (verified end-to-end)
 - ✅ Network: virtio-net driver with a live ARP round trip through QEMU user-net
-- ✅ **(arm64)** Boots on QEMU `virt` from an ELF at EL1 (or EL2); PL011
-  console; RAM, CPUs, and devices from the device tree
-- ✅ **(arm64)** Identity-mapped MMU, EL1 vector table, GICv2/GICv3 + generic
-  timer tick, PSCI multi-core boot, virtio-mmio (legacy + modern)
+- ✅ **(arm64)** Relocatable kernel (self-relocating PIE) — boots on QEMU
+  `virt` and the Raspberry Pi 3 (`raspi3b`) from an ELF or `Image`, at EL1,
+  EL2, or EL3; PL011 console; RAM, CPUs, and devices from the device tree
+- ✅ **(arm64)** Identity-mapped MMU, EL1 vector table, GICv2/GICv3 or the
+  Pi's BCM2836 interrupt controller + generic timer tick, PSCI or
+  spin-table multi-core boot, virtio-mmio (legacy + modern)
 - ✅ **(amd64)** Input: PS/2 keyboard driver — scancode set 1 → ASCII with shift, char queue
 - ✅ Filesystem: exFAT — full API: subdirectories, mkdir, create, read,
   overwrite, append, delete; interoperable with Linux in both directions,
@@ -64,6 +66,8 @@ make arm64
 ```bash
 make run-arm64              # QEMU virt, GICv3, 4 CPUs (ARM64_SMP=N, ARM64_GIC=2|3)
 make arm64-image            # target/mmurtl-rs-arm64.Image (Linux Image format)
+make run-rpi3               # QEMU raspi3b, 4 CPUs (needs the Pi firmware's
+                            # bcm2710-rpi-3-b.dtb; RPI3_DTB=path)
 
 # With a disk and NIC (virtio-mmio):
 qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -smp 4 -m 256M \
@@ -503,15 +507,15 @@ own boot path.
 
 | | amd64 | arm64 |
 |---|---|---|
-| Boot | `bootloader` crate (BIOS/UEFI), long mode | ELF at 0x4020_0000, EL1 (drops from EL2) |
-| Discovery | ACPI MADT, PCI | Device tree (RAM, CPUs, PSCI, GIC, UART, virtio, PCIe host bridge) |
+| Boot | `bootloader` crate (BIOS/UEFI), long mode | ELF or `Image`, loaded anywhere (self-relocating); EL1 (drops from EL2/EL3) |
+| Discovery | ACPI MADT, PCI | Device tree (RAM, reserved memory, CPUs, PSCI/spin tables, interrupt controller, UART, virtio, PCIe host bridge) |
 | Console | 16550 COM1 | PL011 (RX interrupt feeds console input) |
 | Paging | bootloader tables + offset window | own identity map; EL0/EL1 AP bits, PXN/UXN |
-| Interrupts | IDT; PIC → Local/I/O APIC | EL1 vector table; GICv2 or GICv3 (redistributors, ICC system registers) |
+| Interrupts | IDT; PIC → Local/I/O APIC | EL1 vector table; GICv2 or GICv3 (redistributors, ICC system registers), or BCM2836 local + BCM2835 armctrl (Pi 2/3) |
 | Tick | LAPIC timer (PIT fallback) | generic virtual timer (PPI 27) |
-| Reschedule IPI | vector 0x30 | SGI 1 (GICv3: routed by MPIDR affinity) |
+| Reschedule IPI | vector 0x30 | SGI 1 (GICv3: routed by MPIDR affinity); BCM2836 mailbox 0 |
 | Yield | `int 0x31` | `svc` from EL1 |
-| Multi-core | INIT-SIPI-SIPI trampoline | PSCI `CPU_ON` (HVC/SMC per DT) |
+| Multi-core | INIT-SIPI-SIPI trampoline | PSCI `CPU_ON` (HVC/SMC per DT) or spin-table release |
 | Syscalls | `int 0x80` (DPL 3), TSS.RSP0 per task | `svc #0` from EL0 (x8 = number) |
 | User isolation | U/S bit, NX, SMAP-aware | AP[7:6], PXN/UXN; UMA=0 traps DAIF |
 | PCI | config via 0xCF8/0xCFC; firmware-assigned BARs | ECAM from the DT; kernel assigns BARs; I/O space via the bridge window |
@@ -524,7 +528,7 @@ programs being killed). The arm64 port is verified on QEMU `virt` at 1,
 or EL2, and over both legacy and modern virtio-mmio:
 ```
 [DTB] Device tree at 0x0000000040000000: 4 CPU(s), 32 virtio-mmio slots, PSCI via HVC
-[GIC] GICv2: distributor 0x0000000008000000, CPU interface 0x0000000008010000; timer INTID 27 @ 62 MHz
+[IRQ] GICv2: distributor 0x0000000008000000, CPU interface 0x0000000008010000; timer INTID 27 @ 62 MHz
 [SMP] CPU 1 online (MPIDR 0x1), scheduling
 [BLK] virtio-blk (virtio-mmio v1 (legacy)) ready: 32768 sectors (16384 KiB), queue size 256
 [USER T14 EL0] Hello from EL0! Asking the kernel's sysinfo service over RQB IPC...
@@ -541,7 +545,7 @@ With GICv3 the port runs well past GICv2's 8-CPU limit — verified at
 16 and 32 CPUs, where CPUs 16-31 sit in a second affinity cluster
 (MPIDR 0x100+) and are reached by affinity-routed SGIs:
 ```
-[GIC] GICv3: distributor 0x8000000, redistributors 0x80a0000 (+0xf60000); timer INTID 27 @ 62 MHz
+[IRQ] GICv3: distributor 0x8000000, redistributors 0x80a0000 (+0xf60000); timer INTID 27 @ 62 MHz
 [SMP] CPU 16 online (MPIDR 0x100), scheduling
 [SMP] 32 CPU(s) online
 ```
@@ -577,15 +581,45 @@ does not model caches, so the cache fixes are unverified on silicon):
   CPUs, GIC v2/v3, UART, timer interrupt, PCIe), PSCI via HVC or SMC,
   EL2 entry.
 
-What a Raspberry Pi 4 would still need (not done, and untested on real
-hardware): a **relocatable load address** — the kernel is linked and
-identity-mapped at 0x4020_0000 (RAM at 1 GiB, as on QEMU `virt`), while
-the Pi's RAM starts at 0; **spin-table SMP** (the Pi firmware's default
-secondary-CPU release method; only PSCI is implemented); and UART
-clock/pin setup if the firmware doesn't leave the PL011 configured. The
-Pi 4's GIC-400 is a GICv2 and is supported; a Pi 3 has no GIC at all.
+- **Relocatable**: the kernel is a position-independent executable
+  (linked at 0x4020_0000, all absolute addresses as
+  `R_AARCH64_RELATIVE` relocations). `_start` applies them for wherever
+  it was loaded, before anything reads an absolute address; the device
+  tree is then parsed with the MMU still off and the identity map built
+  from its RAM and device ranges. Verified at the link address, at
+  0x4700_0000 on `virt` (loaded with `-device loader`), and at 0x20_0000
+  on the Pi 3:
+  ```
+  [BOOT] Loaded at 0x200000 (linked at 0x40200000), 269 relocations applied
+  [DTB] Device tree at 0x8000000: 4 CPU(s), 0 virtio-mmio slots, SMP via spin-table
+  [MEM] RAM 0x0000000000000000 - 0x000000003c000000
+  [IRQ] BCM2836 local controller 0x40000000, armctrl 0x3f00b200; UART IRQ 89; counter 62 MHz
+  [SMP] CPU 3 online (MPIDR 0x3), scheduling
+  [SMP] 4 CPU(s) online
+  ```
+- **Spin-table SMP** (`enable-method = "spin-table"`, the Raspberry Pi
+  firmware's method): the boot CPU writes `secondary_spin_entry`'s address
+  to each CPU's `cpu-release-addr`, cleans it to the point of coherency,
+  and `sev`s; PSCI is used where the device tree says so.
+- **Raspberry Pi 2/3 interrupts**: the BCM2836 per-core controller (the
+  virtual timer and mailbox-0 IPIs) and the BCM2835 armctrl controller
+  (the PL011's interrupt), verified on QEMU `raspi3b` with the official
+  `bcm2710-rpi-3-b.dtb` — every IPC and userspace check passes on 4 CPUs.
+  The Pi 4's GIC-400 is a GICv2, which is supported.
+- **Device-tree details real boards use**: `ranges` translation (the Pi's
+  peripherals are described at bus address 0x7e00_0000), `/memreserve/`
+  entries, two- and three-cell interrupt specifiers, RAM that overlaps
+  device blocks.
+- **EL3 entry** (no firmware below the kernel): drops through EL2 to EL1.
+- The PL011's FIFOs are enabled at boot (out of reset it has a
+  one-character receive register, and typed input was being dropped).
 
-arm64 limitations: RAM beyond the first 4 GiB above 1 GiB is ignored;
+Not verified on physical hardware; the Pi 4 (RAM above 4 GiB behind a
+different peripheral window, GIC-400) has not been run.
+
+arm64 limitations: the kernel identity-maps RAM and devices below 512 GiB
+with 2 MiB blocks (up to 24 distinct GiB of them); RAM not covering a whole
+2 MiB block is unused;
 GICv3 support covers the first redistributor region (no ITS/LPIs); PCI
 covers bus 0 (no bridges) and legacy virtio-pci (no modern
 capability-based transport).

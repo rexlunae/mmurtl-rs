@@ -1,15 +1,16 @@
 //! arm64 MMU: 4 KiB granule, 48-bit VA, one address space in TTBR0.
 //!
-//! The kernel runs identity-mapped (VA == PA):
-//!   - [0, 1 GiB): Device-nGnRnE — GIC, UART, virtio-mmio, flash, PCIe MMIO
-//!   - RAM: Normal write-back, as 2 MiB blocks
-//! Both are EL1-only (AP=00) and never executable from EL0 (UXN).
-//!
-//! The boot CPU turns the MMU on *before* parsing the device tree (Rust
-//! code with the MMU off runs on Device memory), so `early_init` maps a
-//! generous fixed RAM window; `trim_ram` then unmaps what the device tree
-//! says isn't RAM. User pages (the `memory::user` window) are 4 KiB pages
-//! in dynamically allocated tables.
+//! The kernel runs identity-mapped (VA == PA), built from the device tree
+//! so it works wherever RAM and devices are (RAM at 1 GiB on QEMU `virt`,
+//! at 0 on a Raspberry Pi, with the Pi's peripherals right after RAM):
+//!   - RAM ranges: Normal write-back, 2 MiB blocks (only whole blocks)
+//!   - device regions (UART, interrupt controller, virtio, PCIe, ...):
+//!     Device-nGnRnE, 2 MiB blocks covering each region
+//! Both are EL1-only (AP=00) and never executable from EL0 (UXN); devices
+//! are never executable at all (PXN). Level-2 tables for the kernel map
+//! come from a static pool, since the map is built before memory
+//! management exists (with the MMU still off). User pages (the
+//! `memory::user` window) are 4 KiB pages in dynamically allocated tables.
 //!
 //! Descriptor permission bits used:
 //!   AP[7:6]  00 = EL1 RW / EL0 none, 01 = EL1+EL0 RW, 11 = EL1+EL0 RO
@@ -26,9 +27,10 @@ struct Table([u64; ENTRIES]);
 static mut L0: Table = Table([0; ENTRIES]);
 /// Level-1 table for VA [0, 512 GiB) (1 GiB per entry)
 static mut L1: Table = Table([0; ENTRIES]);
-/// Level-2 tables for RAM in [1 GiB, 1 GiB + EARLY_RAM_GIB) (2 MiB blocks)
-const EARLY_RAM_GIB: usize = 4;
-static mut L2_RAM: [Table; EARLY_RAM_GIB] = [const { Table([0; ENTRIES]) }; EARLY_RAM_GIB];
+/// Level-2 tables (2 MiB blocks), one per GiB the kernel maps anything in
+const L2_POOL: usize = 24;
+static mut L2: [Table; L2_POOL] = [const { Table([0; ENTRIES]) }; L2_POOL];
+static mut L2_USED: usize = 0;
 
 const VALID: u64 = 1 << 0;
 const TABLE: u64 = 1 << 1; // table (L0-L2) or page (L3)
@@ -88,30 +90,88 @@ pub fn regs() -> MmuRegs {
     }
 }
 
-/// Build the identity map and turn the MMU on (boot CPU, MMU off).
+/// The level-2 table for GiB `gib`, taking one from the pool if needed
+unsafe fn l2_for(gib: u64) -> Option<*mut u64> {
+    if gib >= ENTRIES as u64 {
+        return None; // beyond 512 GiB: not mapped by the kernel
+    }
+    let l1 = &mut (*core::ptr::addr_of_mut!(L1)).0;
+    let e = l1[gib as usize];
+    if e & VALID != 0 {
+        return if e & TABLE != 0 { Some((e & ADDR_MASK) as *mut u64) } else { None };
+    }
+    let used = &mut *core::ptr::addr_of_mut!(L2_USED);
+    if *used >= L2_POOL {
+        return None;
+    }
+    let t = core::ptr::addr_of_mut!((*core::ptr::addr_of_mut!(L2))[*used]) as *mut u64;
+    *used += 1;
+    for i in 0..ENTRIES {
+        core::ptr::write_volatile(t.add(i), 0);
+    }
+    core::ptr::write_volatile(&mut l1[gib as usize], t as u64 | TABLE | VALID);
+    Some(t)
+}
+
+/// Map the 2 MiB block at `pa` with `attrs`, unless something is already
+/// mapped there. Returns whether the block is now mapped with `attrs`.
+unsafe fn map_block(pa: u64, attrs: u64) -> bool {
+    let t = match l2_for(pa / GIB) {
+        Some(t) => t,
+        None => return false,
+    };
+    let e = t.add(((pa % GIB) / MIB2) as usize);
+    let d = core::ptr::read_volatile(e);
+    if d & VALID != 0 {
+        return d & !ADDR_MASK == attrs & !ADDR_MASK;
+    }
+    core::ptr::write_volatile(e, pa | attrs);
+    true
+}
+
+const RAM_ATTRS: u64 = ATTR_NORMAL | SH_INNER | AF | UXN | VALID;
+const DEVICE_ATTRS: u64 = ATTR_DEVICE | AF | PXN | UXN | VALID;
+
+/// Build the kernel's identity map from the device tree's RAM and device
+/// regions and turn the MMU on (boot CPU, MMU off). Returns the RAM
+/// actually mapped (whole 2 MiB blocks, within the table pool), which is
+/// the RAM the kernel may use.
 ///
 /// # Safety
-/// Once, on the boot CPU, before anything else touches memory.
-pub unsafe fn early_init() {
+/// Once, on the boot CPU, with the MMU off.
+pub unsafe fn early_init(ram: &[(u64, u64)], devices: &[(u64, u64)]) -> heapless::Vec<(u64, u64), 8> {
     let l0 = &mut *core::ptr::addr_of_mut!(L0);
-    let l1 = &mut *core::ptr::addr_of_mut!(L1);
-    let l2 = &mut *core::ptr::addr_of_mut!(L2_RAM);
-
     l0.0[0] = core::ptr::addr_of!(L1) as u64 | TABLE | VALID;
 
-    // [0, 1 GiB): devices
-    l1.0[0] = 0 | ATTR_DEVICE | AF | PXN | UXN | VALID;
-
-    // [1 GiB, 1 GiB + EARLY_RAM_GIB): normal RAM, 2 MiB blocks
-    for g in 0..EARLY_RAM_GIB {
-        let base = GIB * (1 + g as u64);
-        for i in 0..ENTRIES {
-            l2[g].0[i] = (base + i as u64 * MIB2) | ATTR_NORMAL | SH_INNER | AF | UXN | VALID;
+    // Devices first: every block a region touches. A RAM range that
+    // overlaps a peripheral block (a firmware-reported size covering the
+    // Pi's peripheral window, say) then simply skips that block.
+    for &(base, size) in devices {
+        let _ = map_device(base, size.max(1));
+    }
+    // RAM: only whole 2 MiB blocks, so nothing that isn't RAM is ever
+    // mapped as Normal (cacheable, speculatively accessible) memory
+    let mut mapped: heapless::Vec<(u64, u64), 8> = heapless::Vec::new();
+    for &(base, size) in ram {
+        let end = (base + size) & !(MIB2 - 1);
+        let mut pa = (base + MIB2 - 1) & !(MIB2 - 1);
+        let mut seg_start = None;
+        while pa <= end {
+            let ok = pa < end && map_block(pa, RAM_ATTRS);
+            match (ok, seg_start) {
+                (true, None) => seg_start = Some(pa),
+                (false, Some(s)) => {
+                    let _ = mapped.push((s, pa - s));
+                    seg_start = None;
+                }
+                _ => {}
+            }
+            pa += MIB2;
         }
-        l1.0[1 + g] = core::ptr::addr_of!(l2[g]) as u64 | TABLE | VALID;
     }
 
     enable(&regs());
+    mapped
 }
 
 /// Load the MMU registers and enable translation + caches.
@@ -139,49 +199,29 @@ pub unsafe fn enable(r: &MmuRegs) {
     );
 }
 
-/// Unmap early RAM blocks that the device tree says aren't RAM (so nothing,
-/// not even speculation, touches nonexistent memory as Normal memory).
-pub fn trim_ram(ram: &[(u64, u64)]) {
-    let in_ram = |pa: u64| ram.iter().any(|&(b, s)| pa + MIB2 > b && pa < b + s);
-    unsafe {
-        let l2 = &mut *core::ptr::addr_of_mut!(L2_RAM);
-        for g in 0..EARLY_RAM_GIB {
-            let base = GIB * (1 + g as u64);
-            for i in 0..ENTRIES {
-                if !in_ram(base + i as u64 * MIB2) {
-                    core::ptr::write_volatile(&mut l2[g].0[i], 0);
-                }
-            }
-        }
-        asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb");
-    }
-}
-
 /// Identity-map `[pa, pa + size)` as Device memory in the kernel's tables
-/// (1 GiB blocks, below 512 GiB), e.g. a PCIe ECAM window. Every address
-/// space shares the kernel's level-1 table, so it appears in all of them.
+/// (2 MiB blocks), e.g. a PCIe ECAM window. Every address space shares
+/// the kernel's level-1 table, so it appears in all of them. Blocks that
+/// are already Device-mapped are left alone; overlapping RAM is an error.
 pub fn map_device(pa: u64, size: u64) -> Result<(), &'static str> {
-    let first = pa / GIB;
-    let last = (pa + size - 1) / GIB;
-    if last >= ENTRIES as u64 {
-        return Err("device region above 512 GiB");
-    }
-    unsafe {
-        let l1 = &mut *core::ptr::addr_of_mut!(L1);
-        for i in first..=last {
-            let e = &mut l1.0[i as usize];
-            let d = core::ptr::read_volatile(e);
-            if d & VALID != 0 {
-                if i == 0 {
-                    continue; // the first GiB is already Device memory
-                }
-                return Err("region overlaps an existing mapping");
-            }
-            core::ptr::write_volatile(e, (i * GIB) | ATTR_DEVICE | AF | PXN | UXN | VALID);
+    let mut block = pa & !(MIB2 - 1);
+    let end = pa.checked_add(size).ok_or("device region wraps")?;
+    let mmu_on = unsafe {
+        let v: u64;
+        asm!("mrs {}, sctlr_el1", out(reg) v);
+        v & 1 != 0
+    };
+    let mut result = Ok(());
+    while block < end {
+        if !unsafe { map_block(block, DEVICE_ATTRS) } {
+            result = Err("device region overlaps RAM or exceeds the page-table pool");
         }
-        asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb");
+        block += MIB2;
     }
-    Ok(())
+    if mmu_on {
+        unsafe { asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb") };
+    }
+    result
 }
 
 /// Make instructions the kernel just wrote (through its identity map)
@@ -202,8 +242,6 @@ pub fn sync_icache(kva: *const u8, len: usize) {
     unsafe { asm!("dsb ish", "ic ialluis", "dsb ish", "isb") };
 }
 
-/// Highest RAM address the early map covers
-pub const EARLY_RAM_END: u64 = GIB * (1 + EARLY_RAM_GIB as u64);
 
 // ========================================================================
 // 4 KiB user pages

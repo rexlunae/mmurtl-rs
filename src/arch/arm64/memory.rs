@@ -8,26 +8,37 @@ use crate::memory::frame_allocator::{FrameAllocator, PhysRange, FRAME_SIZE};
 const HEAP_INITIAL: u64 = 16 * 1024 * 1024;
 const HEAP_GROW_CHUNK: u64 = 2 * 1024 * 1024;
 
-/// Hand RAM to the portable memory manager. Everything from the start of
-/// RAM to the end of the kernel image (the DTB QEMU places at RAM start,
-/// the kernel, its boot stack) is reserved, as is the DTB wherever it is.
-pub fn init(ram: &[(u64, u64)], dtb: u64, kernel_start: u64, kernel_end: u64) {
-    let mut usable = [PhysRange { start: 0, end: 0 }; 4];
+/// Hand RAM to the portable memory manager. Reserved: everything from the
+/// start of RAM's first range up to the kernel if the kernel sits within
+/// its first 2 MiB (where QEMU puts the DTB and the Pi firmware its spin
+/// tables), otherwise just the kernel image and boot stack; the DTB
+/// wherever it is; and the device tree's /memreserve/ entries.
+pub fn init(ram: &[(u64, u64)], memreserve: &[(u64, u64)], dtb: u64, kernel_start: u64, kernel_end: u64) {
+    let mut usable = [PhysRange { start: 0, end: 0 }; 8];
     let mut n = 0;
     for &(base, size) in ram {
-        let end = (base + size).min(super::mmu::EARLY_RAM_END);
-        if end > base && n < usable.len() {
-            usable[n] = PhysRange { start: base, end };
+        if size > 0 && n < usable.len() {
+            usable[n] = PhysRange { start: base, end: base + size };
             n += 1;
         }
     }
     let ram_start = ram.iter().map(|&(b, _)| b).min().unwrap_or(kernel_start);
-    let dtb_end = dtb + super::fdt::total_size(dtb);
-    let reserved = [
-        PhysRange { start: ram_start.min(kernel_start), end: kernel_end },
-        PhysRange { start: dtb, end: dtb_end },
-    ];
-    crate::memory::init(&usable[..n], &reserved, kernel_end);
+    let low = if kernel_start - ram_start.min(kernel_start) <= 0x20_0000 {
+        ram_start.min(kernel_start)
+    } else {
+        kernel_start
+    };
+    let mut reserved = [PhysRange { start: 0, end: 0 }; 10];
+    reserved[0] = PhysRange { start: low, end: kernel_end };
+    reserved[1] = PhysRange { start: dtb, end: dtb + super::fdt::total_size(dtb) };
+    let mut r = 2;
+    for &(base, size) in memreserve {
+        if size > 0 && r < reserved.len() {
+            reserved[r] = PhysRange { start: base, end: base + size };
+            r += 1;
+        }
+    }
+    crate::memory::init(&usable[..n], &reserved[..r], kernel_end);
 }
 
 /// Physical → kernel virtual: RAM and devices are identity-mapped
