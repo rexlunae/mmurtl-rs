@@ -23,7 +23,7 @@ mod rqb;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 pub use task::*;
 pub use rqb::*;
@@ -160,6 +160,8 @@ impl Scheduler {
                     break;
                 }
                 t.reaped = true;
+                // Still "unreaped" to observers until its frames are back
+                REAPING.fetch_add(1, Ordering::SeqCst);
                 let _ = out.push(Reapable {
                     kstack_phys: core::mem::take(&mut t.kstack_phys),
                     space: core::mem::take(&mut t.address_space),
@@ -606,16 +608,20 @@ struct Reapable {
 
 static REAPED_TASKS: AtomicU64 = AtomicU64::new(0);
 static REAPED_FRAMES: AtomicU64 = AtomicU64::new(0);
+/// Tasks collected by the reaper whose resources it is still releasing
+static REAPING: AtomicUsize = AtomicUsize::new(0);
 
 /// (tasks reaped, frames returned) since boot
 pub fn reaper_stats() -> (u64, u64) {
     (REAPED_TASKS.load(Ordering::Relaxed), REAPED_FRAMES.load(Ordering::Relaxed))
 }
 
-/// Exited tasks the reaper hasn't released yet
+/// Exited tasks the reaper hasn't finished releasing (including any it
+/// has collected but is still returning frames for)
 pub fn unreaped_tasks() -> usize {
     with_scheduler(|s| {
         s.tasks.iter().filter(|t| t.state == TaskState::Exited && !t.reaped).count()
+            + REAPING.load(Ordering::SeqCst)
     })
 }
 
@@ -646,6 +652,7 @@ extern "C" fn reaper_task() -> ! {
             REAPED_FRAMES.fetch_add(frames, Ordering::Relaxed);
         }
         REAPED_TASKS.fetch_add(batch.len() as u64, Ordering::Relaxed);
+        REAPING.fetch_sub(batch.len(), Ordering::SeqCst);
     }
 }
 

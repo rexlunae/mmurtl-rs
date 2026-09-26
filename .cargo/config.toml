@@ -1,2 +1,7 @@
 # build-std and target are handled by the Makefile for the kernel.
 # Do not set them here — they break the host-binary image-builder tool.
+
+# arm64 kernel: a position-independent executable that relocates itself
+# at boot (see src/arch/arm64/boot.rs), so loaders may place it anywhere
+[target.aarch64-unknown-none-softfloat]
+rustflags = ["-C", "relocation-model=pie", "-C", "link-arg=-pie", "-C", "link-arg=--no-dynamic-linker", "-C", "link-arg=-znorelro"]

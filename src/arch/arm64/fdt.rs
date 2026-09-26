@@ -1,9 +1,17 @@
 //! Flattened device tree (DTB) parser — just enough to discover the
-//! machine: RAM, CPUs, the PSCI conduit, the GIC, the PL011 UART, the
-//! generic timer's interrupt, and the virtio-mmio transports.
+//! machine: RAM and reserved memory, CPUs and how to start them (PSCI or
+//! spin-table), the interrupt controller (GICv2/v3 or the BCM2836 local
+//! controller of Raspberry Pi 2/3), the PL011 UART, the generic timer's
+//! interrupt, the PCIe host bridge, and the virtio-mmio transports.
 //!
-//! No allocation (it runs before the heap exists) and byte-wise big-endian
-//! reads only, so it never performs an unaligned access.
+//! It runs with the MMU off (before the kernel knows where RAM is), so it
+//! allocates nothing and reads only aligned big-endian words; the
+//! `+strict-align` target keeps the compiler from emitting unaligned
+//! accesses, which Device memory would fault on.
+//!
+//! Device addresses are translated to CPU addresses through each
+//! ancestor's `ranges` (e.g. the Pi's `soc` bus maps 0x7e000000 to
+//! 0x3f000000).
 
 const FDT_MAGIC: u32 = 0xd00d_feed;
 const FDT_BEGIN_NODE: u32 = 1;
@@ -16,6 +24,7 @@ const FDT_END: u32 = 9;
 pub const MAX_CPUS: usize = 64;
 pub const MAX_RAM: usize = 4;
 pub const MAX_VIRTIO: usize = 32;
+pub const MAX_RESERVED: usize = 8;
 
 /// PSCI calling convention
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -25,24 +34,44 @@ pub enum PsciConduit {
     Smc,
 }
 
+/// Interrupt controller
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IrqChip {
+    /// ARM GIC, architecture version 2 or 3
+    Gic(u8),
+    /// Broadcom BCM2836 per-core controller + BCM2835 "armctrl" (Pi 2/3)
+    Bcm2836,
+}
+
 /// What the kernel learns from the device tree
 pub struct MachineInfo {
     pub ram: [(u64, u64); MAX_RAM], // (base, size)
     pub ram_count: usize,
+    /// /memreserve/ entries: firmware structures, spin tables, ...
+    pub reserved: [(u64, u64); MAX_RESERVED],
+    pub reserved_count: usize,
     pub cpus: [u64; MAX_CPUS], // MPIDR affinity values
+    /// Per CPU: spin-table release address (0 = not spin-table)
+    pub cpu_release: [u64; MAX_CPUS],
     pub cpu_count: usize,
     pub psci: PsciConduit,
-    /// GIC architecture version (2 or 3)
-    pub gic_version: u8,
+    pub irqchip: IrqChip,
     pub gicd: u64,
     /// GICv2 CPU interface base
     pub gicc: u64,
     /// GICv3 redistributor region (first region)
     pub gicr: u64,
     pub gicr_size: u64,
+    /// BCM2836 per-core controller and BCM2835 armctrl bases
+    pub local_intc: u64,
+    pub armctrl: u64,
     pub uart: u64,
-    pub uart_irq: u32, // GIC INTID
-    pub timer_irq: u32, // virtual timer GIC INTID
+    /// A PL011 was found (the first enabled one wins)
+    pub uart_found: bool,
+    /// UART interrupt: GIC INTID, or armctrl number (bank * 32 + bit)
+    pub uart_irq: u32,
+    /// Virtual timer interrupt: GIC INTID, or BCM2836 local source number
+    pub timer_irq: u32,
     pub virtio: [u64; MAX_VIRTIO],
     pub virtio_count: usize,
     /// PCIe host bridge (generic ECAM), if present
@@ -68,15 +97,21 @@ impl MachineInfo {
         Self {
             ram: [(0, 0); MAX_RAM],
             ram_count: 0,
+            reserved: [(0, 0); MAX_RESERVED],
+            reserved_count: 0,
             cpus: [0; MAX_CPUS],
+            cpu_release: [0; MAX_CPUS],
             cpu_count: 0,
             psci: PsciConduit::None,
-            gic_version: 2,
+            irqchip: IrqChip::Gic(2),
             gicd: 0x0800_0000,
             gicc: 0x0801_0000,
             gicr: 0,
             gicr_size: 0,
+            local_intc: 0,
+            armctrl: 0,
             uart: 0x0900_0000,
+            uart_found: false,
             uart_irq: 33,
             timer_irq: 27,
             virtio: [0; MAX_VIRTIO],
@@ -138,16 +173,22 @@ struct Node {
     is_gic: bool,
     is_gicv3: bool,
     is_pcie: bool,
-    ranges_off: usize,
-    ranges_len: usize,
-    busrange_off: usize,
-    busrange_len: usize,
     is_uart: bool,
     is_virtio: bool,
     is_timer: bool,
     is_psci: bool,
+    is_local_intc: bool,
+    is_armctrl: bool,
+    spin_table: bool,
+    /// `ranges` present (possibly empty = identity) / its location
+    has_ranges: bool,
+    ranges_off: usize,
+    ranges_len: usize,
+    busrange_off: usize,
+    busrange_len: usize,
     /// PSCI "method" (resolved when the node closes: property order varies)
     method: PsciConduit,
+    release_addr: u64,
     reg_off: usize,
     reg_len: usize,
     irq_off: usize,
@@ -165,15 +206,20 @@ impl Node {
             is_gic: false,
             is_gicv3: false,
             is_pcie: false,
-            ranges_off: 0,
-            ranges_len: 0,
-            busrange_off: 0,
-            busrange_len: 0,
             is_uart: false,
             is_virtio: false,
             is_timer: false,
             is_psci: false,
+            is_local_intc: false,
+            is_armctrl: false,
+            spin_table: false,
+            has_ranges: false,
+            ranges_off: 0,
+            ranges_len: 0,
+            busrange_off: 0,
+            busrange_len: 0,
             method: PsciConduit::None,
+            release_addr: 0,
             reg_off: 0,
             reg_len: 0,
             irq_off: 0,
@@ -183,11 +229,49 @@ impl Node {
     }
 }
 
-/// Decode a GIC `interrupts` triple (type, number, flags) into an INTID
-fn gic_intid(b: &[u8], off: usize) -> u32 {
-    let kind = be32(b, off);
-    let num = be32(b, off + 4);
-    if kind == 1 { num + 16 } else { num + 32 } // PPI : SPI
+/// Decode one interrupt specifier of `cells` cells at `off`:
+/// GIC (3 cells: type, number, flags) → INTID; Broadcom (2 cells: bank or
+/// source, number) → bank * 32 + number.
+fn decode_irq(b: &[u8], off: usize, cells: usize) -> u32 {
+    match cells {
+        3 => {
+            let (kind, num) = (be32(b, off), be32(b, off + 4));
+            if kind == 1 { num + 16 } else { num + 32 } // PPI : SPI
+        }
+        2 => be32(b, off) * 32 + be32(b, off + 4),
+        _ => be32(b, off),
+    }
+}
+
+/// Translate a bus address in the child space of `stack[..depth]`'s last
+/// node up to a CPU address, through each ancestor's `ranges`
+fn translate(b: &[u8], stack: &[Node], depth: usize, mut addr: u64) -> u64 {
+    // stack[depth-1] is the node owning the address space `addr` is in
+    let mut k = depth;
+    while k > 1 {
+        let bus = &stack[k - 1];
+        if !bus.has_ranges {
+            break; // no translation defined: treat as identity
+        }
+        if bus.ranges_len > 0 {
+            let (cac, csc) = (bus.child_addr_cells, bus.child_size_cells);
+            let pac = stack[k - 2].child_addr_cells;
+            let entry = 4 * (cac + pac + csc) as usize;
+            let mut o = bus.ranges_off;
+            while o + entry <= bus.ranges_off + bus.ranges_len {
+                let child = read_cells(b, o, cac);
+                let parent = read_cells(b, o + 4 * cac as usize, pac);
+                let size = read_cells(b, o + 4 * (cac + pac) as usize, csc);
+                if addr >= child && addr - child < size {
+                    addr = parent + (addr - child);
+                    break;
+                }
+                o += entry;
+            }
+        }
+        k -= 1;
+    }
+    addr
 }
 
 /// Parse the blob at `addr`
@@ -197,11 +281,25 @@ pub fn parse(addr: u64) -> MachineInfo {
     let b = unsafe { core::slice::from_raw_parts(addr as *const u8, size) };
     let off_struct = be32(b, 8) as usize;
     let off_strings = be32(b, 12) as usize;
+    let off_rsvmap = be32(b, 16) as usize;
+
+    // Memory reservation block: (address, size) pairs until (0, 0)
+    let mut o = off_rsvmap;
+    while o + 16 <= size && info.reserved_count < MAX_RESERVED {
+        let (base, len) = (read_cells(b, o, 2), read_cells(b, o + 8, 2));
+        if base == 0 && len == 0 {
+            break;
+        }
+        info.reserved[info.reserved_count] = (base, len);
+        info.reserved_count += 1;
+        o += 16;
+    }
 
     const DEPTH: usize = 16;
     let mut stack = [Node::new(); DEPTH];
     let mut depth = 0usize; // stack[depth-1] is the current node
     let mut p = off_struct;
+    let mut have_gic = false;
 
     loop {
         let token = be32(b, p);
@@ -230,6 +328,9 @@ pub fn parse(addr: u64) -> MachineInfo {
                 let parent = if depth > 0 { stack[depth - 1] } else { Node::new() };
                 let (ac, sc) = (parent.child_addr_cells, parent.child_size_cells);
                 let entry = 4 * (ac + sc) as usize;
+                // reg[i] of this node, as a CPU address
+                let reg_addr = |i: usize| translate(b, &stack, depth, read_cells(b, n.reg_off + i * entry, ac));
+                let reg_size = |i: usize| read_cells(b, n.reg_off + i * entry + 4 * ac as usize, sc);
                 if !n.status_ok {
                     continue;
                 }
@@ -237,25 +338,25 @@ pub fn parse(addr: u64) -> MachineInfo {
                     info.psci = n.method;
                 }
                 if n.is_memory && n.reg_len >= entry {
-                    let mut o = n.reg_off;
-                    while o + entry <= n.reg_off + n.reg_len && info.ram_count < MAX_RAM {
-                        let base = read_cells(b, o, ac);
-                        let len = read_cells(b, o + 4 * ac as usize, sc);
+                    let mut i = 0;
+                    while (i + 1) * entry <= n.reg_len && info.ram_count < MAX_RAM {
+                        let (base, len) = (reg_addr(i), reg_size(i));
                         if len > 0 {
                             info.ram[info.ram_count] = (base, len);
                             info.ram_count += 1;
                         }
-                        o += entry;
+                        i += 1;
                     }
                 } else if n.is_cpu && n.reg_len >= 4 * ac as usize {
                     if info.cpu_count < MAX_CPUS {
                         info.cpus[info.cpu_count] = read_cells(b, n.reg_off, ac);
+                        info.cpu_release[info.cpu_count] = if n.spin_table { n.release_addr } else { 0 };
                         info.cpu_count += 1;
                     }
                 } else if n.is_pcie && n.reg_len >= entry {
                     let mut host = PciHost {
-                        ecam: read_cells(b, n.reg_off, ac),
-                        ecam_size: read_cells(b, n.reg_off + 4 * ac as usize, sc),
+                        ecam: reg_addr(0),
+                        ecam_size: reg_size(0),
                         bus_start: 0,
                         bus_end: 255,
                         ..PciHost::default()
@@ -283,25 +384,36 @@ pub fn parse(addr: u64) -> MachineInfo {
                     info.pci = Some(host);
                 } else if n.is_gicv3 && n.reg_len >= 2 * entry {
                     // reg = <GICD>, <GICR region>, [GICC, GICH, GICV]
-                    info.gic_version = 3;
-                    info.gicd = read_cells(b, n.reg_off, ac);
-                    info.gicr = read_cells(b, n.reg_off + entry, ac);
-                    info.gicr_size = read_cells(b, n.reg_off + entry + 4 * ac as usize, sc);
+                    info.irqchip = IrqChip::Gic(3);
+                    have_gic = true;
+                    info.gicd = reg_addr(0);
+                    info.gicr = reg_addr(1);
+                    info.gicr_size = reg_size(1);
                 } else if n.is_gic && n.reg_len >= 2 * entry {
-                    info.gic_version = 2;
-                    info.gicd = read_cells(b, n.reg_off, ac);
-                    info.gicc = read_cells(b, n.reg_off + entry, ac);
-                } else if n.is_uart && n.reg_len >= entry {
-                    info.uart = read_cells(b, n.reg_off, ac);
-                    if n.irq_len >= 12 {
-                        info.uart_irq = gic_intid(b, n.irq_off);
+                    info.irqchip = IrqChip::Gic(2);
+                    have_gic = true;
+                    info.gicd = reg_addr(0);
+                    info.gicc = reg_addr(1);
+                } else if n.is_local_intc && n.reg_len >= entry {
+                    info.local_intc = reg_addr(0);
+                    if !have_gic {
+                        info.irqchip = IrqChip::Bcm2836;
                     }
+                } else if n.is_armctrl && n.reg_len >= entry {
+                    info.armctrl = reg_addr(0);
+                } else if n.is_uart && n.reg_len >= entry && !info.uart_found {
+                    info.uart = reg_addr(0);
+                    if n.irq_len >= 8 {
+                        info.uart_irq = decode_irq(b, n.irq_off, n.irq_len / 4);
+                    }
+                    info.uart_found = true;
                 } else if n.is_virtio && n.reg_len >= entry && info.virtio_count < MAX_VIRTIO {
-                    info.virtio[info.virtio_count] = read_cells(b, n.reg_off, ac);
+                    info.virtio[info.virtio_count] = reg_addr(0);
                     info.virtio_count += 1;
-                } else if n.is_timer && n.irq_len >= 36 {
+                } else if n.is_timer && n.irq_len >= 16 && n.irq_len % 16 == 0 {
                     // interrupts = <secure-phys>, <non-secure-phys>, <virtual>, <hyp>
-                    info.timer_irq = gic_intid(b, n.irq_off + 24);
+                    let cells = n.irq_len / 16;
+                    info.timer_irq = decode_irq(b, n.irq_off + 2 * 4 * cells, cells);
                 }
             }
             FDT_PROP => {
@@ -323,6 +435,7 @@ pub fn parse(addr: u64) -> MachineInfo {
                         n.reg_len = len;
                     }
                     b"ranges" => {
+                        n.has_ranges = true;
                         n.ranges_off = val;
                         n.ranges_len = len;
                     }
@@ -351,18 +464,24 @@ pub fn parse(addr: u64) -> MachineInfo {
                             _ => PsciConduit::None,
                         };
                     }
+                    b"enable-method" => n.spin_table = cstr(b, val) == b"spin-table",
+                    b"cpu-release-addr" if len == 8 => n.release_addr = read_cells(b, val, 2),
+                    b"cpu-release-addr" if len == 4 => n.release_addr = be32(b, val) as u64,
                     b"compatible" => {
                         n.is_gic |= strlist_contains(v, b"arm,cortex-a15-gic")
                             || strlist_contains(v, b"arm,gic-400");
                         n.is_uart |= strlist_contains(v, b"arm,pl011");
                         n.is_virtio |= strlist_contains(v, b"virtio,mmio");
-                        n.is_timer |= strlist_contains(v, b"arm,armv8-timer");
+                        n.is_timer |= strlist_contains(v, b"arm,armv8-timer")
+                            || strlist_contains(v, b"arm,armv7-timer");
                         let psci = strlist_contains(v, b"arm,psci-1.0")
                             || strlist_contains(v, b"arm,psci-0.2")
                             || strlist_contains(v, b"arm,psci");
                         n.is_psci |= psci;
                         n.is_gicv3 |= strlist_contains(v, b"arm,gic-v3");
                         n.is_pcie |= strlist_contains(v, b"pci-host-ecam-generic");
+                        n.is_local_intc |= strlist_contains(v, b"brcm,bcm2836-l1-intc");
+                        n.is_armctrl |= strlist_contains(v, b"brcm,bcm2836-armctrl-ic");
                     }
                     _ => {}
                 }
