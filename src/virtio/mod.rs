@@ -1,37 +1,69 @@
-//! Virtio — legacy (0.9.5) virtio-pci transport and split virtqueues.
+//! Virtio — transport-independent core: DMA memory, split virtqueues,
+//! and the `Transport` interface the device drivers (virtio-blk,
+//! virtio-net) are written against.
 //!
-//! QEMU's transitional virtio-pci devices (vendor 0x1AF4, device IDs
-//! 0x1000-0x103F) expose the legacy interface through an I/O port BAR,
-//! which is far simpler to drive than the modern capability-based MMIO
-//! interface: a fixed register layout, guest-endian (little-endian on
-//! x86), and page-frame-number queue addressing.
-//!
-//! Drivers built on this: virtio-blk (storage) and virtio-net (network).
+//! Transports live with the architecture: legacy virtio-pci over port I/O
+//! on amd64, virtio-mmio (legacy v1 or modern v2) on arm64. Both use the
+//! same split-virtqueue memory layout: descriptor table, avail ring, and a
+//! page-aligned used ring in one physically contiguous allocation.
 
 pub mod blk;
 pub mod net;
 
+use alloc::boxed::Box;
 use core::sync::atomic::{fence, Ordering};
-use x86_64::instructions::port::Port;
 
-pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
+// Device status bits (common to all transports)
+pub const STATUS_ACKNOWLEDGE: u8 = 1;
+pub const STATUS_DRIVER: u8 = 2;
+pub const STATUS_DRIVER_OK: u8 = 4;
+pub const STATUS_FEATURES_OK: u8 = 8;
 
-// Legacy I/O register offsets (no MSI-X)
-const REG_HOST_FEATURES: u16 = 0x00; // r32
-const REG_GUEST_FEATURES: u16 = 0x04; // w32
-const REG_QUEUE_PFN: u16 = 0x08; // rw32
-const REG_QUEUE_NUM: u16 = 0x0C; // r16
-const REG_QUEUE_SEL: u16 = 0x0E; // w16
-const REG_QUEUE_NOTIFY: u16 = 0x10; // w16
-const REG_STATUS: u16 = 0x12; // rw8
-const REG_ISR: u16 = 0x13; // r8 (read acknowledges)
-/// Device-specific config starts here (without MSI-X)
-pub const REG_DEVICE_CONFIG: u16 = 0x14;
+/// A virtio device transport
+pub trait Transport: Send {
+    /// Device feature bits 0-31
+    fn host_features(&self) -> u32;
+    /// Accept feature bits 0-31 (a modern transport also negotiates
+    /// VIRTIO_F_VERSION_1 and completes the FEATURES_OK handshake)
+    fn set_guest_features(&self, features: u32);
+    /// Maximum size of queue `queue` (0 = queue doesn't exist)
+    fn queue_max(&self, queue: u16) -> u16;
+    /// Hand `vq`'s ring memory to the device as queue `queue`
+    fn setup_queue(&self, queue: u16, vq: &Virtqueue);
+    /// Tell the device a queue has new buffers
+    fn notify(&self, queue: u16);
+    /// Finish initialization — device is live after this
+    fn driver_ok(&self);
+    /// Device-specific configuration space
+    fn config_read8(&self, offset: u16) -> u8;
+    fn config_read32(&self, offset: u16) -> u32;
+    fn config_read64(&self, offset: u16) -> u64 {
+        let lo = self.config_read32(offset) as u64;
+        let hi = self.config_read32(offset + 4) as u64;
+        (hi << 32) | lo
+    }
+    /// Whether this is a modern (virtio 1.0) device — changes the
+    /// virtio-net header size
+    fn modern(&self) -> bool {
+        false
+    }
+    /// Human-readable transport name for the boot log
+    fn name(&self) -> &'static str;
+}
 
-// Device status bits
-const STATUS_ACKNOWLEDGE: u8 = 1;
-const STATUS_DRIVER: u8 = 2;
-const STATUS_DRIVER_OK: u8 = 4;
+/// A device found by the architecture's bus probe
+pub fn attach(device_id: u32, transport: Box<dyn Transport>) {
+    match device_id {
+        1 => net::init(transport),
+        2 => blk::init(transport),
+        other => {
+            crate::serial::write_str("[VIRTIO] Unhandled virtio device type ");
+            crate::serial::write_dec(other as u64);
+            crate::serial::write_str("
+");
+        }
+    }
+}
 
 // ========================================================================
 // DMA memory
@@ -49,104 +81,17 @@ pub struct DmaRegion {
 // serialized by the owning driver's Mutex.
 unsafe impl Send for DmaRegion {}
 
-/// Allocate `pages` physically contiguous, zeroed pages for device DMA.
-/// Accessed by the CPU through the physical-memory offset window.
+/// Allocate `pages` physically contiguous, zeroed pages for device DMA
 pub fn dma_alloc(pages: usize) -> DmaRegion {
     let phys = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_contiguous(pages))
         .expect("Frame allocator not initialized")
         .expect("OOM allocating DMA region");
 
-    let virt = crate::memory::page_table::phys_to_virt(phys).as_mut_ptr::<u8>();
+    let virt = crate::arch::phys_to_virt(phys);
     let size = pages * 4096;
     unsafe { core::ptr::write_bytes(virt, 0, size) };
 
-    DmaRegion {
-        phys: phys.as_u64(),
-        virt,
-        size,
-    }
-}
-
-// ========================================================================
-// Legacy virtio-pci transport
-// ========================================================================
-
-pub struct VirtioLegacy {
-    io: u16,
-}
-
-impl VirtioLegacy {
-    /// Take ownership of a transitional virtio-pci device: enable bus
-    /// mastering, reset it, and acknowledge it. Returns None if BAR0 is
-    /// not an I/O BAR (modern-only device).
-    pub fn new(dev: &crate::pci::PciDevice) -> Option<Self> {
-        let io = dev.io_base()?;
-        dev.enable_bus_master();
-
-        let t = Self { io };
-        t.write_status(0); // reset
-        t.write_status(STATUS_ACKNOWLEDGE);
-        t.write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER);
-        Some(t)
-    }
-
-    fn write_status(&self, status: u8) {
-        unsafe { Port::<u8>::new(self.io + REG_STATUS).write(status) }
-    }
-
-    pub fn host_features(&self) -> u32 {
-        unsafe { Port::<u32>::new(self.io + REG_HOST_FEATURES).read() }
-    }
-
-    pub fn set_guest_features(&self, features: u32) {
-        unsafe { Port::<u32>::new(self.io + REG_GUEST_FEATURES).write(features) }
-    }
-
-    /// Select a virtqueue and return its size (0 = queue doesn't exist)
-    pub fn queue_size(&self, queue: u16) -> u16 {
-        unsafe {
-            Port::<u16>::new(self.io + REG_QUEUE_SEL).write(queue);
-            Port::<u16>::new(self.io + REG_QUEUE_NUM).read()
-        }
-    }
-
-    /// Register a virtqueue's ring memory (queue must be selected)
-    pub fn set_queue_pfn(&self, queue: u16, phys: u64) {
-        unsafe {
-            Port::<u16>::new(self.io + REG_QUEUE_SEL).write(queue);
-            Port::<u32>::new(self.io + REG_QUEUE_PFN).write((phys >> 12) as u32);
-        }
-    }
-
-    /// Tell the device a queue has new buffers
-    pub fn notify(&self, queue: u16) {
-        unsafe { Port::<u16>::new(self.io + REG_QUEUE_NOTIFY).write(queue) }
-    }
-
-    /// Read + acknowledge the ISR status
-    #[allow(dead_code)]
-    pub fn isr(&self) -> u8 {
-        unsafe { Port::<u8>::new(self.io + REG_ISR).read() }
-    }
-
-    /// Finish initialization — device is live after this
-    pub fn driver_ok(&self) {
-        self.write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK);
-    }
-
-    pub fn config_read8(&self, offset: u16) -> u8 {
-        unsafe { Port::<u8>::new(self.io + REG_DEVICE_CONFIG + offset).read() }
-    }
-
-    pub fn config_read32(&self, offset: u16) -> u32 {
-        unsafe { Port::<u32>::new(self.io + REG_DEVICE_CONFIG + offset).read() }
-    }
-
-    pub fn config_read64(&self, offset: u16) -> u64 {
-        let lo = self.config_read32(offset) as u64;
-        let hi = self.config_read32(offset + 4) as u64;
-        (hi << 32) | lo
-    }
+    DmaRegion { phys, virt, size }
 }
 
 // ========================================================================
@@ -185,7 +130,11 @@ pub struct Virtqueue {
     free_head: u16,
     num_free: u16,
     last_used: u16,
+    /// Physical address of the ring memory (descriptor table first)
     pub ring_phys: u64,
+    /// Byte offsets of the avail and used rings within the ring memory
+    avail_offset: u64,
+    used_offset: u64,
 }
 
 unsafe impl Send for Virtqueue {}
@@ -224,8 +173,25 @@ impl Virtqueue {
                 num_free: size,
                 last_used: 0,
                 ring_phys: region.phys,
+                avail_offset: desc_bytes as u64,
+                used_offset: used_offset as u64,
             }
         }
+    }
+
+    /// Number of entries
+    pub fn size(&self) -> u16 {
+        self.size
+    }
+
+    /// Physical addresses of the descriptor table, avail ring, and used
+    /// ring (for transports that program them separately)
+    pub fn ring_addrs(&self) -> (u64, u64, u64) {
+        (
+            self.ring_phys,
+            self.ring_phys + self.avail_offset,
+            self.ring_phys + self.used_offset,
+        )
     }
 
     /// Add a descriptor chain and publish it in the avail ring.
@@ -299,31 +265,9 @@ impl Virtqueue {
             if let Some(r) = self.pop_used(chain_len) {
                 return Some(r);
             }
-            crate::apic::pit_wait_ms(1);
+            crate::arch::delay_ms(1);
         }
         self.pop_used(chain_len)
     }
 }
 
-// ========================================================================
-// Init
-// ========================================================================
-
-/// Probe the PCI bus for virtio devices and bring up the drivers we have
-pub fn init(devices: &[crate::pci::PciDevice]) {
-    for dev in devices {
-        if dev.vendor_id != VIRTIO_VENDOR_ID {
-            continue;
-        }
-        match dev.device_id {
-            // Transitional virtio-net / virtio-blk
-            0x1000 => net::init(dev),
-            0x1001 => blk::init(dev),
-            other => {
-                crate::serial::write_str("[VIRTIO] Unhandled virtio device 0x");
-                crate::serial::write_hex(other as u64);
-                crate::serial::write_str("\n");
-            }
-        }
-    }
-}

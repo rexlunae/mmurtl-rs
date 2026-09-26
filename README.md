@@ -1,52 +1,75 @@
 # MMURTL/RS 🔥
 
-A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel) targeting x86_64 long mode.
+A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel),
+running on **amd64** (x86_64 long mode) and **arm64** (AArch64).
 
-## Status: Phase 10 (Userspace + Syscalls) Complete ✅ — roadmap finished
+## Status: roadmap finished ✅ — now on two architectures
 
-- ✅ Bootable via BIOS (UEFI support coming)
-- ✅ Serial output on COM1 (115200 8N1)
-- ✅ GDT with kernel/user segments + TSS (IST for double faults)
-- ✅ Full IDT — all 20 CPU exceptions handled with proper `x86-interrupt` convention
-- ✅ PIC (8259) remapped to 0x20/0x28 (fallback; fully masked in APIC mode)
+Both ports run the same kernel: the scheduler, blocking RQB IPC, memory
+management, virtio drivers, exFAT, syscalls, and userspace are shared
+code, and each architecture supplies only its hardware layer (see
+[Architecture ports](#architecture-ports-amd64--arm64)). The feature list below
+is common to both unless marked.
+
+- ✅ **(amd64)** Bootable via BIOS (UEFI support coming)
+- ✅ **(amd64)** Serial output on COM1 (115200 8N1)
+- ✅ **(amd64)** GDT with kernel/user segments + TSS (IST for double faults)
+- ✅ **(amd64)** Full IDT — all 20 CPU exceptions handled with proper `x86-interrupt` convention
+- ✅ **(amd64)** PIC (8259) remapped to 0x20/0x28 (fallback; fully masked in APIC mode)
 - ✅ Kernel panic handler with file:line + message output
 - ✅ Physical memory region enumeration and usable memory counting
 - ✅ Preemptive round-robin scheduler + kernel heap
-- ✅ ACPI table parsing (RSDP → RSDT/XSDT → MADT)
-- ✅ Local APIC: PIT-calibrated LAPIC timer drives the 100 Hz scheduler tick
-- ✅ I/O APIC: legacy IRQ routing (keyboard) with interrupt source overrides
-- ✅ Multi-core boot: INIT-SIPI-SIPI trampoline brings all APs into long mode
-- ✅ SMP scheduling: every CPU runs the scheduler off its own LAPIC timer;
+- ✅ **(amd64)** ACPI table parsing (RSDP → RSDT/XSDT → MADT)
+- ✅ **(amd64)** Local APIC: PIT-calibrated LAPIC timer drives the 100 Hz scheduler tick
+- ✅ **(amd64)** I/O APIC: legacy IRQ routing (keyboard) with interrupt source overrides
+- ✅ **(amd64)** Multi-core boot: INIT-SIPI-SIPI trampoline brings all APs into long mode
+- ✅ SMP scheduling: every CPU runs the scheduler off its own local timer;
   tasks migrate freely between cores, idle CPUs woken by reschedule IPIs
-- ✅ Per-CPU GDT/TSS with dedicated double-fault IST stacks on every core
-- ✅ Virtio core: legacy PCI transport, split virtqueues, contiguous DMA allocator
+- ✅ **(amd64)** Per-CPU GDT/TSS with dedicated double-fault IST stacks on every core
+- ✅ **(amd64)** Virtio core: legacy PCI transport, split virtqueues, contiguous DMA allocator
 - ✅ Storage: virtio-blk driver with sector read/write (verified end-to-end)
 - ✅ Network: virtio-net driver with a live ARP round trip through QEMU user-net
-- ✅ Input: PS/2 keyboard driver — scancode set 1 → ASCII with shift, char queue
+- ✅ **(arm64)** Boots on QEMU `virt` from an ELF at EL1 (or EL2); PL011
+  console; RAM, CPUs, and devices from the device tree
+- ✅ **(arm64)** Identity-mapped MMU, EL1 vector table, GICv2 + generic
+  timer tick, PSCI multi-core boot, virtio-mmio (legacy + modern)
+- ✅ **(amd64)** Input: PS/2 keyboard driver — scancode set 1 → ASCII with shift, char queue
 - ✅ Filesystem: exFAT — full API: subdirectories, mkdir, create, read,
   overwrite, append, delete; interoperable with Linux in both directions,
   `fsck.exfat`-clean after kernel writes
 - ✅ IPC: blocking RQB message passing — `send_rqb` / `receive_rqb` /
   `reply_rqb` with per-task inboxes, a service name registry, and real
   blocking (`sleep_ms`, voluntary yield) instead of busy-waiting
-- ✅ Userspace: ring-3 tasks with their own user pages, an `int 0x80`
-  syscall gate with validated user pointers, and fault isolation — a
+- ✅ Userspace: user-mode tasks (ring 3 / EL0) with their own user pages,
+  a syscall trap (`int 0x80` / `svc #0`) with validated user pointers, and
+  fault isolation — a
   misbehaving program is killed, the kernel keeps running
 
 ## Building
 
 ```bash
-# Build the kernel
-cargo build -Z build-std=core,compiler_builtins,alloc \
-    --target x86_64-unknown-none.json --release
+# amd64: build the kernel and create BIOS/UEFI boot images
+make bios
 
-# Create bootable BIOS image
-/tmp/mmurtl-builder/target/release/mmurtl-builder \
-    target/x86_64-unknown-none/release/mmurtl-rs \
-    target/mmurtl-rs-bios.img
+# arm64: build the kernel ELF (QEMU loads it directly)
+make arm64
 ```
 
 ## Running (requires QEMU)
+
+### arm64
+
+```bash
+make run-arm64              # QEMU virt, GICv2, 4 CPUs (ARM64_SMP=N to change)
+
+# With a disk and NIC (virtio-mmio):
+qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a72 -smp 4 -m 256M \
+    -nographic -kernel target/aarch64-unknown-none-softfloat/release/mmurtl-rs \
+    -drive if=none,format=raw,file=test-disk.img,id=hd0 -device virtio-blk-device,drive=hd0 \
+    -netdev user,id=n0 -device virtio-net-device,netdev=n0
+```
+
+### amd64
 
 ```bash
 # Optional: test disk for the virtio-blk self-test
@@ -68,22 +91,24 @@ gracefully when the devices are absent.)
 
 ```
 src/
-├── main.rs        — Entry point, kernel init sequence
-├── serial.rs      — UART 16550 serial output
-├── gdt.rs         — GDT + per-CPU TSS (RSP0 per user task)
-├── interrupts.rs  — IDT, exception handlers, PIC, timer/yield/keyboard
-├── syscall.rs     — int 0x80 syscall gate + dispatch
-├── userspace.rs   — ring-3 demo programs + kernel-side checks
-├── acpi.rs        — ACPI table parsing (RSDP/RSDT/XSDT/MADT)
-├── apic.rs        — Local APIC + I/O APIC driver, LAPIC timer, IPIs
-├── smp.rs         — Multi-core boot (AP trampoline, INIT-SIPI-SIPI)
-├── memory/
-│   ├── mod.rs     — Frame allocator, paging, kernel heap
-│   └── user.rs    — User window: program loading, pointer validation
-├── scheduler/
-│   └── mod.rs     — SMP scheduler + blocking RQB IPC primitives
-└── ipc/
-    └── mod.rs     — Service registry + IPC demo
+├── main.rs            — kernel_run(): shared second half of boot, demo tasks
+├── serial.rs          — console (locked, over the arch UART)
+├── keyboard.rs        — console input queue (+ amd64 PS/2 translation)
+├── syscall.rs         — syscall dispatch (behind each arch's trap stub)
+├── userspace.rs       — user-program loading + kernel-side checks
+├── memory/            — frame allocator, heap, user window
+├── scheduler/         — SMP scheduler + blocking RQB IPC primitives
+├── ipc/               — service registry + IPC demo
+├── virtio/            — virtqueues + Transport trait, blk + net drivers
+├── fs/exfat.rs        — exFAT filesystem
+└── arch/
+    ├── mod.rs         — the architecture interface
+    ├── amd64/         — bootloader entry, 16550, GDT/IDT, APIC, ACPI,
+    │                    SMP trampoline, paging, PCI, virtio-pci, xHCI,
+    │                    int 0x80, ring-3 programs
+    └── arm64/         — _start + linker script, PL011, device tree, MMU,
+                         vectors, GICv2 + timer, PSCI SMP, virtio-mmio,
+                         svc #0, EL0 programs
 ```
 
 ## Architecture
@@ -92,7 +117,7 @@ Originally by Richard Burgess (1994):
 
 - **Message-passing IPC** via Request Blocks (RQBs) — synchronous send/receive
 - **Cooperative multitasking** with priority queues
-- **Flat memory model** (we use x86_64 paging + long mode)
+- **Flat memory model** (we use 4-level paging on both architectures)
 - **Minimal kernel** — most services run as tasks
 
 ## Phase Roadmap
@@ -109,6 +134,7 @@ Originally by Richard Burgess (1994):
 | 8 | exFAT filesystem (full read/write API, Linux-interoperable) | ✅ Done |
 | 9 | Real RQB IPC (blocking send/receive/reply) | ✅ Done |
 | 10 | Userspace + syscalls (ring 3, int 0x80) | ✅ Done |
+| — | **arm64 port** (shared core + arch layer) | ✅ Done |
 
 ## Memory Management (Phase 3)
 
@@ -402,6 +428,56 @@ Limitations: all tasks share one page table, so user programs are
 isolated from the kernel but not yet from each other (per-task address
 spaces are the next step); programs are flat binaries, not ELF; exited
 tasks' memory is not reclaimed.
+
+## Architecture ports (amd64 + arm64)
+
+The kernel is split into a **portable core** and an **architecture
+layer** (`src/arch/`). The core — scheduler, IPC, frame allocator and
+heap, user-memory validation, virtio blk/net drivers, exFAT, syscall
+dispatch, userspace checks — is identical on both ports; each port
+implements the interface documented in `src/arch/mod.rs` (console, CPU
+identity and IPIs, timer tick, task contexts and yield, physical memory
+translation, heap placement, user page mapping, user programs) and its
+own boot path.
+
+| | amd64 | arm64 |
+|---|---|---|
+| Boot | `bootloader` crate (BIOS/UEFI), long mode | ELF at 0x4020_0000, EL1 (drops from EL2) |
+| Discovery | ACPI MADT, PCI | Device tree (RAM, CPUs, PSCI, GIC, UART, virtio) |
+| Console | 16550 COM1 | PL011 (RX interrupt feeds console input) |
+| Paging | bootloader tables + offset window | own identity map; EL0/EL1 AP bits, PXN/UXN |
+| Interrupts | IDT; PIC → Local/I/O APIC | EL1 vector table; GICv2 |
+| Tick | LAPIC timer (PIT fallback) | generic virtual timer (PPI 27) |
+| Reschedule IPI | vector 0x30 | SGI 1 |
+| Yield | `int 0x31` | `svc` from EL1 |
+| Multi-core | INIT-SIPI-SIPI trampoline | PSCI `CPU_ON` (HVC/SMC per DT) |
+| Syscalls | `int 0x80` (DPL 3), TSS.RSP0 per task | `svc #0` from EL0 (x8 = number) |
+| User isolation | U/S bit, NX, SMAP-aware | AP[7:6], PXN/UXN; UMA=0 traps DAIF |
+| virtio | legacy virtio-pci (port I/O) | virtio-mmio v1 (legacy) and v2 |
+
+Both ports run the same boot demo end to end — storage self-test, ARP,
+exFAT, every IPC check, and every userspace check (including the rogue
+programs being killed). The arm64 port is verified on QEMU `virt` at 1,
+2, 4, and 8 CPUs, with `-cpu cortex-a72` and `-cpu max`, entered at EL1
+or EL2, and over both legacy and modern virtio-mmio:
+```
+[DTB] Device tree at 0x0000000040000000: 4 CPU(s), 32 virtio-mmio slots, PSCI via HVC
+[GIC] GICv2: distributor 0x0000000008000000, CPU interface 0x0000000008010000; timer INTID 27 @ 62 MHz
+[SMP] CPU 1 online (MPIDR 0x1), scheduling
+[BLK] virtio-blk (virtio-mmio v1 (legacy)) ready: 32768 sectors (16384 KiB), queue size 256
+[USER T14 EL0] Hello from EL0! Asking the kernel's sysinfo service over RQB IPC...
+[USER] T16 "rogue_read" killed: data abort (permission fault) at pc=0x640000301018, addr=0x40223818
+[USER] T17 "rogue_priv" killed: trapped system instruction at pc=0x640000401014
+[IPC] ✓ All IPC checks passed
+[USER] ✓ All userspace checks passed
+```
+The same exFAT disk image can be booted alternately on both: its
+per-boot log keeps counting across architectures and stays
+`fsck.exfat`-clean.
+
+arm64 limitations: GICv2 only (so at most 8 CPUs; run QEMU with
+`gic-version=2`), RAM beyond the first 4 GiB above 1 GiB is ignored,
+and no PCI (devices come from virtio-mmio).
 
 ## USB Driver (xHCI)
 

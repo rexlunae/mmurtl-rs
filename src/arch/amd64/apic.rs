@@ -19,9 +19,9 @@ use x86_64::PhysAddr;
 
 /// LAPIC timer → same vector the PIT used, so the context-switch handler
 /// in interrupts.rs works unchanged.
-pub const TIMER_VECTOR: u8 = crate::interrupts::PIC_1_OFFSET;
+pub const TIMER_VECTOR: u8 = crate::arch::interrupts::PIC_1_OFFSET;
 /// Keyboard, routed through the I/O APIC (GSI 1 on QEMU/ISA)
-pub const KEYBOARD_VECTOR: u8 = crate::interrupts::PIC_1_OFFSET + 1;
+pub const KEYBOARD_VECTOR: u8 = crate::arch::interrupts::PIC_1_OFFSET + 1;
 /// Reschedule IPI — kicks a CPU into the scheduler immediately
 pub const RESCHED_VECTOR: u8 = 0x30;
 /// LAPIC error interrupt
@@ -99,7 +99,7 @@ pub fn eoi() {
 ///
 /// Returns false (leaving the kernel in PIC/PIT mode) if no MADT was found.
 pub fn init() -> bool {
-    let madt = match crate::acpi::madt() {
+    let madt = match crate::arch::acpi::madt() {
         Some(m) => m,
         None => {
             crate::serial::write_line("[APIC] No MADT — staying on PIC/PIT");
@@ -121,8 +121,8 @@ pub fn init() -> bool {
     }
 
     // Map the LAPIC MMIO page (uncached) through the phys-offset window
-    crate::memory::ensure_phys_mapped(base, 0x1000, true);
-    let virt = crate::memory::page_table::phys_to_virt(PhysAddr::new(base));
+    crate::arch::memory::ensure_phys_mapped(base, 0x1000, true);
+    let virt = crate::arch::page_table::phys_to_virt(PhysAddr::new(base));
     LAPIC_VIRT.store(virt.as_u64(), Ordering::Release);
 
     crate::serial::write_str("[APIC] LAPIC base 0x");
@@ -142,7 +142,7 @@ pub fn init() -> bool {
     }
 
     // Fully mask the legacy PIC — the LAPIC/IOAPIC own interrupts now
-    crate::interrupts::mask_pic();
+    crate::arch::interrupts::mask_pic();
 
     calibrate_timer();
 
@@ -319,8 +319,8 @@ fn ioapic_route(
     }
     let index = gsi - gsi_base;
 
-    crate::memory::ensure_phys_mapped(ioapic_phys, 0x1000, true);
-    let virt = crate::memory::page_table::phys_to_virt(PhysAddr::new(ioapic_phys)).as_u64();
+    crate::arch::memory::ensure_phys_mapped(ioapic_phys, 0x1000, true);
+    let virt = crate::arch::page_table::phys_to_virt(PhysAddr::new(ioapic_phys)).as_u64();
 
     let regsel = virt as *mut u32;
     let regwin = (virt + 0x10) as *mut u32;

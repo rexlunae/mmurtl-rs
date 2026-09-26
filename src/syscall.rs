@@ -1,26 +1,18 @@
-//! Syscalls — the ring-3 → kernel interface, via `int 0x80`.
+//! Syscalls — the user-mode → kernel interface (architecture-neutral).
 //!
-//! Calling convention (Linux-like register assignment):
-//!   RAX = syscall number
-//!   RDI = arg1, RSI = arg2, RDX = arg3, R10 = arg4, R8 = arg5
-//!   Return value in RAX; every other register is preserved.
-//!
-//! `int 0x80` is an interrupt gate with DPL 3, so user code may invoke it.
-//! On entry from ring 3 the CPU switches to TSS.RSP0 — the calling task's
-//! own kernel stack — so a syscall can block (IPC, sleep) and be preempted
-//! exactly like kernel code, then IRETQ back to ring 3. (The `syscall`
-//! instruction is deliberately left disabled: it does not switch stacks,
-//! and a ring-3 caller would otherwise run kernel code on its user stack.)
+//! The architecture's trap stub (`int 0x80` on amd64, `svc #0` on arm64)
+//! saves the caller's registers on its kernel stack, enables interrupts,
+//! and calls `dispatch` with the syscall number and up to five arguments;
+//! the return value goes back in the first return register. Because the
+//! handler runs on the calling task's own kernel stack, a syscall can
+//! block (IPC, sleep) and be preempted exactly like kernel code.
 //!
 //! Every pointer argument is validated against the user window and the
 //! page tables (`memory::user::range_ok`) before the kernel touches it, so
 //! ring 3 can't make the kernel read or write kernel memory for it.
 
 use crate::memory::user::{copy_from_user, copy_to_user, range_ok};
-use crate::scheduler::{self, Rqb, RqbStatus, TaskContext, RQB_DATA_SIZE};
-
-/// Interrupt vector for syscalls
-pub const SYSCALL_VECTOR: u8 = 0x80;
+use crate::scheduler::{self, Rqb, RqbStatus, RQB_DATA_SIZE};
 
 // ========================================================================
 // Syscall numbers
@@ -95,72 +87,16 @@ fn read_user_rqb(ptr: u64) -> Option<Rqb> {
 }
 
 // ========================================================================
-// Entry stub
-// ========================================================================
-
-core::arch::global_asm!(
-    ".globl syscall_int_entry",
-    "syscall_int_entry:",
-    // Same register frame as the timer path (TaskContext layout)
-    "push rax",
-    "push rcx",
-    "push rdx",
-    "push rbx",
-    "push rbp",
-    "push rsi",
-    "push rdi",
-    "push r8",
-    "push r9",
-    "push r10",
-    "push r11",
-    "push r12",
-    "push r13",
-    "push r14",
-    "push r15",
-    "mov rdi, rsp",
-    // We are on the caller's own kernel stack: run the handler with
-    // interrupts on, so it can be preempted and can block.
-    "sti",
-    "call syscall_dispatch",
-    "cli",
-    "pop r15",
-    "pop r14",
-    "pop r13",
-    "pop r12",
-    "pop r11",
-    "pop r10",
-    "pop r9",
-    "pop r8",
-    "pop rdi",
-    "pop rsi",
-    "pop rbp",
-    "pop rbx",
-    "pop rdx",
-    "pop rcx",
-    "pop rax", // the handler stored the return value in the saved RAX
-    "iretq",
-);
-
-extern "C" {
-    fn syscall_int_entry();
-}
-
-/// Address of the entry stub, for the IDT
-pub fn entry_address() -> u64 {
-    syscall_int_entry as usize as u64
-}
-
-// ========================================================================
 // Dispatch
 // ========================================================================
 
-#[no_mangle]
-extern "C" fn syscall_dispatch(frame: &mut TaskContext) {
-    let (a1, a2) = (frame.rdi, frame.rsi);
-    let cpl = frame.cs & 3;
-    frame.rax = match frame.rax {
+/// Execute syscall `no` for the calling task. `privilege` names the
+/// caller's privilege level for the log prefix ("CPL3" / "EL0").
+pub fn dispatch(no: u64, args: [u64; 5], privilege: &str) -> u64 {
+    let (a1, a2) = (args[0], args[1]);
+    match no {
         SYS_EXIT => sys_exit(),
-        SYS_LOG => sys_log(a1, a2, cpl),
+        SYS_LOG => sys_log(a1, a2, privilege),
         SYS_SEND_RQB => sys_send_rqb(a1, a2),
         SYS_RECEIVE_RQB => sys_receive_rqb(a1),
         SYS_REPLY_RQB => sys_reply_rqb(a1, a2),
@@ -176,7 +112,7 @@ extern "C" fn syscall_dispatch(frame: &mut TaskContext) {
             0
         }
         _ => ENOSYS,
-    };
+    }
 }
 
 fn sys_exit() -> u64 {
@@ -193,7 +129,7 @@ fn sys_exit() -> u64 {
 }
 
 /// Print one line, prefixed with the caller's task ID and privilege level
-fn sys_log(ptr: u64, len: u64, cpl: u64) -> u64 {
+fn sys_log(ptr: u64, len: u64, privilege: &str) -> u64 {
     const MAX: usize = 200;
     if len as usize > MAX {
         return EINVAL;
@@ -206,7 +142,7 @@ fn sys_log(ptr: u64, len: u64, cpl: u64) -> u64 {
 
     use core::fmt::Write;
     let mut line: heapless::String<256> = heapless::String::new();
-    let _ = write!(line, "[USER T{} CPL{}] ", scheduler::current_task_id(), cpl);
+    let _ = write!(line, "[USER T{} {}] ", scheduler::current_task_id(), privilege);
     for &b in text.iter() {
         let c = if b == b'\n' || b.is_ascii_graphic() || b == b' ' { b as char } else { '?' };
         let _ = line.push(c);
@@ -292,5 +228,13 @@ fn sys_register_service(ptr: u64, len: u64) -> u64 {
 
 /// Report the syscall interface at boot
 pub fn init() {
-    crate::serial::write_line("[SYSCALL] int 0x80 gate (DPL 3): 10 syscalls, user pointers validated");
+    use core::fmt::Write;
+    // One write, so the line can't interleave with running tasks
+    let mut line: heapless::String<96> = heapless::String::new();
+    let _ = write!(
+        line,
+        "[SYSCALL] {}: 10 syscalls, user pointers validated\n",
+        crate::arch::SYSCALL_MECHANISM
+    );
+    crate::serial::write_str(&line);
 }

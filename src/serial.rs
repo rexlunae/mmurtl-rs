@@ -1,19 +1,18 @@
-//! Serial I/O — UART 16550 output for kernel debugging and console.
+//! Serial console — the kernel log, on either architecture's UART
+//! (16550 COM1 on amd64, PL011 on arm64; see `crate::arch::serial`).
 
 use spin::Mutex;
-use uart_16550::SerialPort;
 
-/// Global serial port instance (COM1)
-static SERIAL_PORT: Mutex<Option<SerialPort>> = Mutex::new(None);
+/// Serializes output; `true` once the UART is initialized
+static SERIAL: Mutex<bool> = Mutex::new(false);
 
-/// Initialize serial port at COM1 (0x3F8)
+/// Initialize the console UART
 pub fn init() {
-    let mut port = unsafe { SerialPort::new(0x3F8) };
-    port.init();
-    *SERIAL_PORT.lock() = Some(port);
-
-    // Flush any garbage from port init
-    write_str("[SERIAL] COM1 initialized at 115200 8N1\n");
+    crate::arch::serial::init();
+    *SERIAL.lock() = true;
+    write_str("[SERIAL] ");
+    write_str(crate::arch::serial::NAME);
+    write_str(" initialized\n");
 }
 
 /// Write a string to the serial console.
@@ -23,13 +22,13 @@ pub fn init() {
 /// other writer on this CPU would spin on a lock that can never be
 /// released — a deadlock on one core, a livelock across cores.
 pub fn write_str(s: &str) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut guard = SERIAL_PORT.lock();
-        if let Some(port) = guard.as_mut() {
+    crate::arch::without_interrupts(|| {
+        let ready = SERIAL.lock();
+        if *ready {
             for byte in s.bytes() {
                 // Filter carriage returns, let \n through (serial handles LF)
                 if byte != b'\r' {
-                    port.send(byte);
+                    crate::arch::serial::putc(byte);
                 }
             }
         }

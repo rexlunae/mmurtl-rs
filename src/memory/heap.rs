@@ -1,24 +1,18 @@
 //! Kernel Heap Allocator — Simple bump allocator.
 //!
-//! Provides a global allocator for Rust's `alloc` crate, backed by physical
-//! page allocations from the frame allocator. The bump allocator just
-//! increments a pointer, making it fast but unable to free individual
-//! allocations (dealloc is a no-op). This is fine until we need proper
-//! memory recycling, at which point we'll upgrade to a slab/buddy allocator.
+//! Provides the global allocator for Rust's `alloc` crate. The bump
+//! allocator just increments a pointer, making it fast but unable to free
+//! individual allocations (dealloc is a no-op).
+//!
+//! Where the heap lives is the architecture's business
+//! (`crate::arch::heap_init` / `heap_extend`): amd64 maps fresh frames at a
+//! fixed higher-half address and can grow the heap page by page; arm64
+//! carves one physically contiguous, identity-mapped block.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::memory::frame_allocator::{self, FRAME_SIZE};
-use x86_64::structures::paging::page_table::PageTableFlags as Flags;
-use x86_64::VirtAddr;
-use x86_64::structures::paging::Page;
-
-/// Size of the initial kernel heap (4 MiB)
-const INITIAL_HEAP_SIZE: u64 = 4 * 1024 * 1024;
-
-/// Heap start virtual address (in the kernel's higher-half region)
-const HEAP_START: u64 = 0xFFFF_9000_0000_0000;
+use crate::memory::frame_allocator;
 
 /// Global frame allocator pointer — set once during memory init
 static mut FRAME_ALLOC_PTR: *mut frame_allocator::FrameAllocator = core::ptr::null_mut();
@@ -41,7 +35,7 @@ pub unsafe fn set_frame_allocator(fa: *mut frame_allocator::FrameAllocator) {
 pub fn with_frame_allocator<R>(
     f: impl FnOnce(&mut frame_allocator::FrameAllocator) -> R,
 ) -> Option<R> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let _guard = FRAME_LOCK.lock();
         unsafe {
             let ptr = FRAME_ALLOC_PTR;
@@ -58,13 +52,9 @@ pub fn with_frame_allocator<R>(
 // Bump Allocator
 // ========================================================================
 
-/// A simple bump-pointer allocator backed by page-level allocations.
-///
-/// `next_free` points to the next available byte in the current heap region.
-/// When exhausted, we allocate more pages from the frame allocator.
+/// A simple bump-pointer allocator over an architecture-provided region.
 pub struct BumpAllocator {
     initialized: AtomicBool,
-    heap_start: AtomicUsize,
     heap_end: AtomicUsize,
     next_free: AtomicUsize,
 }
@@ -75,38 +65,24 @@ impl BumpAllocator {
     pub const fn new() -> Self {
         Self {
             initialized: AtomicBool::new(false),
-            heap_start: AtomicUsize::new(0),
             heap_end: AtomicUsize::new(0),
             next_free: AtomicUsize::new(0),
         }
     }
 
-    /// Initialize the heap: allocate initial pages and set up bump pointer
+    /// Initialize the heap over the architecture's initial region
     pub fn init(&self, frame_alloc: &mut frame_allocator::FrameAllocator) {
         if self.initialized.swap(true, Ordering::SeqCst) {
             return;
         }
-
-        let start = HEAP_START;
-        let end = HEAP_START + INITIAL_HEAP_SIZE;
+        let (start, end) = crate::arch::heap_init(frame_alloc);
 
         crate::serial::write_str("[HEAP] Bump allocator at 0x");
         crate::serial::write_hex(start);
         crate::serial::write_str(" (");
-        crate::serial::write_dec(INITIAL_HEAP_SIZE / 1024);
+        crate::serial::write_dec((end - start) / 1024);
         crate::serial::write_str(" KiB)\n");
 
-        // Map the initial heap pages
-        map_pages(start, INITIAL_HEAP_SIZE, frame_alloc);
-
-        // Full TLB flush — ensure page table changes are seen by CPU
-        unsafe {
-            use x86_64::registers::control::Cr3;
-            let (pml4_frame, flags) = Cr3::read();
-            Cr3::write(pml4_frame, flags);
-        }
-
-        self.heap_start.store(start as usize, Ordering::SeqCst);
         self.heap_end.store(end as usize, Ordering::SeqCst);
         self.next_free.store(start as usize, Ordering::SeqCst);
     }
@@ -137,7 +113,7 @@ impl BumpAllocator {
             // Need to extend. Two CPUs can get here at once, so extension
             // happens under FRAME_LOCK, and only if nobody else extended
             // the heap since we sampled heap_end (otherwise just retry).
-            let extended = x86_64::instructions::interrupts::without_interrupts(|| {
+            let extended = crate::arch::without_interrupts(|| {
                 let _guard = FRAME_LOCK.lock();
                 if self.heap_end.load(Ordering::Acquire) != heap_end {
                     return Some(0); // raced: someone else grew the heap
@@ -147,17 +123,10 @@ impl BumpAllocator {
                     if fa.is_null() {
                         return None;
                     }
-                    let fa = &mut *fa;
-
-                    // Calculate how many pages we need
-                    let needed = new_free - current;
-                    let total_extend = ((needed + (512 * FRAME_SIZE as usize) - 1)
-                        / (512 * FRAME_SIZE as usize))
-                        * (512 * FRAME_SIZE as usize);
-
-                    map_pages(heap_end as u64, total_extend as u64, fa);
-                    self.heap_end.store(heap_end + total_extend, Ordering::SeqCst);
-                    Some(total_extend)
+                    let needed = (new_free - current) as u64;
+                    let grown = crate::arch::heap_extend(heap_end as u64, needed, &mut *fa)?;
+                    self.heap_end.store(heap_end + grown as usize, Ordering::SeqCst);
+                    Some(grown)
                 }
             });
             match extended {
@@ -165,38 +134,11 @@ impl BumpAllocator {
                 Some(0) => {}
                 Some(bytes) => {
                     crate::serial::write_str("[HEAP] Extended by ");
-                    crate::serial::write_dec((bytes / 1024) as u64);
+                    crate::serial::write_dec(bytes / 1024);
                     crate::serial::write_str(" KiB\n");
                 }
             }
             // Loop back and retry the allocation
-        }
-    }
-}
-
-/// Map a range of virtual pages to physical frames
-fn map_pages(virt_start: u64, size: u64, frame_alloc: &mut frame_allocator::FrameAllocator) {
-    use super::page_table;
-
-    let num_pages = (size + FRAME_SIZE - 1) / FRAME_SIZE;
-    let start_page = Page::containing_address(VirtAddr::new(virt_start));
-
-    unsafe {
-        let mut fa_adapter = frame_allocator::BumpFrameAllocator::new(frame_alloc);
-
-        for i in 0..num_pages {
-            let page = start_page + i;
-            let frame = frame_alloc
-                .allocate_frame()
-                .expect("OOM during heap page allocation");
-
-            page_table::map_page(
-                page,
-                frame,
-                Flags::PRESENT | Flags::WRITABLE | Flags::NO_EXECUTE,
-                &mut fa_adapter,
-            )
-            .expect("Failed to map heap page");
         }
     }
 }
@@ -212,8 +154,6 @@ unsafe impl GlobalAlloc for BumpAllocator {
 
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
         // Bump allocator: dealloc is a no-op
-        // (memory will be usable again after a reset, or we'll add a proper
-        //  allocator in a later phase)
     }
 }
 
@@ -227,5 +167,3 @@ pub fn init_heap(frame_alloc: &mut frame_allocator::FrameAllocator) {
     }
     GLOBAL_ALLOC.init(frame_alloc);
 }
-
-

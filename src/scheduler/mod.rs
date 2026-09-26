@@ -23,7 +23,7 @@ mod rqb;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub use task::*;
 pub use rqb::*;
@@ -43,11 +43,6 @@ pub const MAX_CPUS: usize = 64;
 
 /// Timer tick frequency per CPU (Hz)
 pub const SCHEDULER_FREQUENCY_HZ: u32 = 100;
-
-/// Software-interrupt vector a task uses to give up the CPU voluntarily
-/// (blocking IPC, sleep, exit). Same save/switch path as the timer, minus
-/// the EOI — there is no interrupt controller state to acknowledge.
-pub const YIELD_VECTOR: u8 = 0x31;
 
 /// Maximum queued (unreceived) requests per task
 pub const INBOX_CAPACITY: usize = 32;
@@ -69,8 +64,9 @@ pub fn jiffies() -> u64 {
 struct PerCpu {
     /// Whether this CPU has registered with the scheduler
     registered: bool,
-    /// This CPU's Local APIC ID (for sending it IPIs)
-    apic_id: u32,
+    /// This CPU's hardware ID (Local APIC ID / MPIDR affinity), the
+    /// target for reschedule IPIs
+    hw_id: u32,
     /// Index of the task currently running on this CPU
     current: Option<usize>,
     /// Index of this CPU's pinned idle task
@@ -80,27 +76,23 @@ struct PerCpu {
 impl PerCpu {
     const EMPTY: Self = Self {
         registered: false,
-        apic_id: 0,
+        hw_id: 0,
         current: None,
         idle_idx: 0,
     };
 }
 
-/// APIC ID → CPU index, written at CPU registration, read lock-free on
-/// every timer tick. Index by APIC ID (xAPIC IDs are < 256).
-static APIC_TO_CPU: [AtomicU32; 256] = {
-    const ZERO: AtomicU32 = AtomicU32::new(0);
-    [ZERO; 256]
-};
-
 /// The CPU index of the calling processor
 pub fn current_cpu() -> usize {
-    if !crate::apic::enabled() {
-        return 0;
-    }
-    let apic_id = crate::apic::local_apic_id() as usize;
-    APIC_TO_CPU[apic_id & 0xFF].load(Ordering::Relaxed) as usize
+    crate::arch::cpu_index()
 }
+
+/// Per-CPU: this CPU took the scheduler lock in an interrupt/yield path
+/// and still holds it across the stack switch (see `scheduler_unlock`)
+static SWITCH_LOCK_HELD: [AtomicBool; MAX_CPUS] = {
+    const F: AtomicBool = AtomicBool::new(false);
+    [F; MAX_CPUS]
+};
 
 // ========================================================================
 // Scheduler State
@@ -133,7 +125,7 @@ impl Scheduler {
 
     /// Register a CPU with the scheduler, adopting its current execution
     /// context (the boot/park HLT loop) as that CPU's pinned idle task.
-    fn register_cpu(&mut self, cpu: usize, apic_id: u32) -> u32 {
+    fn register_cpu(&mut self, cpu: usize, hw_id: u32) -> u32 {
         let idle = TaskControlBlock::adopt_current("idle", PRIORITY_IDLE, cpu as u8);
         let tid = idle.id;
         self.tasks.push(idle);
@@ -141,7 +133,7 @@ impl Scheduler {
 
         self.cpus[cpu] = PerCpu {
             registered: true,
-            apic_id,
+            hw_id,
             current: Some(idx),
             idle_idx: idx,
         };
@@ -185,13 +177,13 @@ impl Scheduler {
                 woken += 1;
             }
         }
-        if woken > 1 && crate::apic::enabled() {
+        if woken > 1 && crate::arch::ipi_available() {
             for (i, c) in self.cpus.iter().enumerate() {
                 if woken <= 1 {
                     break;
                 }
                 if c.registered && i != cpu && c.current == Some(c.idle_idx) {
-                    crate::apic::send_ipi(c.apic_id, crate::apic::RESCHED_VECTOR);
+                    crate::arch::send_resched_ipi(c.hw_id);
                     woken -= 1;
                 }
             }
@@ -216,8 +208,8 @@ impl Scheduler {
         t.state = TaskState::Running;
         t.on_cpu = Some(cpu as u8);
         if t.user {
-            // Traps from ring 3 must land on this task's own kernel stack
-            crate::gdt::set_kernel_stack(cpu, t.kernel_stack_top);
+            // Traps from user mode must land on this task's own kernel stack
+            crate::arch::on_switch_to_user(cpu, t.kernel_stack_top);
         }
         self.cpus[cpu].current = Some(next);
         self.tasks[next].context_ptr
@@ -255,7 +247,7 @@ impl Scheduler {
     fn find_idle_cpu(&self, exclude: usize) -> Option<u32> {
         for (i, c) in self.cpus.iter().enumerate() {
             if c.registered && i != exclude && c.current == Some(c.idle_idx) {
-                return Some(c.apic_id);
+                return Some(c.hw_id);
             }
         }
         None
@@ -393,44 +385,29 @@ static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 /// Run a closure with the scheduler locked and interrupts disabled on the
 /// calling CPU (the only safe way to take the lock outside an interrupt).
 fn with_scheduler<R>(f: impl FnOnce(&mut Scheduler) -> R) -> R {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let mut sched = SCHEDULER.lock();
         f(&mut sched)
     })
 }
 
-/// Initialize the scheduler on the BSP: register CPU 0 (adopting the boot
-/// context as its idle task) and start the tick source.
+/// Initialize the scheduler on the boot CPU: register CPU 0 (adopting the
+/// boot context as its idle task) and start its tick source.
 pub fn init() {
-    let apic_mode = crate::apic::enabled();
-    let bsp_apic_id = if apic_mode { crate::apic::local_apic_id() } else { 0 };
-
+    let hw_id = crate::arch::hw_cpu_id();
+    crate::arch::set_cpu_index(0);
     let already = with_scheduler(|sched| {
         if sched.initialized.swap(true, Ordering::SeqCst) {
             return true;
         }
-        sched.register_cpu(0, bsp_apic_id);
+        sched.register_cpu(0, hw_id);
         false
     });
     if already {
         return;
     }
-    APIC_TO_CPU[(bsp_apic_id & 0xFF) as usize].store(0, Ordering::Relaxed);
 
-    // Start the tick source: LAPIC timer in APIC mode, PIT otherwise
-    if apic_mode {
-        crate::apic::start_timer(SCHEDULER_FREQUENCY_HZ);
-    } else {
-        init_pit();
-        unsafe {
-            // Legacy mode: unmask the timer IRQ in the PIC
-            let mut pic1_data: x86_64::instructions::port::Port<u8> =
-                x86_64::instructions::port::Port::new(0x21);
-            let mask = pic1_data.read();
-            pic1_data.write(mask & !0x01);
-        }
-        crate::serial::write_str("[PIC] Timer IRQ0 unmasked\n");
-    }
+    crate::arch::start_tick(SCHEDULER_FREQUENCY_HZ, true);
 
     crate::serial::write_str("[SCHED] Scheduler ready: ");
     crate::serial::write_dec(MAX_TASKS as u64);
@@ -439,77 +416,45 @@ pub fn init() {
     crate::serial::write_str(" Hz per CPU\n");
 }
 
-/// Register an application processor with the scheduler and start its
-/// local timer tick. Called from `ap_entry` with interrupts disabled;
-/// the AP's park loop becomes its idle task.
+/// Register a secondary CPU with the scheduler and start its local timer
+/// tick. Called on that CPU, with interrupts disabled; its park loop
+/// becomes its idle task.
 pub fn register_ap(cpu: usize) {
-    let apic_id = crate::apic::local_apic_id();
-    with_scheduler(|sched| sched.register_cpu(cpu, apic_id));
-    APIC_TO_CPU[(apic_id & 0xFF) as usize].store(cpu as u32, Ordering::Relaxed);
-
-    // Per-CPU LAPIC timer, same frequency as the BSP
-    crate::apic::start_timer(SCHEDULER_FREQUENCY_HZ);
+    let hw_id = crate::arch::hw_cpu_id();
+    crate::arch::set_cpu_index(cpu);
+    with_scheduler(|sched| sched.register_cpu(cpu, hw_id));
+    crate::arch::start_tick(SCHEDULER_FREQUENCY_HZ, false);
 }
 
-/// Initialize the PIT (8253) to fire at SCHEDULER_FREQUENCY_HZ (fallback
-/// tick source when there is no APIC)
-fn init_pit() {
-    use x86_64::instructions::port::Port;
-
-    // PIT frequency: 1.193182 MHz base clock
-    let divisor: u16 = (1193182u32 / SCHEDULER_FREQUENCY_HZ) as u16;
-
-    crate::serial::write_str("[PIT] Frequency: ");
-    crate::serial::write_dec(SCHEDULER_FREQUENCY_HZ as u64);
-    crate::serial::write_str(" Hz (divisor=");
-    crate::serial::write_dec(divisor as u64);
-    crate::serial::write_str(")\n");
-
-    unsafe {
-        // Channel 0, lobyte/hibyte, mode 3 (square wave), binary mode
-        let mut cmd_port: Port<u8> = Port::new(0x43);
-        cmd_port.write(0x36u8);
-
-        let mut data_port: Port<u8> = Port::new(0x40);
-        data_port.write((divisor & 0xFF) as u8);
-        data_port.write(((divisor >> 8) & 0xFF) as u8);
-    }
-}
-
-/// Called from the timer/reschedule-IPI asm handler to perform scheduling.
+/// Context-switch entry from an interrupt (timer tick, reschedule IPI).
+/// The architecture's handler has saved the full context at `current_sp`
+/// and acknowledged the interrupt.
 ///
 /// Returns with the scheduler lock still held — the asm switches to the
 /// new stack and then calls `scheduler_unlock`. This prevents another CPU
 /// from resuming the outgoing task while its old stack is still in use.
 ///
 /// # Safety
-/// Must only be called from the interrupt handler with RSP pointing to a
-/// valid TaskContext on the current task's stack.
-#[no_mangle]
-pub unsafe extern "C" fn schedule_and_switch(current_rsp: u64) -> u64 {
-    // Acknowledge the interrupt (LAPIC EOI in APIC mode, PIC otherwise)
-    crate::interrupts::irq_eoi(0);
-
+/// Only from interrupt context, with `current_sp` pointing at the saved
+/// context on the current task's stack.
+pub unsafe fn switch_from_interrupt(current_sp: u64, timer: bool) -> u64 {
     let cpu = current_cpu();
     let mut sched = SCHEDULER.lock();
-    let new_rsp = sched.on_tick(cpu, current_rsp, true);
+    let new_sp = sched.on_tick(cpu, current_sp, timer);
     // Keep holding the lock across the stack switch (see scheduler_unlock)
     core::mem::forget(sched);
-    new_rsp
+    SWITCH_LOCK_HELD[cpu].store(true, Ordering::Relaxed);
+    new_sp
 }
 
-/// Voluntary-yield counterpart of `schedule_and_switch` (YIELD_VECTOR):
-/// same lock-across-switch protocol, but no EOI and no tick accounting.
+/// Voluntary-yield counterpart of `switch_from_interrupt`: same
+/// lock-across-switch protocol, no tick accounting.
 ///
 /// # Safety
-/// Only called from the yield interrupt stub, like `schedule_and_switch`.
+/// Only called from the architecture's yield stub.
 #[no_mangle]
-pub unsafe extern "C" fn yield_and_switch(current_rsp: u64) -> u64 {
-    let cpu = current_cpu();
-    let mut sched = SCHEDULER.lock();
-    let new_rsp = sched.on_tick(cpu, current_rsp, false);
-    core::mem::forget(sched);
-    new_rsp
+pub unsafe extern "C" fn yield_and_switch(current_sp: u64) -> u64 {
+    switch_from_interrupt(current_sp, false)
 }
 
 /// Give up the CPU. Returns when the scheduler next picks this task —
@@ -517,16 +462,19 @@ pub unsafe extern "C" fn yield_and_switch(current_rsp: u64) -> u64 {
 ///
 /// Must be called with interrupts enabled and no spinlocks held.
 pub fn yield_now() {
-    unsafe {
-        core::arch::asm!("int {v}", v = const YIELD_VECTOR);
-    }
+    crate::arch::yield_now();
 }
 
 /// Second half of the context switch: releases the scheduler lock taken by
-/// `schedule_and_switch`. Called from the timer asm after RSP now points
-/// at the new task's stack.
+/// `switch_from_interrupt`, once the asm has moved onto the new task's
+/// stack. A no-op if this CPU's interrupt didn't switch (e.g. a device
+/// IRQ on arm64), so every interrupt exit path may call it.
 #[no_mangle]
 pub unsafe extern "C" fn scheduler_unlock() {
+    let cpu = current_cpu();
+    if !SWITCH_LOCK_HELD[cpu].swap(false, Ordering::Relaxed) {
+        return;
+    }
     SCHEDULER.force_unlock();
 }
 
@@ -543,27 +491,25 @@ pub fn create_task(entry: extern "C" fn() -> !, priority: TaskPriority, name: &'
         (tid, sched.find_idle_cpu(current_cpu()))
     });
 
-    crate::serial::write_str("[SCHED] Created task \"");
-    crate::serial::write_str(name);
-    crate::serial::write_str("\" TID=");
-    crate::serial::write_dec(tid as u64);
-    crate::serial::write_str(" prio=");
-    crate::serial::write_dec(priority as u64);
-    crate::serial::write_str(" stack=0x");
-    crate::serial::write_hex(stack_bottom);
-    crate::serial::write_str("\n");
+    // One write, so the line can't interleave with tasks on other CPUs
+    {
+        use core::fmt::Write;
+        let mut line: heapless::String<96> = heapless::String::new();
+        let _ = write!(
+            line,
+            "[SCHED] Created task \"{}\" TID={} prio={} stack=0x{:x}\n",
+            name, tid, priority, stack_bottom
+        );
+        crate::serial::write_str(&line);
+    }
 
     // Kick an idle CPU so it picks the task up right away
-    if crate::apic::enabled() {
-        if let Some(apic_id) = ipi_target {
-            crate::apic::send_ipi(apic_id, crate::apic::RESCHED_VECTOR);
-        }
-    }
+    kick(ipi_target);
 
     tid
 }
 
-/// Create a ring-3 task that starts at `entry` on `user_rsp`, with `arg`
+/// Create a user-mode task that starts at `entry` on `user_rsp`, with `arg`
 /// in RDI. The caller has already mapped the code and stack as user pages.
 pub fn create_user_task(entry: u64, user_rsp: u64, arg: u64, name: &'static str) -> u32 {
     let stack = alloc_stack();
@@ -573,13 +519,16 @@ pub fn create_user_task(entry: u64, user_rsp: u64, arg: u64, name: &'static str)
         (tid, sched.find_idle_cpu(current_cpu()))
     });
 
-    crate::serial::write_str("[SCHED] Created user task \"");
-    crate::serial::write_str(name);
-    crate::serial::write_str("\" TID=");
-    crate::serial::write_dec(tid as u64);
-    crate::serial::write_str(" entry=0x");
-    crate::serial::write_hex(entry);
-    crate::serial::write_str(" (ring 3)\n");
+    {
+        use core::fmt::Write;
+        let mut line: heapless::String<96> = heapless::String::new();
+        let _ = write!(
+            line,
+            "[SCHED] Created user task \"{}\" TID={} entry=0x{:x} (user mode)\n",
+            name, tid, entry
+        );
+        crate::serial::write_str(&line);
+    }
 
     kick(ipi_target);
     tid
@@ -617,9 +566,9 @@ pub fn current_task_id() -> u32 {
 
 /// Send a reschedule IPI to wake an idle CPU (outside the scheduler lock)
 fn kick(target: Option<u32>) {
-    if let Some(apic_id) = target {
-        if crate::apic::enabled() {
-            crate::apic::send_ipi(apic_id, crate::apic::RESCHED_VECTOR);
+    if let Some(hw_id) = target {
+        if crate::arch::ipi_available() {
+            crate::arch::send_resched_ipi(hw_id);
         }
     }
 }

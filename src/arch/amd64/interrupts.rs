@@ -75,8 +75,8 @@ pub fn mask_pic() {
 /// In APIC mode all IRQs (LAPIC timer, IOAPIC-routed keyboard) are
 /// acknowledged at the Local APIC; otherwise fall back to the 8259 PIC.
 pub fn irq_eoi(irq: u8) {
-    if crate::apic::enabled() {
-        crate::apic::eoi();
+    if crate::arch::apic::enabled() {
+        crate::arch::apic::eoi();
     } else {
         unsafe { eoi(irq) };
     }
@@ -119,26 +119,10 @@ fn from_user(frame: &InterruptStackFrame) -> bool {
     frame.code_segment & 3 == 3
 }
 
-/// A fault in user code is the task's problem, not the kernel's: report
-/// it, kill the task (waking anyone blocked on it), and switch away for
-/// good. Never returns.
+/// Kill the current user task for a fault (see
+/// `userspace::kill_faulting_task`)
 fn kill_user_task(frame: &InterruptStackFrame, what: &str, addr: Option<u64>) -> ! {
-    use core::fmt::Write;
-    let mut line: heapless::String<160> = heapless::String::new();
-    let _ = write!(
-        line,
-        "[USER] T{} \"{}\" killed: {} at rip=0x{:x}",
-        crate::scheduler::current_task_id(),
-        crate::scheduler::current_task_name(),
-        what,
-        frame.instruction_pointer.as_u64()
-    );
-    if let Some(a) = addr {
-        let _ = write!(line, ", addr=0x{:x}", a);
-    }
-    let _ = line.push('\n');
-    crate::serial::write_str(&line);
-    crate::scheduler::exit_current();
+    crate::userspace::kill_faulting_task(what, frame.instruction_pointer.as_u64(), addr)
 }
 
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
@@ -384,7 +368,7 @@ extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {}
 /// LAPIC error interrupt
 extern "x86-interrupt" fn apic_error_handler(_stack_frame: InterruptStackFrame) {
     crate::serial::write_line("[APIC] Error interrupt received");
-    crate::apic::eoi();
+    crate::arch::apic::eoi();
 }
 
 // ========================================================================
@@ -428,29 +412,29 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             x86_64::VirtAddr::new(timer_handler as usize as u64)
         );
         // Reschedule IPI — identical save/schedule/restore flow
-        idt[crate::apic::RESCHED_VECTOR as usize].set_handler_addr(
+        idt[crate::arch::apic::RESCHED_VECTOR as usize].set_handler_addr(
             x86_64::VirtAddr::new(timer_handler as usize as u64)
         );
         // Voluntary yield (blocking IPC, sleep, exit) — kernel only (DPL 0)
-        idt[crate::scheduler::YIELD_VECTOR as usize].set_handler_addr(
+        idt[super::context::YIELD_VECTOR as usize].set_handler_addr(
             x86_64::VirtAddr::new(yield_handler as usize as u64)
         );
         // Syscalls — the only gate ring 3 may invoke (DPL 3)
-        idt[crate::syscall::SYSCALL_VECTOR as usize]
-            .set_handler_addr(x86_64::VirtAddr::new(crate::syscall::entry_address()))
+        idt[super::syscall::SYSCALL_VECTOR as usize]
+            .set_handler_addr(x86_64::VirtAddr::new(super::syscall::entry_address()))
             .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
     }
     idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_handler);
 
     // LAPIC vectors
-    idt[crate::apic::ERROR_VECTOR as usize].set_handler_fn(apic_error_handler);
-    idt[crate::apic::SPURIOUS_VECTOR as usize].set_handler_fn(spurious_handler);
+    idt[crate::arch::apic::ERROR_VECTOR as usize].set_handler_fn(apic_error_handler);
+    idt[crate::arch::apic::SPURIOUS_VECTOR as usize].set_handler_fn(spurious_handler);
 
     // Double fault with IST stack
     unsafe {
         idt.double_fault
             .set_handler_fn(double_fault_handler)
-            .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
+            .set_stack_index(crate::arch::gdt::DOUBLE_FAULT_IST_INDEX);
     }
 
     idt

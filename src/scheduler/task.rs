@@ -66,31 +66,9 @@ fn next_task_id() -> u32 {
 // Task Control Block (TCB)
 // ========================================================================
 
-/// Saved register context for a task (in order pushed by context switch)
-#[repr(C)]
-pub struct TaskContext {
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub r11: u64,
-    pub r10: u64,
-    pub r9: u64,
-    pub r8: u64,
-    pub rdi: u64,
-    pub rsi: u64,
-    pub rbp: u64,
-    pub rbx: u64,
-    pub rdx: u64,
-    pub rcx: u64,
-    pub rax: u64,
-    // Below this are the interrupt frame (pushed by CPU on interrupt)
-    pub rip: u64,
-    pub cs: u64,
-    pub rflags: u64,
-    pub rsp: u64,
-    pub ss: u64,
-}
+/// Saved register context for a task — the architecture's exception
+/// frame (general registers + return state), stored on its kernel stack
+pub use crate::arch::TaskContext;
 
 /// Task Control Block — describes a single execution context
 #[repr(C)]
@@ -154,51 +132,26 @@ impl TaskControlBlock {
         let stack_top = stack.as_ptr() as u64 + stack.len() as u64;
         let stack_bottom = stack.as_ptr() as u64;
 
-        // Build an initial context on the task's stack.
-        // The context should look like it was saved by the timer interrupt handler,
-        // so that the first context switch into this task just returns through IRETQ.
+        // Build an initial context on the task's stack, shaped exactly
+        // like one the timer interrupt saves, so the first switch into the
+        // task just "returns" into `entry` (IRETQ on amd64, ERET on arm64).
         //
         // Stack layout (from low to high addr):
         //   [free stack space — headroom below the context]
-        //   [TaskContext] ← RSP points here (context_ptr)
-        //   = stack_top (the saved RSP; IRETQ starts the task here)
+        //   [TaskContext] ← context_ptr
+        //   = stack_top
         //
         // The context sits at the TOP of the stack, mirroring where a
         // preempted task's saved context lives. This headroom is
-        // load-bearing: after the switch path sets RSP = context_ptr, it
-        // calls scheduler_unlock, which pushes a return address and frame
+        // load-bearing: after the switch path points the stack at
+        // context_ptr, it calls scheduler_unlock, which pushes a frame
         // BELOW context_ptr. With the context at stack_bottom those pushes
         // would land outside the allocation and corrupt the adjacent heap
         // object on the first switch into every new task.
-        //
-        // The saved RIP should point to `entry`. The saved RFLAGS should
-        // have IF set so interrupts are enabled when the task runs.
         let ctx_addr = (stack_top - core::mem::size_of::<TaskContext>() as u64) & !0xF;
         debug_assert!(ctx_addr >= stack_bottom);
         unsafe {
-            let ctx_ptr = ctx_addr as *mut TaskContext;
-            ctx_ptr.write(TaskContext {
-                rax: 0,
-                rbx: 0,
-                rcx: 0,
-                rdx: 0,
-                rsi: 0,
-                rdi: 0,
-                rbp: 0,
-                r8: 0,
-                r9: 0,
-                r10: 0,
-                r11: 0,
-                r12: 0,
-                r13: 0,
-                r14: 0,
-                r15: 0,
-                rip: entry as u64,
-                cs: 0x08, // GDT kernel code segment selector
-                rflags: 0x202, // IF (interrupts enabled) + reserved bit 1
-                rsp: stack_top, // Unused — IRETQ will set RSP from here
-                ss: 0x10, // GDT kernel data segment selector
-            });
+            (ctx_addr as *mut TaskContext).write(crate::arch::kernel_context(entry as u64, stack_top));
         }
 
         Box::new(Self {
@@ -220,9 +173,10 @@ impl TaskControlBlock {
         })
     }
 
-    /// Create a ring-3 task. `stack` becomes its kernel stack (used for
-    /// syscalls and interrupts taken from user mode); the initial context
-    /// IRETQs to `entry` at CPL 3 on `user_rsp`, with `arg` in RDI.
+    /// Create a user-mode task (ring 3 / EL0). `stack` becomes its kernel
+    /// stack (used for syscalls and interrupts taken from user mode); the
+    /// initial context returns to `entry` in user mode on `user_rsp`, with
+    /// `arg` in the first argument register.
     pub fn new_user(
         entry: u64,
         user_rsp: u64,
@@ -236,13 +190,8 @@ impl TaskControlBlock {
         let dummy: extern "C" fn() -> ! = user_entry_placeholder;
         let mut tcb = Self::new(dummy, stack, priority, name);
         unsafe {
-            let ctx = &mut *(tcb.context_ptr as *mut TaskContext);
-            ctx.rip = entry;
-            ctx.cs = crate::gdt::USER_CS;
-            ctx.rflags = 0x202; // IF set, IOPL 0: no port I/O from ring 3
-            ctx.rsp = user_rsp;
-            ctx.ss = crate::gdt::USER_SS;
-            ctx.rdi = arg;
+            (tcb.context_ptr as *mut TaskContext)
+                .write(crate::arch::user_context(entry, user_rsp, arg, tcb.kernel_stack_top));
         }
         tcb.user = true;
         tcb
