@@ -69,6 +69,7 @@ qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -smp 4 -m 256M \
     -nographic -kernel target/aarch64-unknown-none-softfloat/release/mmurtl-rs \
     -drive if=none,format=raw,file=test-disk.img,id=hd0 -device virtio-blk-device,drive=hd0 \
     -netdev user,id=n0 -device virtio-net-device,netdev=n0
+# ...or over PCIe instead: -device virtio-blk-pci,drive=hd0 -device virtio-net-pci,netdev=n0
 ```
 
 ### amd64
@@ -101,15 +102,16 @@ src/
 ├── memory/            — frame allocator, heap, user window
 ├── scheduler/         — SMP scheduler + blocking RQB IPC primitives
 ├── ipc/               — service registry + IPC demo
-├── virtio/            — virtqueues + Transport trait, blk + net drivers
+├── pci.rs             — PCI enumeration + BAR assignment
+├── virtio/            — virtqueues + Transport trait, blk + net, virtio-pci
 ├── fs/exfat.rs        — exFAT filesystem
 └── arch/
     ├── mod.rs         — the architecture interface
     ├── amd64/         — bootloader entry, 16550, GDT/IDT, APIC, ACPI,
-    │                    SMP trampoline, paging, PCI, virtio-pci, xHCI,
+    │                    SMP trampoline, paging, port I/O, xHCI,
     │                    int 0x80, ring-3 programs
     └── arm64/         — _start + linker script, PL011, device tree, MMU,
-                         vectors, GICv2/v3 + timer, PSCI SMP, virtio-mmio,
+                         vectors, GICv2/v3 + timer, PSCI SMP, virtio-mmio, PCIe,
                          svc #0, EL0 programs
 user/                  — user-program runtime + Rust programs (ELF)
 tools/                 — boot-image builder, disk-image + dependency scripts
@@ -501,7 +503,7 @@ own boot path.
 | | amd64 | arm64 |
 |---|---|---|
 | Boot | `bootloader` crate (BIOS/UEFI), long mode | ELF at 0x4020_0000, EL1 (drops from EL2) |
-| Discovery | ACPI MADT, PCI | Device tree (RAM, CPUs, PSCI, GIC, UART, virtio) |
+| Discovery | ACPI MADT, PCI | Device tree (RAM, CPUs, PSCI, GIC, UART, virtio, PCIe host bridge) |
 | Console | 16550 COM1 | PL011 (RX interrupt feeds console input) |
 | Paging | bootloader tables + offset window | own identity map; EL0/EL1 AP bits, PXN/UXN |
 | Interrupts | IDT; PIC → Local/I/O APIC | EL1 vector table; GICv2 or GICv3 (redistributors, ICC system registers) |
@@ -511,7 +513,8 @@ own boot path.
 | Multi-core | INIT-SIPI-SIPI trampoline | PSCI `CPU_ON` (HVC/SMC per DT) |
 | Syscalls | `int 0x80` (DPL 3), TSS.RSP0 per task | `svc #0` from EL0 (x8 = number) |
 | User isolation | U/S bit, NX, SMAP-aware | AP[7:6], PXN/UXN; UMA=0 traps DAIF |
-| virtio | legacy virtio-pci (port I/O) | virtio-mmio v1 (legacy) and v2 |
+| PCI | config via 0xCF8/0xCFC; firmware-assigned BARs | ECAM from the DT; kernel assigns BARs; I/O space via the bridge window |
+| virtio | legacy virtio-pci (port I/O) | virtio-mmio v1 (legacy) and v2, and the same legacy virtio-pci driver |
 
 Both ports run the same boot demo end to end — storage self-test, ARP,
 exFAT, every IPC check, and every userspace check (including the rogue
@@ -542,8 +545,20 @@ With GICv3 the port runs well past GICv2's 8-CPU limit — verified at
 [SMP] 32 CPU(s) online
 ```
 
+PCI enumeration and the legacy virtio-pci transport are shared code: on
+arm64 the kernel maps the ECAM window, sizes and assigns BARs from the
+host bridge's I/O and 32-bit memory windows, and reaches PCI I/O space
+through the bridge's memory-mapped I/O window — so `virtio-blk-pci` and
+`virtio-net-pci` work there exactly as on amd64:
+```
+[PCI] ECAM host bridge at 0x4010000000 (buses 0-255); I/O window 0x3eff0000, MMIO window 0x10000000; 6 BARs assigned
+[BLK] virtio-blk (legacy virtio-pci) ready: 32768 sectors (16384 KiB), queue size 256
+```
+
 arm64 limitations: RAM beyond the first 4 GiB above 1 GiB is ignored;
-GICv3 support covers the first redistributor region (no ITS/LPIs).
+GICv3 support covers the first redistributor region (no ITS/LPIs); PCI
+covers bus 0 (no bridges) and legacy virtio-pci (no modern
+capability-based transport).
 
 ## USB Driver (xHCI)
 

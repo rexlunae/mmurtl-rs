@@ -207,5 +207,13 @@ extern "C" fn arm64_boot_main(dtb_arg: u64) -> ! {
     crate::serial::write_str("[INIT] Virtio drivers...\n");
     super::virtio_mmio::probe(&info.virtio[..info.virtio_count]);
 
+    // PCIe: map ECAM, assign BARs, then the same virtio-pci driver as amd64
+    if let Some(host) = info.pci {
+        if super::pcie::init(&host) {
+            let devices = crate::pci::scan();
+            crate::virtio::pci::init(&devices);
+        }
+    }
+
     crate::kernel_run()
 }

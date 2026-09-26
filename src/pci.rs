@@ -1,51 +1,19 @@
-//! PCI bus scanning — finds devices via port I/O config space (CF8/CFC).
+//! PCI bus enumeration (architecture-neutral).
 //!
-//! The PCI configuration space is accessed via I/O ports 0xCF8 and 0xCFC.
-//! This module scans bus 0 for all devices and functions, and provides
-//! helpers to find specific classes of devices (like USB controllers).
-
-use x86_64::instructions::port::Port;
-
-/// PCI config address register (CONFIG_ADDRESS)
-#[derive(Debug)]
-struct PciConfigAddress(u32);
-
-impl PciConfigAddress {
-    /// Build a PCI config address for a given bus/device/function/register
-    fn new(bus: u8, device: u8, function: u8, register: u8) -> Self {
-        // Bit 31: Enable bit
-        // Bits 23-16: Bus number
-        // Bits 15-11: Device number
-        // Bits 10-8: Function number
-        // Bits 7-2: Register index (dword aligned)
-        Self(
-            0x8000_0000u32
-                | ((bus as u32) << 16)
-                | ((device as u32) << 11)
-                | ((function as u32) << 8)
-                | (register as u32 & 0xFC),
-        )
-    }
-}
+//! Configuration space comes from the architecture: the legacy 0xCF8/0xCFC
+//! ports on amd64, the ECAM window from the device tree on arm64
+//! (`crate::arch::pci_config_read/write`). Firmware assigns BARs on amd64;
+//! on arm64 the kernel boots without firmware PCI setup, so
+//! `assign_bars` sizes and places them itself.
 
 /// Read a 32-bit value from PCI config space
 fn pci_config_read(bus: u8, device: u8, function: u8, register: u8) -> u32 {
-    unsafe {
-        let mut address_port: Port<u32> = Port::new(0xCF8);
-        let mut data_port: Port<u32> = Port::new(0xCFC);
-        address_port.write(PciConfigAddress::new(bus, device, function, register).0);
-        data_port.read()
-    }
+    crate::arch::pci_config_read(bus, device, function, register & 0xFC)
 }
 
 /// Write a 32-bit value to PCI config space
 fn pci_config_write(bus: u8, device: u8, function: u8, register: u8, value: u32) {
-    unsafe {
-        let mut address_port: Port<u32> = Port::new(0xCF8);
-        let mut data_port: Port<u32> = Port::new(0xCFC);
-        address_port.write(PciConfigAddress::new(bus, device, function, register).0);
-        data_port.write(value);
-    }
+    crate::arch::pci_config_write(bus, device, function, register & 0xFC, value)
 }
 
 /// PCI device identifiers
@@ -163,6 +131,82 @@ pub fn scan() -> heapless::Vec<PciDevice, 64> {
     }
 
     devices
+}
+
+// ========================================================================
+// BAR assignment (for machines without firmware PCI setup)
+// ========================================================================
+
+/// Free space in the host bridge's windows, as PCI bus addresses
+pub struct BarWindows {
+    pub io_next: u64,
+    pub io_end: u64,
+    pub mem_next: u64,
+    pub mem_end: u64,
+}
+
+impl BarWindows {
+    fn take(next: &mut u64, end: u64, size: u64) -> Option<u64> {
+        let base = (*next + size - 1) & !(size - 1); // BARs are naturally aligned
+        (base + size <= end).then(|| {
+            *next = base + size;
+            base
+        })
+    }
+}
+
+/// Size every BAR of every type-0 function on bus 0, place it in the
+/// windows, and enable decoding + bus mastering. Returns the BARs assigned.
+pub fn assign_bars(windows: &mut BarWindows) -> usize {
+    let mut assigned = 0;
+    for dev in scan() {
+        let header_type = (pci_config_read(dev.bus, dev.device, dev.function, 0x0C) >> 16) & 0x7F;
+        if header_type != 0 || dev.class == 0x06 {
+            continue; // bridges and host bridges keep their config
+        }
+        let (b, d, f) = (dev.bus, dev.device, dev.function);
+        // Decoding off while BARs move
+        let cmd = pci_config_read(b, d, f, 0x04);
+        pci_config_write(b, d, f, 0x04, cmd & !0b111);
+
+        let mut bar = 0;
+        while bar < 6 {
+            let reg = 0x10 + 4 * bar as u8;
+            let orig = pci_config_read(b, d, f, reg);
+            pci_config_write(b, d, f, reg, 0xFFFF_FFFF);
+            let probe = pci_config_read(b, d, f, reg);
+            let is_io = orig & 1 == 1;
+            let is_64 = !is_io && (orig & 0b110) == 0b100;
+            if probe == 0 || probe == 0xFFFF_FFFF && !is_io {
+                pci_config_write(b, d, f, reg, orig);
+                bar += if is_64 { 2 } else { 1 };
+                continue;
+            }
+            let mask = if is_io { probe & !0x3 } else { probe & !0xF };
+            let mut size = (!mask).wrapping_add(1) as u64;
+            if is_io {
+                size &= 0xFFFF;
+            }
+            let base = if is_io {
+                BarWindows::take(&mut windows.io_next, windows.io_end, size.max(4))
+            } else {
+                BarWindows::take(&mut windows.mem_next, windows.mem_end, size.max(16))
+            };
+            match base {
+                Some(addr) => {
+                    pci_config_write(b, d, f, reg, addr as u32 | (orig & if is_io { 0x3 } else { 0xF }));
+                    if is_64 {
+                        pci_config_write(b, d, f, reg + 4, (addr >> 32) as u32);
+                    }
+                    assigned += 1;
+                }
+                None => pci_config_write(b, d, f, reg, orig),
+            }
+            bar += if is_64 { 2 } else { 1 };
+        }
+        pci_config_write(b, d, f, 0x04, cmd | 0b111); // IO + memory + bus master
+    }
+    assigned
 }
 
 /// Find all USB controllers on PCI bus 0

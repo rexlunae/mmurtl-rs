@@ -45,6 +45,21 @@ pub struct MachineInfo {
     pub timer_irq: u32, // virtual timer GIC INTID
     pub virtio: [u64; MAX_VIRTIO],
     pub virtio_count: usize,
+    /// PCIe host bridge (generic ECAM), if present
+    pub pci: Option<PciHost>,
+}
+
+/// A generic ECAM PCIe host bridge
+#[derive(Clone, Copy, Default)]
+pub struct PciHost {
+    pub ecam: u64,
+    pub ecam_size: u64,
+    pub bus_start: u8,
+    pub bus_end: u8,
+    /// I/O space window: CPU address, PCI address, size
+    pub io: (u64, u64, u64),
+    /// 32-bit memory window: CPU address, PCI address, size
+    pub mem32: (u64, u64, u64),
 }
 
 impl MachineInfo {
@@ -66,6 +81,7 @@ impl MachineInfo {
             timer_irq: 27,
             virtio: [0; MAX_VIRTIO],
             virtio_count: 0,
+            pci: None,
         }
     }
 }
@@ -121,6 +137,11 @@ struct Node {
     is_memory: bool,
     is_gic: bool,
     is_gicv3: bool,
+    is_pcie: bool,
+    ranges_off: usize,
+    ranges_len: usize,
+    busrange_off: usize,
+    busrange_len: usize,
     is_uart: bool,
     is_virtio: bool,
     is_timer: bool,
@@ -143,6 +164,11 @@ impl Node {
             is_memory: false,
             is_gic: false,
             is_gicv3: false,
+            is_pcie: false,
+            ranges_off: 0,
+            ranges_len: 0,
+            busrange_off: 0,
+            busrange_len: 0,
             is_uart: false,
             is_virtio: false,
             is_timer: false,
@@ -226,6 +252,35 @@ pub fn parse(addr: u64) -> MachineInfo {
                         info.cpus[info.cpu_count] = read_cells(b, n.reg_off, ac);
                         info.cpu_count += 1;
                     }
+                } else if n.is_pcie && n.reg_len >= entry {
+                    let mut host = PciHost {
+                        ecam: read_cells(b, n.reg_off, ac),
+                        ecam_size: read_cells(b, n.reg_off + 4 * ac as usize, sc),
+                        bus_start: 0,
+                        bus_end: 255,
+                        ..PciHost::default()
+                    };
+                    if n.busrange_len >= 8 {
+                        host.bus_start = be32(b, n.busrange_off) as u8;
+                        host.bus_end = be32(b, n.busrange_off + 4) as u8;
+                    }
+                    // ranges: <pci-addr (3 cells)> <cpu-addr (parent cells)> <size>
+                    let (cac, csc) = (n.child_addr_cells, n.child_size_cells);
+                    let rentry = 4 * (cac + ac + csc) as usize;
+                    let mut o = n.ranges_off;
+                    while cac == 3 && o + rentry <= n.ranges_off + n.ranges_len {
+                        let space = (be32(b, o) >> 24) & 0x3;
+                        let pci = read_cells(b, o + 4, 2);
+                        let cpu = read_cells(b, o + 12, ac);
+                        let size = read_cells(b, o + 12 + 4 * ac as usize, csc);
+                        match space {
+                            1 => host.io = (cpu, pci, size),
+                            2 => host.mem32 = (cpu, pci, size),
+                            _ => {}
+                        }
+                        o += rentry;
+                    }
+                    info.pci = Some(host);
                 } else if n.is_gicv3 && n.reg_len >= 2 * entry {
                     // reg = <GICD>, <GICR region>, [GICC, GICH, GICV]
                     info.gic_version = 3;
@@ -267,6 +322,14 @@ pub fn parse(addr: u64) -> MachineInfo {
                         n.reg_off = val;
                         n.reg_len = len;
                     }
+                    b"ranges" => {
+                        n.ranges_off = val;
+                        n.ranges_len = len;
+                    }
+                    b"bus-range" => {
+                        n.busrange_off = val;
+                        n.busrange_len = len;
+                    }
                     b"interrupts" => {
                         n.irq_off = val;
                         n.irq_len = len;
@@ -299,6 +362,7 @@ pub fn parse(addr: u64) -> MachineInfo {
                             || strlist_contains(v, b"arm,psci");
                         n.is_psci |= psci;
                         n.is_gicv3 |= strlist_contains(v, b"arm,gic-v3");
+                        n.is_pcie |= strlist_contains(v, b"pci-host-ecam-generic");
                     }
                     _ => {}
                 }

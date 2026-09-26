@@ -154,6 +154,33 @@ pub fn trim_ram(ram: &[(u64, u64)]) {
     }
 }
 
+/// Identity-map `[pa, pa + size)` as Device memory in the kernel's tables
+/// (1 GiB blocks, below 512 GiB), e.g. a PCIe ECAM window. Every address
+/// space shares the kernel's level-1 table, so it appears in all of them.
+pub fn map_device(pa: u64, size: u64) -> Result<(), &'static str> {
+    let first = pa / GIB;
+    let last = (pa + size - 1) / GIB;
+    if last >= ENTRIES as u64 {
+        return Err("device region above 512 GiB");
+    }
+    unsafe {
+        let l1 = &mut *core::ptr::addr_of_mut!(L1);
+        for i in first..=last {
+            let e = &mut l1.0[i as usize];
+            let d = core::ptr::read_volatile(e);
+            if d & VALID != 0 {
+                if i == 0 {
+                    continue; // the first GiB is already Device memory
+                }
+                return Err("region overlaps an existing mapping");
+            }
+            core::ptr::write_volatile(e, (i * GIB) | ATTR_DEVICE | AF | PXN | UXN | VALID);
+        }
+        asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb");
+    }
+    Ok(())
+}
+
 /// Highest RAM address the early map covers
 pub const EARLY_RAM_END: u64 = GIB * (1 + EARLY_RAM_GIB as u64);
 

@@ -3,7 +3,7 @@
 //! Boot from an ELF at EL1 (dropping from EL2 if needed); PL011 serial;
 //! the device tree for RAM, CPUs, and devices; an identity-mapped MMU
 //! with EL0/EL1 permission bits; an EL1 vector table; GICv2/GICv3 + the generic
-//! timer; PSCI multi-core boot; virtio-mmio devices; EL0 userspace via
+//! timer; PSCI multi-core boot; virtio-mmio and PCIe (ECAM) devices; EL0 userspace via
 //! `svc #0`.
 
 pub mod boot;
@@ -12,6 +12,7 @@ pub mod fdt;
 pub mod gic;
 pub mod memory;
 pub mod mmu;
+pub mod pcie;
 pub mod serial;
 pub mod smp;
 pub mod timer;
@@ -21,6 +22,10 @@ pub mod virtio_mmio;
 use core::arch::asm;
 
 pub use exceptions::{kernel_context, user_context, TaskContext};
+pub use pcie::{
+    io_read16, io_read32, io_read8, io_write16, io_write32, io_write8, pci_config_read,
+    pci_config_write,
+};
 pub use memory::{heap_extend, heap_init, phys_to_virt, user_access_begin, user_access_end};
 pub use mmu::{free_address_space, map_user_page, new_address_space, query_page, switch_address_space};
 

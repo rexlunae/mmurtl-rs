@@ -87,14 +87,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // Initialize PCI and USB
     serial::write_str("[INIT] PCI bus...\n");
-    let devices = super::pci::scan();
+    let devices = crate::pci::scan();
 
     serial::write_str("[INIT] USB subsystem...\n");
     super::usb::init();
 
     // Virtio drivers: storage (virtio-blk) + network (virtio-net)
     serial::write_str("[INIT] Virtio drivers...\n");
-    super::virtio_pci::init(&devices);
+    crate::virtio::pci::init(&devices);
 
     // Architecture-neutral second half: self-tests, IPC, tasks, userspace
     crate::kernel_run()

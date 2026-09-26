@@ -9,6 +9,7 @@
 
 pub mod blk;
 pub mod net;
+pub mod pci;
 
 use alloc::boxed::Box;
 use core::sync::atomic::{fence, Ordering};

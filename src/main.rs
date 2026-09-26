@@ -17,6 +17,7 @@ mod serial;
 mod memory;
 mod scheduler;
 mod ipc;
+mod pci;
 mod virtio;
 mod keyboard;
 mod fs;

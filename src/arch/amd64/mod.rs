@@ -13,13 +13,11 @@ pub mod gdt;
 pub mod interrupts;
 pub mod memory;
 pub mod page_table;
-pub mod pci;
 pub mod serial;
 pub mod smp;
 pub mod syscall;
 pub mod usb;
 pub mod user_programs;
-pub mod virtio_pci;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -31,6 +29,57 @@ pub use memory::{
 
 /// Architecture name for the boot log
 pub const NAME: &str = "amd64";
+
+// ========================================================================
+// PCI configuration space + I/O ports
+// ========================================================================
+
+/// PCI config read through CONFIG_ADDRESS/CONFIG_DATA (0xCF8/0xCFC)
+pub fn pci_config_read(bus: u8, device: u8, function: u8, register: u8) -> u32 {
+    use x86_64::instructions::port::Port;
+    let addr = 0x8000_0000u32
+        | (bus as u32) << 16
+        | (device as u32) << 11
+        | (function as u32) << 8
+        | register as u32;
+    without_interrupts(|| unsafe {
+        Port::<u32>::new(0xCF8).write(addr);
+        Port::<u32>::new(0xCFC).read()
+    })
+}
+
+/// PCI config write through 0xCF8/0xCFC
+pub fn pci_config_write(bus: u8, device: u8, function: u8, register: u8, value: u32) {
+    use x86_64::instructions::port::Port;
+    let addr = 0x8000_0000u32
+        | (bus as u32) << 16
+        | (device as u32) << 11
+        | (function as u32) << 8
+        | register as u32;
+    without_interrupts(|| unsafe {
+        Port::<u32>::new(0xCF8).write(addr);
+        Port::<u32>::new(0xCFC).write(value);
+    })
+}
+
+pub fn io_read8(port: u16) -> u8 {
+    unsafe { x86_64::instructions::port::Port::<u8>::new(port).read() }
+}
+pub fn io_read16(port: u16) -> u16 {
+    unsafe { x86_64::instructions::port::Port::<u16>::new(port).read() }
+}
+pub fn io_read32(port: u16) -> u32 {
+    unsafe { x86_64::instructions::port::Port::<u32>::new(port).read() }
+}
+pub fn io_write8(port: u16, v: u8) {
+    unsafe { x86_64::instructions::port::Port::<u8>::new(port).write(v) }
+}
+pub fn io_write16(port: u16, v: u16) {
+    unsafe { x86_64::instructions::port::Port::<u16>::new(port).write(v) }
+}
+pub fn io_write32(port: u16, v: u32) {
+    unsafe { x86_64::instructions::port::Port::<u32>::new(port).write(v) }
+}
 
 /// ELF e_machine for user programs (EM_X86_64)
 pub const ELF_MACHINE: u16 = 0x3E;
