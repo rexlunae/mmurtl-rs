@@ -16,6 +16,21 @@ global_asm!(
     .section .text.boot, "ax"
     .globl _start
 _start:
+    // arm64 Linux "Image" header (Documentation/arch/arm64/booting.rst),
+    // so standard loaders (U-Boot booti, firmware, QEMU -kernel Image)
+    // can boot us and pass the device tree in x0. The first word is
+    // also the first instruction.
+    b primary_entry                 // code0
+    .long 0                         // code1
+    .quad 0x200000                  // text_offset: RAM base + 2 MiB
+    .quad __image_size              // image_size (includes .bss + stack)
+    .quad 0b0010                    // flags: little-endian, 4 KiB pages,
+                                    //   2 MiB-aligned base near DRAM start
+    .quad 0, 0, 0                   // reserved
+    .ascii "ARM\x64"                // magic
+    .long 0                         // reserved (no PE/COFF header)
+
+primary_entry:
     // x0 = device tree (if the loader passed one); keep it in x19
     mov x19, x0
 
@@ -40,6 +55,27 @@ _start:
     str xzr, [x1], #8
     b 1b
 2:
+    // The boot protocol hands us the image cleaned to the point of
+    // coherency, but clean lines may still hold pre-boot contents of
+    // addresses we just wrote with caches off (.bss, the stack, and the
+    // page tables to come). Invalidate the whole image range so nothing
+    // stale can be hit once the caches are on.
+    adrp x1, __kernel_start
+    add x1, x1, :lo12:__kernel_start
+    adrp x2, __kernel_end
+    add x2, x2, :lo12:__kernel_end
+    mrs x3, ctr_el0
+    ubfx x3, x3, #16, #4        // DminLine: log2(words) of the smallest D-line
+    mov x4, #4
+    lsl x4, x4, x3              // line size in bytes
+    sub x5, x4, #1
+    bic x1, x1, x5
+3:  dc ivac, x1
+    add x1, x1, x4
+    cmp x1, x2
+    b.lo 3b
+    dsb sy
+
     msr tpidr_el1, xzr          // scheduler CPU index 0
     mov x0, x19
     bl arm64_boot_main
@@ -54,19 +90,28 @@ drop_to_el1:
     mrs x9, CurrentEL
     lsr x9, x9, #2
     cmp x9, #2
-    b.ne 3f
+    b.ne 5f
     mov x9, #(1 << 31)          // HCR_EL2.RW: EL1 is AArch64
     msr hcr_el2, x9
     mov x9, #3                  // CNTHCTL_EL2: EL1 physical timer/counter access
     msr cnthctl_el2, x9
     msr cntvoff_el2, xzr
+    // If the GICv3 system-register interface exists, let EL1 use it:
+    // ICC_SRE_EL2 = Enable | DIB | DFB | SRE
+    mrs x9, id_aa64pfr0_el1
+    ubfx x9, x9, #24, #4
+    cbz x9, 4f
+    mov x9, #0xF
+    msr S3_4_C12_C9_5, x9
+    isb
+4:
     mov x9, #0x3C5              // SPSR_EL2: EL1h, DAIF masked
     msr spsr_el2, x9
     mov x9, sp
     msr sp_el1, x9
     msr elr_el2, x30
     eret
-3:  ret
+5:  ret
 
     // Secondary CPU entry (PSCI CPU_ON): x0 = &ApBoot, MMU off
     .globl secondary_start
@@ -89,6 +134,9 @@ secondary_start:
     dsb ish
     isb
     msr sctlr_el1, x5
+    isb
+    ic iallu                    // drop any stale instructions
+    dsb nsh
     isb
     mov x0, x1
     bl arm64_secondary_main
@@ -143,9 +191,6 @@ extern "C" fn arm64_boot_main(dtb_arg: u64) -> ! {
         fdt::PsciConduit::None => "absent",
     });
     crate::serial::write_str("\n");
-    if info.gic_v3 {
-        panic!("GICv3 is not supported yet — run QEMU with -machine virt,gic-version=2");
-    }
 
     // RAM
     let ram = &info.ram[..info.ram_count];
@@ -168,16 +213,28 @@ extern "C" fn arm64_boot_main(dtb_arg: u64) -> ! {
     super::memory::init(ram, dtb, kernel_start, kernel_end);
 
     // Interrupts: GIC distributor + this CPU, UART RX, the generic timer
-    crate::serial::write_str("[GIC] GICv2: distributor 0x");
-    crate::serial::write_hex(info.gicd);
-    crate::serial::write_str(", CPU interface 0x");
-    crate::serial::write_hex(info.gicc);
-    crate::serial::write_str("; timer INTID ");
-    crate::serial::write_dec(info.timer_irq as u64);
-    crate::serial::write_str(" @ ");
-    crate::serial::write_dec(super::gic::frequency() / 1_000_000);
-    crate::serial::write_str(" MHz\n");
-    super::gic::init(info.gicd, info.gicc, info.timer_irq, info.uart_irq);
+    {
+        use core::fmt::Write;
+        let mut line: heapless::String<160> = heapless::String::new();
+        if info.gic_version == 3 {
+            let _ = write!(line, "[GIC] GICv3: distributor 0x{:x}, redistributors 0x{:x} (+0x{:x})",
+                info.gicd, info.gicr, info.gicr_size);
+        } else {
+            let _ = write!(line, "[GIC] GICv2: distributor 0x{:x}, CPU interface 0x{:x}",
+                info.gicd, info.gicc);
+        }
+        let _ = write!(line, "; timer INTID {} @ {} MHz\n",
+            info.timer_irq, super::timer::frequency() / 1_000_000);
+        crate::serial::write_str(&line);
+    }
+    super::gic::init(&super::gic::GicConfig {
+        version: info.gic_version,
+        gicd: info.gicd,
+        gicc_or_gicr: if info.gic_version == 3 { info.gicr } else { info.gicc },
+        gicr_size: info.gicr_size,
+        timer_irq: info.timer_irq,
+        uart_irq: info.uart_irq,
+    });
     super::serial::enable_rx_irq();
 
     crate::serial::write_str("[INIT] Scheduler...\n");
@@ -188,6 +245,14 @@ extern "C" fn arm64_boot_main(dtb_arg: u64) -> ! {
 
     crate::serial::write_str("[INIT] Virtio drivers...\n");
     super::virtio_mmio::probe(&info.virtio[..info.virtio_count]);
+
+    // PCIe: map ECAM, assign BARs, then the same virtio-pci driver as amd64
+    if let Some(host) = info.pci {
+        if super::pcie::init(&host) {
+            let devices = crate::pci::scan();
+            crate::virtio::pci::init(&devices);
+        }
+    }
 
     crate::kernel_run()
 }

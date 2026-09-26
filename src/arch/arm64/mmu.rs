@@ -129,6 +129,9 @@ pub unsafe fn enable(r: &MmuRegs) {
         "isb",
         "msr sctlr_el1, {sctlr}",
         "isb",
+        "ic iallu",
+        "dsb nsh",
+        "isb",
         mair = in(reg) r.mair,
         tcr = in(reg) r.tcr,
         ttbr0 = in(reg) r.ttbr0,
@@ -154,6 +157,51 @@ pub fn trim_ram(ram: &[(u64, u64)]) {
     }
 }
 
+/// Identity-map `[pa, pa + size)` as Device memory in the kernel's tables
+/// (1 GiB blocks, below 512 GiB), e.g. a PCIe ECAM window. Every address
+/// space shares the kernel's level-1 table, so it appears in all of them.
+pub fn map_device(pa: u64, size: u64) -> Result<(), &'static str> {
+    let first = pa / GIB;
+    let last = (pa + size - 1) / GIB;
+    if last >= ENTRIES as u64 {
+        return Err("device region above 512 GiB");
+    }
+    unsafe {
+        let l1 = &mut *core::ptr::addr_of_mut!(L1);
+        for i in first..=last {
+            let e = &mut l1.0[i as usize];
+            let d = core::ptr::read_volatile(e);
+            if d & VALID != 0 {
+                if i == 0 {
+                    continue; // the first GiB is already Device memory
+                }
+                return Err("region overlaps an existing mapping");
+            }
+            core::ptr::write_volatile(e, (i * GIB) | ATTR_DEVICE | AF | PXN | UXN | VALID);
+        }
+        asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb");
+    }
+    Ok(())
+}
+
+/// Make instructions the kernel just wrote (through its identity map)
+/// visible to instruction fetch — e.g. user program code. The I-cache is
+/// not coherent with data writes on ARM: clean the data to the point of
+/// unification, then invalidate the instruction caches of every CPU.
+pub fn sync_icache(kva: *const u8, len: usize) {
+    let ctr: u64;
+    unsafe { asm!("mrs {}, ctr_el0", out(reg) ctr) };
+    let line = 4u64 << ((ctr >> 16) & 0xF);
+    let start = kva as u64 & !(line - 1);
+    let end = kva as u64 + len as u64;
+    let mut a = start;
+    while a < end {
+        unsafe { asm!("dc cvau, {}", in(reg) a) };
+        a += line;
+    }
+    unsafe { asm!("dsb ish", "ic ialluis", "dsb ish", "isb") };
+}
+
 /// Highest RAM address the early map covers
 pub const EARLY_RAM_END: u64 = GIB * (1 + EARLY_RAM_GIB as u64);
 
@@ -165,9 +213,49 @@ fn index(va: u64, level: u32) -> usize {
     ((va >> (39 - 9 * level)) & 0x1FF) as usize
 }
 
-/// Walk to the level-3 entry for `va`, allocating tables if `create`
-unsafe fn walk(va: u64, create: bool) -> Option<*mut u64> {
-    let mut table = core::ptr::addr_of_mut!(L0) as *mut u64;
+/// L0 slot holding the user window (memory::user::USER_BASE)
+const USER_L0_SLOT: usize = ((crate::memory::user::USER_BASE >> 39) & 0x1FF) as usize;
+
+/// Root table loaded in each CPU's TTBR0
+static ACTIVE_ROOT: [core::sync::atomic::AtomicU64; crate::scheduler::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::scheduler::MAX_CPUS];
+
+fn kernel_root() -> u64 {
+    core::ptr::addr_of!(L0) as u64
+}
+
+fn alloc_zeroed_frame() -> Option<u64> {
+    let pa = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_frame())??;
+    unsafe { core::ptr::write_bytes(pa as *mut u8, 0, 4096) };
+    Some(pa)
+}
+
+fn free_frame(pa: u64) {
+    crate::memory::heap::with_frame_allocator(|fa| fa.deallocate_frame(pa));
+}
+
+/// Create a user address space: an L0 table sharing the kernel's identity
+/// map (every slot but the user window's) with an empty user window.
+/// Returns the table's physical address.
+pub fn new_address_space() -> Result<u64, &'static str> {
+    let root = alloc_zeroed_frame().ok_or("out of memory for a page table")?;
+    unsafe {
+        let kernel = kernel_root() as *const u64;
+        let new = root as *mut u64;
+        for i in 0..ENTRIES {
+            if i != USER_L0_SLOT {
+                *new.add(i) = *kernel.add(i);
+            }
+        }
+        asm!("dsb ishst");
+    }
+    Ok(root)
+}
+
+/// Walk `root` to the level-3 entry for `va`, allocating tables if
+/// `create`
+unsafe fn walk(root: u64, va: u64, create: bool) -> Option<*mut u64> {
+    let mut table = root as *mut u64;
     for level in 0..3 {
         let e = table.add(index(va, level));
         let d = core::ptr::read_volatile(e);
@@ -175,8 +263,7 @@ unsafe fn walk(va: u64, create: bool) -> Option<*mut u64> {
             if !create {
                 return None;
             }
-            let pa = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_frame())??;
-            core::ptr::write_bytes(pa as *mut u8, 0, 4096);
+            let pa = alloc_zeroed_frame()?;
             asm!("dsb ishst");
             core::ptr::write_volatile(e, pa | TABLE | VALID);
             table = pa as *mut u64;
@@ -189,34 +276,86 @@ unsafe fn walk(va: u64, create: bool) -> Option<*mut u64> {
     Some(table.add(index(va, 3)))
 }
 
-/// Map one 4 KiB user page `va` → `pa`
-pub fn map_user_page(va: u64, pa: u64, writable: bool, executable: bool) -> Result<(), &'static str> {
+/// Map one 4 KiB user page `va` → `pa` in address space `root`
+pub fn map_user_page(root: u64, va: u64, pa: u64, writable: bool, executable: bool) -> Result<(), &'static str> {
     let mut desc = (pa & ADDR_MASK) | ATTR_NORMAL | SH_INNER | AF | PXN | TABLE | VALID;
     desc |= if writable { AP_EL0_RW } else { AP_RO_ALL };
     if !executable {
         desc |= UXN;
     }
     unsafe {
-        let e = walk(va, true).ok_or("out of memory for page tables")?;
+        let e = walk(root, va, true).ok_or("out of memory for page tables")?;
         if core::ptr::read_volatile(e) & VALID != 0 {
             return Err("page already mapped");
         }
         core::ptr::write_volatile(e, desc);
-        // New valid entry: make it visible to every CPU's table walker
         asm!("dsb ishst", "isb");
     }
     Ok(())
 }
 
-/// Whether `va` is mapped as a 4 KiB page: None if not, else
-/// (user-accessible, writable)
+/// Whether `va` is mapped as a 4 KiB page in the *current* address space
+/// (this CPU's TTBR0): None if not, else (user-accessible, writable)
 pub fn query_page(va: u64) -> Option<(bool, bool)> {
+    let root: u64;
     unsafe {
-        let e = walk(va, false)?;
+        asm!("mrs {}, ttbr0_el1", out(reg) root);
+        let e = walk(root & ADDR_MASK, va, false)?;
         let d = core::ptr::read_volatile(e);
         if d & VALID == 0 {
             return None;
         }
         Some((d & AP_EL0_BIT != 0, d & AP_RO_BIT == 0))
     }
+}
+
+/// Tear down a user address space: free every frame mapped in its user
+/// window, the window's tables, and the root. Returns frames freed. The
+/// space must not be loaded on any CPU.
+pub fn free_address_space(root: u64) -> usize {
+    unsafe fn free_level(t: u64, level: u32, freed: &mut usize) {
+        for i in 0..ENTRIES {
+            let d = core::ptr::read_volatile((t as *const u64).add(i));
+            if d & VALID == 0 {
+                continue;
+            }
+            if level < 3 {
+                free_level(d & ADDR_MASK, level + 1, freed);
+            }
+            free_frame(d & ADDR_MASK);
+            *freed += 1;
+        }
+    }
+    let mut freed = 0;
+    unsafe {
+        let top = core::ptr::read_volatile((root as *const u64).add(USER_L0_SLOT));
+        if top & VALID != 0 {
+            free_level(top & ADDR_MASK, 1, &mut freed);
+            free_frame(top & ADDR_MASK);
+            freed += 1;
+        }
+    }
+    free_frame(root);
+    freed + 1
+}
+
+/// Load `root` (0 = the kernel's own tables) into this CPU's TTBR0 if it
+/// isn't already, discarding this CPU's stale translations (no ASIDs yet)
+pub fn switch_address_space(cpu: usize, root: u64) {
+    use core::sync::atomic::Ordering;
+    let target = if root == 0 { kernel_root() } else { root };
+    if ACTIVE_ROOT[cpu].load(Ordering::Relaxed) == target {
+        return;
+    }
+    unsafe {
+        asm!(
+            "msr ttbr0_el1, {}",
+            "isb",
+            "tlbi vmalle1",
+            "dsb nsh",
+            "isb",
+            in(reg) target,
+        );
+    }
+    ACTIVE_ROOT[cpu].store(target, Ordering::Relaxed);
 }

@@ -107,9 +107,27 @@ pub struct TaskControlBlock {
     pub wait_for: u32,
     /// Jiffy at which a Sleeping task becomes Ready again
     pub wake_tick: u64,
-    /// Ring-3 task: runs user code, enters the kernel via interrupts and
-    /// `int 0x80` on its kernel stack (TSS.RSP0 = kernel_stack_top)
+    /// User-mode task: runs user code, enters the kernel via interrupts
+    /// and syscalls on its kernel stack
     pub user: bool,
+    /// Page-table root of the task's address space (0 = the kernel's own;
+    /// kernel tasks run there)
+    pub address_space: u64,
+    /// The task's slot in the user window (user tasks)
+    pub user_slot: Option<u64>,
+    /// Physical base of the kernel stack's frames (0 = not ours to free,
+    /// e.g. an adopted boot/idle context)
+    pub kstack_phys: u64,
+    /// Resources already released by the reaper; the slot may be reused
+    pub reaped: bool,
+}
+
+/// A kernel stack: `size` bytes of contiguous frames at `phys`, reached
+/// through `virt`
+pub struct KernelStack {
+    pub virt: u64,
+    pub phys: u64,
+    pub size: u64,
 }
 
 impl TaskControlBlock {
@@ -119,18 +137,16 @@ impl TaskControlBlock {
     /// is wrapped in a function that calls `task_entry_point` so that when
     /// the task returns, it calls `exit_current_task()`.
     ///
-    /// Takes ownership of a `Box<[u8]>` for the stack so the stack is
-    /// automatically freed when the task is destroyed.
+    /// The stack's frames are freed by the reaper once the task has
+    /// exited and been switched out.
     pub fn new(
         entry: extern "C" fn() -> !,
-        stack: Box<[u8]>,
+        stack: KernelStack,
         priority: TaskPriority,
         name: &'static str,
     ) -> Box<Self> {
-        // Leak the box to get a static mut reference we can use
-        let stack = Box::leak(stack);
-        let stack_top = stack.as_ptr() as u64 + stack.len() as u64;
-        let stack_bottom = stack.as_ptr() as u64;
+        let stack_top = stack.virt + stack.size;
+        let stack_bottom = stack.virt;
 
         // Build an initial context on the task's stack, shaped exactly
         // like one the timer interrupt saves, so the first switch into the
@@ -170,6 +186,10 @@ impl TaskControlBlock {
             wait_for: 0,
             wake_tick: 0,
             user: false,
+            address_space: 0,
+            user_slot: None,
+            kstack_phys: stack.phys,
+            reaped: false,
         })
     }
 
@@ -181,7 +201,9 @@ impl TaskControlBlock {
         entry: u64,
         user_rsp: u64,
         arg: u64,
-        stack: Box<[u8]>,
+        space: u64,
+        slot: u64,
+        stack: KernelStack,
         priority: TaskPriority,
         name: &'static str,
     ) -> Box<Self> {
@@ -194,6 +216,8 @@ impl TaskControlBlock {
                 .write(crate::arch::user_context(entry, user_rsp, arg, tcb.kernel_stack_top));
         }
         tcb.user = true;
+        tcb.address_space = space;
+        tcb.user_slot = Some(slot);
         tcb
     }
 
@@ -219,6 +243,10 @@ impl TaskControlBlock {
             wait_for: 0,
             wake_tick: 0,
             user: false,
+            address_space: 0,
+            user_slot: None,
+            kstack_phys: 0,
+            reaped: false,
         })
     }
 }

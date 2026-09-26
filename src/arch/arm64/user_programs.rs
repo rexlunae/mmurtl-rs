@@ -170,9 +170,9 @@ user_rogue_read_start:
     ldr x0, [x19]                        // EL1-only page -> data abort
     LOG rr_bad, rr_bad_end
     EXIT
-rr_msg: .ascii "rogue_read: reading kernel memory..."
+rr_msg: .ascii "rogue_read: reading memory it does not own..."
 rr_msg_end:
-rr_bad: .ascii "rogue_read: READ KERNEL MEMORY (protection failure!)"
+rr_bad: .ascii "rogue_read: READ FOREIGN MEMORY (protection failure!)"
 rr_bad_end:
     .balign 4
     .globl user_rogue_read_end
@@ -221,6 +221,17 @@ rq_bad_end:
     .globl user_rogue_ptr_end
 user_rogue_ptr_end:
 
+    // ---------------------------------------------------------------
+    // exit_only: exit immediately (for task-churn tests)
+    // ---------------------------------------------------------------
+    .balign 16
+    .globl user_exit_start
+user_exit_start:
+    EXIT
+    brk #0
+    .globl user_exit_end
+user_exit_end:
+
     .popsection
     "#
 );
@@ -238,6 +249,8 @@ extern "C" {
     static user_rogue_priv_end: u8;
     static user_rogue_ptr_start: u8;
     static user_rogue_ptr_end: u8;
+    static user_exit_start: u8;
+    static user_exit_end: u8;
 }
 
 /// The bytes between two assembly labels
@@ -259,3 +272,4 @@ program!(spinner, user_spin_start, user_spin_end);
 program!(rogue_read, user_rogue_read_start, user_rogue_read_end);
 program!(rogue_priv, user_rogue_priv_start, user_rogue_priv_end);
 program!(rogue_ptr, user_rogue_ptr_start, user_rogue_ptr_end);
+program!(exit_only, user_exit_start, user_exit_end);

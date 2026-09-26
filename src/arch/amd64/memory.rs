@@ -26,6 +26,7 @@ pub fn init(regions: &MemoryRegions, phys_offset: Option<u64>) {
     // 0x8000 all live in the first MiB
     let reserved = [PhysRange { start: 0, end: 0x10_0000 }];
     crate::memory::init(&usable[..n], &reserved, 0x10_0000);
+    kernel_root(); // capture the boot page tables as the kernel's space
 }
 
 /// Physical → kernel virtual, through the bootloader's offset window
@@ -80,30 +81,150 @@ fn map_heap_pages(virt_start: u64, size: u64, fa: &mut FrameAllocator) {
 // User pages (for memory::user)
 // ========================================================================
 
-/// Map one 4 KiB user page `va` → `pa`
-pub fn map_user_page(va: u64, pa: u64, writable: bool, executable: bool) -> Result<(), &'static str> {
-    let mut flags = Flags::PRESENT | Flags::USER_ACCESSIBLE;
-    if writable {
-        flags |= Flags::WRITABLE;
+/// PML4 slot holding the user window (memory::user::USER_BASE)
+const USER_PML4_SLOT: usize = ((crate::memory::user::USER_BASE >> 39) & 0x1FF) as usize;
+
+const PTE_PRESENT: u64 = 1 << 0;
+const PTE_WRITABLE: u64 = 1 << 1;
+const PTE_USER: u64 = 1 << 2;
+const PTE_HUGE: u64 = 1 << 7;
+const PTE_NX: u64 = 1 << 63;
+const PTE_ADDR: u64 = 0x000F_FFFF_FFFF_F000;
+
+/// The kernel's own PML4 (the bootloader's), captured at boot
+static KERNEL_ROOT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Root currently loaded in each CPU's CR3
+static ACTIVE_ROOT: [core::sync::atomic::AtomicU64; crate::scheduler::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::scheduler::MAX_CPUS];
+
+fn kernel_root() -> u64 {
+    use core::sync::atomic::Ordering;
+    let r = KERNEL_ROOT.load(Ordering::Relaxed);
+    if r != 0 {
+        return r;
     }
-    if !executable {
-        flags |= Flags::NO_EXECUTE;
-    }
-    crate::memory::heap::with_frame_allocator(|fa| {
-        let mut adapter = page_table::BumpFrameAllocator::new(fa);
-        unsafe {
-            page_table::map_page(
-                Page::containing_address(VirtAddr::new(va)),
-                PhysFrame::containing_address(PhysAddr::new(pa)),
-                flags,
-                &mut adapter,
-            )
-        }
-    })
-    .ok_or("frame allocator not initialized")?
+    let (frame, _) = x86_64::registers::control::Cr3::read();
+    let r = frame.start_address().as_u64();
+    KERNEL_ROOT.store(r, Ordering::Relaxed);
+    r
 }
 
-/// Whether `va` is mapped: None if not, else (user-accessible, writable)
+fn table(phys: u64) -> *mut u64 {
+    phys_to_virt(phys) as *mut u64
+}
+
+fn alloc_zeroed_frame() -> Option<u64> {
+    let pa = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_frame())??;
+    unsafe { core::ptr::write_bytes(phys_to_virt(pa), 0, FRAME_SIZE as usize) };
+    Some(pa)
+}
+
+/// Create a user address space: a fresh PML4 sharing every kernel entry
+/// (so kernel code, heap, and the physical window look identical in all
+/// spaces) with its own, initially empty, user-window slot. Returns the
+/// PML4's physical address.
+pub fn new_address_space() -> Result<u64, &'static str> {
+    let root = alloc_zeroed_frame().ok_or("out of memory for a page table")?;
+    let kernel = table(kernel_root());
+    let new = table(root);
+    for i in 0..512 {
+        if i != USER_PML4_SLOT {
+            unsafe { *new.add(i) = *kernel.add(i) };
+        }
+    }
+    Ok(root)
+}
+
+/// Walk `root` to the PTE for `va`, creating user-accessible tables
+unsafe fn walk_create(root: u64, va: u64) -> Option<*mut u64> {
+    let mut t = table(root);
+    for level in (1..4).rev() {
+        let e = t.add(((va >> (12 + 9 * level)) & 0x1FF) as usize);
+        if *e & PTE_PRESENT == 0 {
+            let pa = alloc_zeroed_frame()?;
+            *e = pa | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+        } else if *e & PTE_HUGE != 0 {
+            return None;
+        }
+        t = table(*e & PTE_ADDR);
+    }
+    Some(t.add(((va >> 12) & 0x1FF) as usize))
+}
+
+/// Map one 4 KiB user page `va` → `pa` in address space `root`
+pub fn map_user_page(root: u64, va: u64, pa: u64, writable: bool, executable: bool) -> Result<(), &'static str> {
+    let mut pte = (pa & PTE_ADDR) | PTE_PRESENT | PTE_USER;
+    if writable {
+        pte |= PTE_WRITABLE;
+    }
+    if !executable {
+        pte |= PTE_NX;
+    }
+    unsafe {
+        let e = walk_create(root, va).ok_or("out of memory for page tables")?;
+        if *e & PTE_PRESENT != 0 {
+            return Err("page already mapped");
+        }
+        *e = pte;
+    }
+    Ok(())
+}
+
+/// Tear down a user address space: free every frame mapped in its user
+/// window, the window's page tables, and the PML4 itself. Returns the
+/// number of frames freed. The space must not be loaded on any CPU.
+pub fn free_address_space(root: u64) -> usize {
+    unsafe fn free_level(t: u64, level: u32, freed: &mut usize) {
+        for i in 0..512 {
+            let e = *table(t).add(i);
+            if e & PTE_PRESENT == 0 {
+                continue;
+            }
+            if level > 1 {
+                free_level(e & PTE_ADDR, level - 1, freed);
+            }
+            free_frame(e & PTE_ADDR);
+            *freed += 1;
+        }
+    }
+    let mut freed = 0;
+    unsafe {
+        let top = *table(root).add(USER_PML4_SLOT);
+        if top & PTE_PRESENT != 0 {
+            free_level(top & PTE_ADDR, 3, &mut freed);
+            free_frame(top & PTE_ADDR);
+            freed += 1;
+        }
+    }
+    free_frame(root);
+    freed + 1
+}
+
+fn free_frame(pa: u64) {
+    crate::memory::heap::with_frame_allocator(|fa| fa.deallocate_frame(pa));
+}
+
+/// Load `root` (0 = the kernel's own tables) into this CPU's CR3, if it
+/// isn't loaded already. Kernel mappings are identical in every space, so
+/// this is safe from kernel code at any point.
+pub fn switch_address_space(cpu: usize, root: u64) {
+    use core::sync::atomic::Ordering;
+    let target = if root == 0 { kernel_root() } else { root };
+    if ACTIVE_ROOT[cpu].load(Ordering::Relaxed) == target {
+        return;
+    }
+    let (_, flags) = x86_64::registers::control::Cr3::read();
+    unsafe {
+        x86_64::registers::control::Cr3::write(
+            PhysFrame::containing_address(PhysAddr::new(target)),
+            flags,
+        );
+    }
+    ACTIVE_ROOT[cpu].store(target, Ordering::Relaxed);
+}
+
+/// Whether `va` is mapped in the *current* address space: None if not,
+/// else (user-accessible, writable)
 pub fn query_page(va: u64) -> Option<(bool, bool)> {
     page_table::query_page(VirtAddr::new(va)).map(|f| {
         (f.contains(Flags::USER_ACCESSIBLE), f.contains(Flags::WRITABLE))

@@ -1,0 +1,17 @@
+[package]
+name = "mmurtl-user"
+version = "0.1.0"
+edition = "2021"
+description = "MMURTL/RS user programs: ELF binaries loaded from the exFAT disk"
+
+[lib]
+name = "mmurtl"
+path = "src/lib.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+debug = false
+
+[profile.dev]
+panic = "abort"

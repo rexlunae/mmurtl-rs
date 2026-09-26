@@ -31,7 +31,7 @@ is common to both unless marked.
 - ✅ Network: virtio-net driver with a live ARP round trip through QEMU user-net
 - ✅ **(arm64)** Boots on QEMU `virt` from an ELF at EL1 (or EL2); PL011
   console; RAM, CPUs, and devices from the device tree
-- ✅ **(arm64)** Identity-mapped MMU, EL1 vector table, GICv2 + generic
+- ✅ **(arm64)** Identity-mapped MMU, EL1 vector table, GICv2/GICv3 + generic
   timer tick, PSCI multi-core boot, virtio-mmio (legacy + modern)
 - ✅ **(amd64)** Input: PS/2 keyboard driver — scancode set 1 → ASCII with shift, char queue
 - ✅ Filesystem: exFAT — full API: subdirectories, mkdir, create, read,
@@ -49,6 +49,8 @@ is common to both unless marked.
 
 ```bash
 # amd64: build the kernel and create BIOS/UEFI boot images
+# (runs tools/patch-bootloader-deps.sh first: bootloader 0.11.17's stage
+# builds need two small source patches to compile on the pinned nightly)
 make bios
 
 # arm64: build the kernel ELF (QEMU loads it directly)
@@ -60,13 +62,15 @@ make arm64
 ### arm64
 
 ```bash
-make run-arm64              # QEMU virt, GICv2, 4 CPUs (ARM64_SMP=N to change)
+make run-arm64              # QEMU virt, GICv3, 4 CPUs (ARM64_SMP=N, ARM64_GIC=2|3)
+make arm64-image            # target/mmurtl-rs-arm64.Image (Linux Image format)
 
 # With a disk and NIC (virtio-mmio):
-qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a72 -smp 4 -m 256M \
+qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -smp 4 -m 256M \
     -nographic -kernel target/aarch64-unknown-none-softfloat/release/mmurtl-rs \
     -drive if=none,format=raw,file=test-disk.img,id=hd0 -device virtio-blk-device,drive=hd0 \
     -netdev user,id=n0 -device virtio-net-device,netdev=n0
+# ...or over PCIe instead: -device virtio-blk-pci,drive=hd0 -device virtio-net-pci,netdev=n0
 ```
 
 ### amd64
@@ -99,16 +103,19 @@ src/
 ├── memory/            — frame allocator, heap, user window
 ├── scheduler/         — SMP scheduler + blocking RQB IPC primitives
 ├── ipc/               — service registry + IPC demo
-├── virtio/            — virtqueues + Transport trait, blk + net drivers
+├── pci.rs             — PCI enumeration + BAR assignment
+├── virtio/            — virtqueues + Transport trait, blk + net, virtio-pci
 ├── fs/exfat.rs        — exFAT filesystem
 └── arch/
     ├── mod.rs         — the architecture interface
     ├── amd64/         — bootloader entry, 16550, GDT/IDT, APIC, ACPI,
-    │                    SMP trampoline, paging, PCI, virtio-pci, xHCI,
+    │                    SMP trampoline, paging, port I/O, xHCI,
     │                    int 0x80, ring-3 programs
     └── arm64/         — _start + linker script, PL011, device tree, MMU,
-                         vectors, GICv2 + timer, PSCI SMP, virtio-mmio,
+                         vectors, GICv2/v3 + timer, PSCI SMP, virtio-mmio, PCIe,
                          svc #0, EL0 programs
+user/                  — user-program runtime + Rust programs (ELF)
+tools/                 — boot-image builder, disk-image + dependency scripts
 ```
 
 ## Architecture
@@ -363,8 +370,7 @@ error-path checker:
 ```
 Verified at `-smp 1`, `2`, and `4`, and across six concurrent 4-CPU boots.
 
-Limitations: no send timeouts, exited tasks' stacks are not reclaimed
-yet, and the service registry is a flat list.
+Limitations: no send timeouts, and the service registry is a flat list.
 
 ## Userspace + Syscalls (Phase 10)
 
@@ -424,10 +430,65 @@ Verified at `-smp 1` (the spinner can only finish alongside everything
 else if the timer preempts ring 3), `-smp 2`, and `-smp 4`, including
 concurrent runs.
 
-Limitations: all tasks share one page table, so user programs are
-isolated from the kernel but not yet from each other (per-task address
-spaces are the next step); programs are flat binaries, not ELF; exited
-tasks' memory is not reclaimed.
+### Per-task address spaces and reclamation
+
+Every user task gets **its own address space**: a page-table root that
+shares all of the kernel's mappings but whose user window holds only that
+task's pages. The scheduler loads the incoming task's space on every
+switch (CR3 on amd64, TTBR0 + a local TLB flush on arm64; kernel tasks
+run in the kernel's own tables). A program that reaches for another
+program's memory now finds nothing mapped there:
+```
+[USER] T23 "rogue_peek" killed: #PF not-present page at pc=0x640000601016          (amd64)
+[USER] T23 "rogue_peek" killed: data abort (translation fault) at pc=0x640000601018 (arm64)
+```
+
+**Exited tasks are reclaimed.** Kernel stacks now come from the frame
+allocator, and a reaper task frees an exited task's stack, user pages,
+page tables, and user-window slot once no CPU is running it — which is
+guaranteed after it has been switched out, since every switch loads the
+incoming task's space. Task slots are reused. A churn test runs 16
+short-lived user tasks and checks that every frame comes back (heap
+growth is accounted for separately, so it can't mask a leak):
+```
+[USER]   16 churn tasks reclaimed (272 frames)      ✓
+```
+
+### ELF programs from disk (written in Rust)
+
+User programs no longer have to be assembly blobs inside the kernel. The
+`user/` crate is a small runtime (the syscall ABI for both
+architectures, RQB messages, `println!`, `entry!`) plus programs written
+in ordinary Rust, built as ELF executables linked into the user window.
+At boot the kernel loads every `*.ELF` in `/BIN` on the exFAT disk,
+each into its own address space:
+
+```bash
+make user && make disk          # amd64: builds user/ and disk-amd64.img
+make user-arm64 && make disk-arm64
+```
+```
+[USER] Loaded /BIN/HELLO.ELF (19104 bytes) as T24, entry 0x640003000000
+[USER T24 CPL3] Rust ELF program running as task 24
+[USER T24 CPL3] sysinfo (task 15) replied, status 0: MMURTL/RS v0.1.0: 4 CPUs, up 0 ms
+[USER T24 CPL3] longest Collatz chain below 20000 starts at 17647 (279 steps)
+[USER T25 CPL3] sieve: 1229 primes below 10000 (data segment says 8)
+[USER]   2 ELF programs from /BIN ran to completion ✓
+[USER]   ELF loader: accepts valid, rejects 5 bad ✓
+```
+
+The loader treats the image as untrusted: it checks the ELF identity,
+type, and machine, requires every `PT_LOAD` segment to lie inside the
+user window (below the stack) and inside the file, refuses
+writable+executable segments and segments that share a page, and
+requires the entry point to be in an executable segment — all before
+mapping anything. Segments are mapped with exactly their permissions,
+zero-filled past their file data (`.bss`).
+
+Limitations: the kernel heap is a bump allocator, so small kernel-side
+task metadata is not recycled; no ASIDs on arm64 (each address-space
+switch flushes the local TLB); ELF programs are static executables (no
+dynamic linking or relocation).
 
 ## Architecture ports (amd64 + arm64)
 
@@ -443,17 +504,18 @@ own boot path.
 | | amd64 | arm64 |
 |---|---|---|
 | Boot | `bootloader` crate (BIOS/UEFI), long mode | ELF at 0x4020_0000, EL1 (drops from EL2) |
-| Discovery | ACPI MADT, PCI | Device tree (RAM, CPUs, PSCI, GIC, UART, virtio) |
+| Discovery | ACPI MADT, PCI | Device tree (RAM, CPUs, PSCI, GIC, UART, virtio, PCIe host bridge) |
 | Console | 16550 COM1 | PL011 (RX interrupt feeds console input) |
 | Paging | bootloader tables + offset window | own identity map; EL0/EL1 AP bits, PXN/UXN |
-| Interrupts | IDT; PIC → Local/I/O APIC | EL1 vector table; GICv2 |
+| Interrupts | IDT; PIC → Local/I/O APIC | EL1 vector table; GICv2 or GICv3 (redistributors, ICC system registers) |
 | Tick | LAPIC timer (PIT fallback) | generic virtual timer (PPI 27) |
-| Reschedule IPI | vector 0x30 | SGI 1 |
+| Reschedule IPI | vector 0x30 | SGI 1 (GICv3: routed by MPIDR affinity) |
 | Yield | `int 0x31` | `svc` from EL1 |
 | Multi-core | INIT-SIPI-SIPI trampoline | PSCI `CPU_ON` (HVC/SMC per DT) |
 | Syscalls | `int 0x80` (DPL 3), TSS.RSP0 per task | `svc #0` from EL0 (x8 = number) |
 | User isolation | U/S bit, NX, SMAP-aware | AP[7:6], PXN/UXN; UMA=0 traps DAIF |
-| virtio | legacy virtio-pci (port I/O) | virtio-mmio v1 (legacy) and v2 |
+| PCI | config via 0xCF8/0xCFC; firmware-assigned BARs | ECAM from the DT; kernel assigns BARs; I/O space via the bridge window |
+| virtio | legacy virtio-pci (port I/O) | virtio-mmio v1 (legacy) and v2, and the same legacy virtio-pci driver |
 
 Both ports run the same boot demo end to end — storage self-test, ARP,
 exFAT, every IPC check, and every userspace check (including the rogue
@@ -475,9 +537,58 @@ The same exFAT disk image can be booted alternately on both: its
 per-boot log keeps counting across architectures and stays
 `fsck.exfat`-clean.
 
-arm64 limitations: GICv2 only (so at most 8 CPUs; run QEMU with
-`gic-version=2`), RAM beyond the first 4 GiB above 1 GiB is ignored,
-and no PCI (devices come from virtio-mmio).
+With GICv3 the port runs well past GICv2's 8-CPU limit — verified at
+16 and 32 CPUs, where CPUs 16-31 sit in a second affinity cluster
+(MPIDR 0x100+) and are reached by affinity-routed SGIs:
+```
+[GIC] GICv3: distributor 0x8000000, redistributors 0x80a0000 (+0xf60000); timer INTID 27 @ 62 MHz
+[SMP] CPU 16 online (MPIDR 0x100), scheduling
+[SMP] 32 CPU(s) online
+```
+
+PCI enumeration and the legacy virtio-pci transport are shared code: on
+arm64 the kernel maps the ECAM window, sizes and assigns BARs from the
+host bridge's I/O and 32-bit memory windows, and reaches PCI I/O space
+through the bridge's memory-mapped I/O window — so `virtio-blk-pci` and
+`virtio-net-pci` work there exactly as on amd64:
+```
+[PCI] ECAM host bridge at 0x4010000000 (buses 0-255); I/O window 0x3eff0000, MMIO window 0x10000000; 6 BARs assigned
+[BLK] virtio-blk (legacy virtio-pci) ready: 32768 sectors (16384 KiB), queue size 256
+```
+
+### arm64 on real hardware
+
+Steps toward booting on physical boards (QEMU can boot these paths but
+does not model caches, so the cache fixes are unverified on silicon):
+
+- **Standard `Image` format**: the kernel starts with the arm64 Linux
+  `Image` header, so U-Boot `booti`, firmware, or `qemu -kernel` can load
+  `make arm64-image`'s output and pass the device tree in `x0` (the ELF
+  still boots too).
+- **Cache maintenance**: the kernel image range is invalidated to the
+  point of coherency before caches are enabled (so no pre-boot cache line
+  can shadow `.bss`, the stack, or the page tables written with caches
+  off); every CPU invalidates its I-cache after enabling the MMU; and
+  code the kernel copies into user pages is cleaned to the point of
+  unification with the I-caches invalidated before it runs — ARM's
+  I-cache does not snoop data writes, so without this a user program
+  could execute stale instructions.
+- Already hardware-shaped: everything comes from the device tree (RAM,
+  CPUs, GIC v2/v3, UART, timer interrupt, PCIe), PSCI via HVC or SMC,
+  EL2 entry.
+
+What a Raspberry Pi 4 would still need (not done, and untested on real
+hardware): a **relocatable load address** — the kernel is linked and
+identity-mapped at 0x4020_0000 (RAM at 1 GiB, as on QEMU `virt`), while
+the Pi's RAM starts at 0; **spin-table SMP** (the Pi firmware's default
+secondary-CPU release method; only PSCI is implemented); and UART
+clock/pin setup if the firmware doesn't leave the PL011 configured. The
+Pi 4's GIC-400 is a GICv2 and is supported; a Pi 3 has no GIC at all.
+
+arm64 limitations: RAM beyond the first 4 GiB above 1 GiB is ignored;
+GICv3 support covers the first redistributor region (no ITS/LPIs); PCI
+covers bus 0 (no bridges) and legacy virtio-pci (no modern
+capability-based transport).
 
 ## USB Driver (xHCI)
 

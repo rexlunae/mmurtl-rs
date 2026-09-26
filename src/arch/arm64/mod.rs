@@ -2,8 +2,8 @@
 //!
 //! Boot from an ELF at EL1 (dropping from EL2 if needed); PL011 serial;
 //! the device tree for RAM, CPUs, and devices; an identity-mapped MMU
-//! with EL0/EL1 permission bits; an EL1 vector table; GICv2 + the generic
-//! timer; PSCI multi-core boot; virtio-mmio devices; EL0 userspace via
+//! with EL0/EL1 permission bits; an EL1 vector table; GICv2/GICv3 + the generic
+//! timer; PSCI multi-core boot; virtio-mmio and PCIe (ECAM) devices; EL0 userspace via
 //! `svc #0`.
 
 pub mod boot;
@@ -12,19 +12,31 @@ pub mod fdt;
 pub mod gic;
 pub mod memory;
 pub mod mmu;
+pub mod pcie;
 pub mod serial;
 pub mod smp;
+pub mod timer;
 pub mod user_programs;
 pub mod virtio_mmio;
 
 use core::arch::asm;
 
 pub use exceptions::{kernel_context, user_context, TaskContext};
+pub use pcie::{
+    io_read16, io_read32, io_read8, io_write16, io_write32, io_write8, pci_config_read,
+    pci_config_write,
+};
 pub use memory::{heap_extend, heap_init, phys_to_virt, user_access_begin, user_access_end};
-pub use mmu::{map_user_page, query_page};
+pub use mmu::{
+    free_address_space, map_user_page, new_address_space, query_page, switch_address_space,
+    sync_icache,
+};
 
 /// Architecture name for the boot log
 pub const NAME: &str = "arm64";
+
+/// ELF e_machine for user programs (EM_AARCH64)
+pub const ELF_MACHINE: u16 = 0xB7;
 
 /// How user code enters the kernel
 pub const SYSCALL_MECHANISM: &str = "svc #0 from EL0";
@@ -73,16 +85,17 @@ pub fn set_cpu_index(cpu: usize) {
     unsafe { asm!("msr tpidr_el1, {}", in(reg) cpu as u64) };
 }
 
-/// The calling CPU's GIC CPU interface number (the SGI target)
+/// The calling CPU's IPI target (GICv2 interface number or GICv3
+/// affinity)
 pub fn hw_cpu_id() -> u32 {
-    gic::cpu_interface_id()
+    gic::cpu_target_id()
 }
 
 pub fn ipi_available() -> bool {
     true
 }
 
-/// Kick the CPU with GIC interface number `hw_id` into its scheduler
+/// Kick the CPU identified by `hw_id` into its scheduler
 pub fn send_resched_ipi(hw_id: u32) {
     gic::send_resched(hw_id);
 }
@@ -97,11 +110,11 @@ pub fn cpus_online() -> usize {
 
 /// Start the calling CPU's scheduler tick (the EL1 virtual timer)
 pub fn start_tick(hz: u32, _boot_cpu: bool) {
-    gic::start_timer(hz);
+    timer::start(hz);
 }
 
 pub fn delay_ms(ms: u32) {
-    gic::delay_ms(ms);
+    timer::delay_ms(ms);
 }
 
 /// Give up the CPU: `svc` from EL1 enters the vector table's yield path

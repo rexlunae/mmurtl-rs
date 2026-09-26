@@ -168,9 +168,9 @@ user_rogue_read_start:
     int $0x80
     xorl %eax, %eax
     int $0x80
-rr_msg: .ascii "rogue_read: reading kernel memory..."
+rr_msg: .ascii "rogue_read: reading memory it does not own..."
 rr_msg_end:
-rr_bad: .ascii "rogue_read: READ KERNEL MEMORY (protection failure!)"
+rr_bad: .ascii "rogue_read: READ FOREIGN MEMORY (protection failure!)"
 rr_bad_end:
     .globl user_rogue_read_end
 user_rogue_read_end:
@@ -231,6 +231,17 @@ rq_bad_end:
     .globl user_rogue_ptr_end
 user_rogue_ptr_end:
 
+    # ---------------------------------------------------------------
+    # exit_only: exit immediately (for task-churn tests)
+    # ---------------------------------------------------------------
+    .globl user_exit_start
+user_exit_start:
+    xorl %eax, %eax
+    int $0x80
+    ud2
+    .globl user_exit_end
+user_exit_end:
+
     .popsection
     "#,
     options(att_syntax)
@@ -249,6 +260,8 @@ extern "C" {
     static user_rogue_priv_end: u8;
     static user_rogue_ptr_start: u8;
     static user_rogue_ptr_end: u8;
+    static user_exit_start: u8;
+    static user_exit_end: u8;
 }
 
 
@@ -271,3 +284,4 @@ program!(spinner, user_spin_start, user_spin_end);
 program!(rogue_read, user_rogue_read_start, user_rogue_read_end);
 program!(rogue_priv, user_rogue_priv_start, user_rogue_priv_end);
 program!(rogue_ptr, user_rogue_ptr_start, user_rogue_ptr_end);
+program!(exit_only, user_exit_start, user_exit_end);

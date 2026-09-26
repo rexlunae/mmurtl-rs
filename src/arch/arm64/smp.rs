@@ -114,7 +114,7 @@ pub fn boot_secondaries(info: &MachineInfo) {
                 ok = true;
                 break;
             }
-            super::gic::delay_ms(1);
+            super::timer::delay_ms(1);
         }
         if ok {
             next_cpu += 1;
