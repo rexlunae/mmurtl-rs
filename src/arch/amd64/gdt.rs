@@ -39,8 +39,17 @@ pub fn set_kernel_stack(cpu: usize, stack_top: u64) {
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 const STACK_SIZE: usize = 4096 * 16; // 64KB
 
-/// Double-fault IST stack
-static DOUBLE_FAULT_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+/// Backing storage for an IST stack (the CPU writes the exception frame
+/// at its top, so it must be writable and 16-byte aligned)
+#[repr(C, align(16))]
+struct IstStack([u8; STACK_SIZE]);
+
+/// The BSP's double-fault IST stack. It must be a `static mut`: an
+/// immutable static lands in `.rodata`, which the bootloader maps
+/// read-only, and the CPU's frame push on a double fault would then
+/// fault again and triple-fault the machine. (APs allocate theirs from
+/// the heap in `init_ap`.)
+static mut DOUBLE_FAULT_STACK: IstStack = IstStack([0; STACK_SIZE]);
 
 /// The BSP's Task State Segment. Mutable (RSP0 changes per user task),
 /// so it lives in a `static mut` rather than behind a shared reference;
@@ -59,7 +68,7 @@ static GDT: Lazy<InnerGdt> = Lazy::new(|| {
     let user_code = gdt.add_entry(Descriptor::user_code_segment());
     let tss: &'static TaskStateSegment = unsafe {
         let t = &mut *core::ptr::addr_of_mut!(BSP_TSS);
-        let stack_top = &DOUBLE_FAULT_STACK as *const _ as u64 + STACK_SIZE as u64;
+        let stack_top = core::ptr::addr_of!(DOUBLE_FAULT_STACK) as u64 + STACK_SIZE as u64;
         t.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(stack_top);
         &*core::ptr::addr_of!(BSP_TSS)
     };
