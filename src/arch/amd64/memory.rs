@@ -330,22 +330,21 @@ pub fn identity_map_executable(phys: u64) {
     use x86_64::structures::paging::page_table::PageTableFlags as Flags;
     use x86_64::{PhysAddr, VirtAddr};
 
-    if page_table::translate_virtual(VirtAddr::new(phys)).is_some() {
-        return;
-    }
     crate::memory::heap::with_frame_allocator(|fa| {
         let mut adapter = page_table::BumpFrameAllocator::new(fa);
         unsafe {
-            page_table::map_page(
-                Page::containing_address(VirtAddr::new(phys)),
-                PhysFrame::containing_address(PhysAddr::new(phys)),
-                Flags::PRESENT | Flags::WRITABLE,
-                &mut adapter,
-            )
-            .expect("Failed to identity-map trampoline page");
+            let va = VirtAddr::new(phys);
+            if page_table::translate_virtual(va).is_none() {
+                page_table::map_page(Page::containing_address(va),
+                    PhysFrame::containing_address(PhysAddr::new(phys)), Flags::PRESENT, &mut adapter)
+                    .expect("Failed to identity-map trampoline page");
+            }
+            let pte = page_table::leaf_page(va, &mut adapter).expect("trampoline leaf");
+            assert_eq!(pte.addr().as_u64(), phys);
+            pte.set_flags(Flags::PRESENT); // RX, supervisor only
+            x86_64::instructions::tlb::flush(va);
         }
-    })
-    .expect("Frame allocator not initialized");
+    }).expect("Frame allocator not initialized");
 }
 
 /// Mirror the loaded image's effective read-only permissions into its

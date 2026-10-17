@@ -813,3 +813,11 @@ pub fn sleep_ms(ms: u64) {
         yield_now();
     }
 }
+
+/// Snapshot for the BSP's boot-only TLB shootdown, after CPU admission closes.
+#[cfg(target_arch = "x86_64")]
+pub fn boot_cpu_targets() -> [Option<u32>; MAX_CPUS] {
+    with_scheduler(|sched| core::array::from_fn(|i| {
+        if sched.cpus[i].registered { Some(sched.cpus[i].hw_id) } else { None }
+    }))
+}

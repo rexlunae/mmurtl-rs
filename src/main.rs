@@ -99,9 +99,11 @@ pub fn kernel_run() -> ! {
         serial::write_str("[TEST] Heap allocation OK!\n");
     }
 
+    #[cfg(target_arch = "aarch64")]
+    { arch::mmu::audit_kernel_wx(); arch::wx::self_test(); }
     memory::user::uaccess_self_test();
     #[cfg(target_arch = "x86_64")]
-    arch::protection::self_test();
+    { arch::wx::audit_kernel_wx(); arch::protection::self_test(); }
     #[cfg(target_arch = "x86_64")]
     arch::interrupts::nospec_interrupt_self_test();
 

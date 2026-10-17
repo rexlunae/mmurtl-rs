@@ -161,7 +161,6 @@ pub fn test_fixup(pc: u64, address: u64, error: u64) -> Option<u64> {
 
 pub fn self_test() {
     let common = COMMON.load(Ordering::Acquire);
-    if common & (SMAP | SMEP) == 0 { return; }
     let img = match crate::memory::user::load_program(&[0xc3]) { // RET
         Ok(img) => img,
         Err(_) => { crate::serial::write_line("[TEST] access protections skipped: no test memory"); return; }
@@ -171,8 +170,31 @@ pub fn self_test() {
     let pa = super::page_table::translate_virtual(x86_64::VirtAddr::new(text)).expect("test text unmapped");
     let alias = super::page_table::phys_to_virt(pa).as_u64();
     let original = unsafe { (alias as *const u8).read_volatile() };
-    pass &= unsafe { super::uaccess::copy_to_user(alias, [original ^ 1].as_ptr(), 1) } == 1;
+    pass &= unsafe { super::uaccess::copy_to_user(alias, [original].as_ptr(), 1) } == 1;
     pass &= unsafe { (alias as *const u8).read_volatile() } == original;
+    pass &= unsafe { super::uaccess::copy_to_user(text, [original].as_ptr(), 1) } == 1;
+    let user_pa = super::without_interrupts(|| {
+        super::switch_address_space(0, img.space);
+        let pa = super::page_table::translate_virtual(x86_64::VirtAddr::new(img.entry)).expect("user code");
+        super::switch_address_space(0, 0);
+        pa
+    });
+    let user_alias = super::page_table::phys_to_virt(user_pa).as_u64();
+    super::without_interrupts(|| {
+        EXEC_TEST_ADDR.store(user_alias, Ordering::Release);
+        pass &= unsafe { protection_smep_probe(user_alias) } == 1;
+        EXEC_TEST_ADDR.store(0, Ordering::Release);
+    });
+    if let Some(frame) = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_zeroed_frame()).flatten() {
+        let heap_alias = super::page_table::phys_to_virt(x86_64::PhysAddr::new(frame)).as_u64();
+        unsafe { (heap_alias as *mut u8).write_volatile(0xc3); }
+        super::without_interrupts(|| {
+            EXEC_TEST_ADDR.store(heap_alias, Ordering::Release);
+            pass &= unsafe { protection_smep_probe(heap_alias) } == 1;
+            EXEC_TEST_ADDR.store(0, Ordering::Release);
+        });
+        crate::memory::heap::with_frame_allocator(|fa| fa.deallocate_frame(frame));
+    } else { crate::serial::write_line("[MMU] Heap NX probe skipped: out of memory"); }
     super::without_interrupts(|| {
         super::switch_address_space(0, img.space);
         if common & SMAP != 0 {
@@ -187,7 +209,8 @@ pub fn self_test() {
         super::switch_address_space(0, 0);
     });
     crate::memory::user::release(img.space, img.slot);
-    assert!(pass, "SMEP/SMAP fault probes failed");
+    assert!(pass, "kernel W^X / access protection fault probes failed");
+    crate::serial::write_line("[MMU] W^X fault probes passed (text, physmap RO, heap NX, ret2dir)");
     crate::serial::write_line("[TEST] access protections: inherited AC cleared, unguarded read/execute and physmap writes denied");
 }
 

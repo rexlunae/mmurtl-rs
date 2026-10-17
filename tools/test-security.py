@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--bootargs', help='mitigation policy / kernel boot arguments')
     parser.add_argument('--uefi', action='store_true')
     parser.add_argument('--el2', action='store_true')
+    parser.add_argument('--raw-image', action='store_true', help='boot the relocated arm64 Image (make arm64-image)')
     parser.add_argument('--nmi', action='store_true', help='inject an amd64 NMI and verify the shell remains responsive')
     parser.add_argument('--no-firmware-seed', action='store_true', help='disable QEMU arm64 DT seed properties')
     parser.add_argument('--rng', action='store_true', help='attach a host-backed virtio entropy device')
@@ -33,6 +34,7 @@ def main():
     if args.uefi and args.arch != 'amd64': parser.error('--uefi requires amd64')
     if args.no_firmware_seed and args.arch != 'arm64': parser.error('--no-firmware-seed requires arm64')
     if args.el2 and args.arch != 'arm64': parser.error('--el2 requires arm64')
+    if args.raw_image and args.arch != 'arm64': parser.error('--raw-image requires arm64')
     if args.nmi and args.arch != 'amd64': parser.error('--nmi requires amd64')
     with tempfile.TemporaryDirectory(prefix='mmurtl-security-') as temporary:
         if args.arch == 'amd64':
@@ -46,7 +48,7 @@ def main():
         else:
             command = ['qemu-system-aarch64', '-machine', 'virt,gic-version=3' + (',virtualization=on' if args.el2 else '') + (',dtb-randomness=off' if args.no_firmware_seed else ''),
                        '-cpu', args.cpu or 'cortex-a72', '-nographic', '-monitor', 'none',
-                       '-kernel', str(ROOT / 'target/aarch64-unknown-none-softfloat/release/mmurtl-rs')]
+                       '-kernel', str(ROOT / ('target/mmurtl-rs-arm64.Image' if args.raw_image else 'target/aarch64-unknown-none-softfloat/release/mmurtl-rs'))]
         if args.cpu and args.arch == 'amd64': command += ['-cpu', args.cpu]
         qmp_path = str(Path(temporary) / 'qmp.sock')
         if args.nmi: command += ['-qmp', f'unix:{qmp_path},server=on,wait=off']

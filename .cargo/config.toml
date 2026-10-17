@@ -4,7 +4,7 @@
 # arm64 kernel: a position-independent executable that relocates itself
 # at boot (see src/arch/arm64/boot.rs), so loaders may place it anywhere
 [target.aarch64-unknown-none-softfloat]
-rustflags = ["--cfg", 'chacha20_backend="soft"',"-C", "relocation-model=pie", "-C", "link-arg=-pie", "-C", "link-arg=--no-dynamic-linker", "-C", "link-arg=-znorelro"]
+rustflags = ["--cfg", 'chacha20_backend="soft"', "-C", "relocation-model=pie", "-C", "link-arg=-pie", "-C", "link-arg=--no-dynamic-linker"]
 
 # Kernel FP/SIMD state is disabled; cryptography must use scalar code.
 [target.x86_64-unknown-none]

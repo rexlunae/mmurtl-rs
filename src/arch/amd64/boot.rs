@@ -101,6 +101,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::write_str("[INIT] SMP...\n");
     super::smp::boot_aps();
     super::protection::finalize();
+    super::smp::finalize_trampoline();
     crate::security::finalize();
     super::store_bypass::init();
     crate::security::report();
