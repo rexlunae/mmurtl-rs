@@ -11,9 +11,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     use crate::serial;
     // Initialize serial early for debugging, then the banner
     super::fpu::init();
+    super::set_user_counter_access(false);
     serial::init();
     serial::write_line("[FPU] user FP/SIMD disabled on every CPU (no context switching yet)");
     crate::print_banner();
+    crate::serial::write_line("[TIME] user high-resolution counters: per-task (default off)");
 
     // Log boot info — memory regions
     let region_count = boot_info.memory_regions.len();

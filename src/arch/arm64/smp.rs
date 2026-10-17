@@ -161,6 +161,7 @@ pub fn boot_secondaries(info: &MachineInfo) {
 #[no_mangle]
 extern "C" fn arm64_secondary_main(cpu: u64) -> ! {
     super::exceptions::init();
+    super::init_user_counter_policy();
     super::irq::init_cpu();
     crate::scheduler::register_ap(cpu as usize);
     CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
