@@ -53,6 +53,8 @@ primary_entry:
     cbnz x1, park
 
     bl drop_to_el1
+    msr cpacr_el1, xzr         // FPEN/ZEN/SMEN: trap FP/SIMD/SVE/SME at EL1
+    isb
 
     // ---- Self-relocation (MMU off; adrp/adr are PC-relative) ----
     adr x20, _start                 // where we actually are
@@ -134,6 +136,17 @@ drop_to_el1:
     cmp x9, #3
     b.ne 7f
     // ---- EL3 ----
+    // Route optional vector traps to EL1, where the task can be killed.
+    mov x13, #0
+    ubfx x14, x10, #32, #4      // SVE
+    cbz x14, 11f
+    orr x13, x13, #(1 << 8)    // CPTR_EL3.EZ
+11: mrs x14, id_aa64pfr1_el1
+    ubfx x14, x14, #24, #4      // SME
+    cbz x14, 12f
+    orr x13, x13, #(1 << 12)   // CPTR_EL3.ESM
+12: msr cptr_el3, x13
+
     cbz x11, 6f
     mov x13, #0xF               // ICC_SRE_EL3 = Enable | DIB | DFB | SRE
     msr S3_6_C12_C12_5, x13
@@ -144,6 +157,16 @@ drop_to_el1:
     // ---- EL2 registers (from EL2 itself, or from EL3 on the way down) ----
 7:  mov x13, #(1 << 31)         // HCR_EL2.RW: EL1 is AArch64
     msr hcr_el2, x13
+    mov x13, #0x33ff           // non-VHE RES1, TFP=0 (EL1 owns FP traps)
+    ubfx x14, x10, #32, #4
+    cbz x14, 13f
+    bic x13, x13, #(1 << 8)    // SVE implemented: do not trap it to EL2
+13: mrs x14, id_aa64pfr1_el1
+    ubfx x14, x14, #24, #4
+    cbz x14, 14f
+    bic x13, x13, #(1 << 12)   // SME implemented: do not trap it to EL2
+14: msr cptr_el2, x13
+    isb
     mov x13, #3                 // CNTHCTL_EL2: EL1 physical timer/counter access
     msr cnthctl_el2, x13
     msr cntvoff_el2, xzr
@@ -169,6 +192,8 @@ drop_to_el1:
 secondary_start:
     mov x19, x0
     bl drop_to_el1
+    msr cpacr_el1, xzr         // FPEN/ZEN/SMEN: trap FP/SIMD/SVE/SME at EL1
+    isb
     ldr x1, [x19, #0]           // stack_top
     mov sp, x1
     ldr x1, [x19, #8]           // cpu index
@@ -266,6 +291,7 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
 
     super::serial::set_base(info.uart);
     crate::serial::init();
+    crate::serial::write_line("[FPU] user FP/SIMD/SVE/SME disabled on every CPU (no context switching yet)");
     crate::print_banner();
     super::exceptions::init();
 

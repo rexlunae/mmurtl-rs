@@ -301,6 +301,7 @@ fn wait_for_ap(timeout_ms: u32) -> bool {
 /// First Rust code an AP executes. `cpu_num` comes from the mailbox.
 #[no_mangle]
 pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
+    crate::arch::fpu::init();
     // Per-CPU GDT/TSS/IST, shared IDT, then enable this CPU's LAPIC
     crate::arch::gdt::init_ap(cpu_num as usize);
     crate::arch::interrupts::init_ap();

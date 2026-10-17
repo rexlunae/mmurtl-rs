@@ -10,7 +10,9 @@ use bootloader_api::BootInfo;
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     use crate::serial;
     // Initialize serial early for debugging, then the banner
+    super::fpu::init();
     serial::init();
+    serial::write_line("[FPU] user FP/SIMD disabled on every CPU (no context switching yet)");
     crate::print_banner();
 
     // Log boot info — memory regions

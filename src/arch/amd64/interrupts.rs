@@ -175,8 +175,9 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     panic!("INVALID OPCODE\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn device_not_available_handler(_stack_frame: InterruptStackFrame) {
-    crate::serial::write_line("[#NM] Device not available — FPU task switch needed");
+extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptStackFrame) {
+    if from_user(&stack_frame) { kill_user_task(&stack_frame, "#NM FP/SIMD disabled", None); }
+    panic!("Kernel used disabled FP/SIMD\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn double_fault_handler(
