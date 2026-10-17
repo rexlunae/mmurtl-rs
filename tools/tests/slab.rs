@@ -22,6 +22,12 @@ impl Mock {
 }
 impl Drop for Mock {fn drop(&mut self) {unsafe {dealloc(self.base as *mut u8,self.layout);}}}
 fn main() {
+    assert_eq!(slab::backing_frames(0,2<<20),Some(515));
+    assert_eq!(slab::backing_frames((2<<20)-4096,8192),Some(6));
+    assert_eq!(slab::backing_frames((1<<30)-4096,8192),Some(7));
+    assert_eq!(slab::backing_frames((1<<39)-4096,8192),Some(8));
+    assert_eq!(slab::backing_frames(u64::MAX-4095,4096),None);
+    assert_eq!(slab::backing_frames(1,4096),None);
     let mut mock=Mock::new();
     let mut pointers=Vec::new();
     for domain in 0..slab::DOMAINS {

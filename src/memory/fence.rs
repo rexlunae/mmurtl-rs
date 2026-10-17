@@ -13,6 +13,10 @@ impl Sample {
     const fn new()->Self {Self {state:AtomicUsize::new(0),pointer:AtomicUsize::new(0),base:AtomicUsize::new(0),phys:AtomicUsize::new(0),size:AtomicUsize::new(0),align:AtomicUsize::new(0),domain:AtomicUsize::new(0),alloc_task:AtomicUsize::new(0),alloc_cpu:AtomicUsize::new(0),free_task:AtomicUsize::new(0),free_cpu:AtomicUsize::new(0)}}
 }
 static SAMPLES:[Sample;128]=[const {Sample::new()};128];
+// (live requested bytes, live objects, mapped sample bytes including queue).
+// Never held across page mapping/shootdown or while acquiring the heap lock.
+static COUNTERS:spin::Mutex<(usize,usize,usize)>=spin::Mutex::new((0,0,0));
+pub fn stats()->(usize,usize,usize) {crate::arch::without_interrupts(||*COUNTERS.lock())}
 fn context()->(usize,usize) {crate::arch::without_interrupts(|| {let cpu=crate::arch::cpu_index();(cpu,super::stacks::current_task(cpu) as usize)})}
 pub fn allocate(layout:Layout,domain:usize,force:bool)->Option<*mut u8> {
     // Sample generic/user-sized allocations. Dedicated task and inbox
@@ -24,7 +28,10 @@ pub fn allocate(layout:Layout,domain:usize,force:bool)->Option<*mut u8> {
     let pointer=(stack.virt+stack.size-layout.size().max(1) as u64)&!(layout.align() as u64-1);
     let (cpu,task)=context();
     for (field,value) in [(&sample.pointer,pointer as usize),(&sample.base,stack.virt as usize),(&sample.phys,stack.phys as usize),(&sample.size,layout.size()),(&sample.align,layout.align()),(&sample.domain,domain),(&sample.alloc_cpu,cpu),(&sample.alloc_task,task)] {field.store(value,Ordering::Relaxed);}
-    sample.state.store(LIVE,Ordering::Release);
+    crate::arch::without_interrupts(|| {
+        let mut counts=COUNTERS.lock();counts.0+=layout.size();counts.1+=1;counts.2+=4096;
+        sample.state.store(LIVE,Ordering::Release);
+    });
     Some(pointer as *mut u8)
 }
 pub unsafe fn deallocate(pointer:*mut u8,layout:Layout,domain:usize)->bool {
@@ -35,7 +42,10 @@ pub unsafe fn deallocate(pointer:*mut u8,layout:Layout,domain:usize)->bool {
             ||sample.state.compare_exchange(LIVE,SCRUBBING,Ordering::AcqRel,Ordering::Acquire).is_err() {super::heap::integrity_failure();}
         for i in 0..layout.size() {pointer.add(i).write_volatile(0);}
         let (cpu,task)=context();sample.free_cpu.store(cpu,Ordering::Relaxed);sample.free_task.store(task,Ordering::Relaxed);
-        sample.state.store(QUEUED,Ordering::Release);return true;
+        crate::arch::without_interrupts(|| {
+            let mut counts=COUNTERS.lock();counts.0-=layout.size();counts.1-=1;
+            sample.state.store(QUEUED,Ordering::Release);
+        });return true;
     }
     false
 }
@@ -43,7 +53,10 @@ pub fn reap() {
     for sample in &SAMPLES {
         if sample.state.compare_exchange(QUEUED,UNMAPPING,Ordering::AcqRel,Ordering::Acquire).is_ok() {
             super::stacks::release_sample_page(sample.base.load(Ordering::Relaxed) as u64,sample.phys.load(Ordering::Relaxed) as u64);
-            sample.state.store(FREED,Ordering::Release);
+            crate::arch::without_interrupts(|| {
+                let mut counts=COUNTERS.lock();counts.2-=4096;
+                sample.state.store(FREED,Ordering::Release);
+            });
         }
     }
 }
@@ -72,9 +85,14 @@ pub fn fault(address:u64,pc:u64) {
 pub fn test()->! {
     extern "C" fn probe()->! {
         let layout=Layout::from_size_align(64,16).unwrap();
+        let before=super::heap::stats();
         let pointer=allocate(layout,0,true).expect("forced KFENCE sample");
+        assert_eq!(super::heap::stats().2,before.2+1,"sample missing from live count");
+        assert_eq!(super::heap::stats().0,before.0+64,"sample missing from live bytes");
         unsafe {pointer.write_volatile(0xa5);assert!(deallocate(pointer,layout,0));}
+        assert_eq!(super::heap::stats().2,before.2,"freed sample still live");
         while !SAMPLES.iter().any(|s|s.state.load(Ordering::Acquire)==FREED&&s.pointer.load(Ordering::Relaxed)==pointer as usize) {crate::scheduler::sleep_ms(10);}
+        assert_eq!(stats().2,0,"reaped sample still mapped");
         crate::serial::write_line("[KFENCE TEST] touching unmapped object after recorded allocation/free");
         unsafe {pointer.write_volatile(0x55);}
         panic!("KFENCE use-after-free escaped");

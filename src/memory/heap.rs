@@ -5,6 +5,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::memory::frame_allocator;
+const _:()=assert!((2*super::slab::MAX_SLABS*(1<<super::slab::MAX_SHIFT)) as u64+(2<<20)<=crate::security::kaslr::HEAP_VA_BUDGET);
 
 /// Global frame allocator pointer — set once during memory init
 static mut FRAME_ALLOC_PTR: *mut frame_allocator::FrameAllocator = core::ptr::null_mut();
@@ -137,13 +138,53 @@ unsafe impl<const DOMAIN:usize> Allocator for CacheAllocator<DOMAIN> {
 }
 #[global_allocator]
 static GLOBAL_ALLOC:KernelAllocator=KernelAllocator::new();
-/// (live class bytes, permanently cache-owned backing bytes, live objects).
+/// (live slab/sample bytes, permanently slab-owned backing bytes, live objects).
 pub fn stats()->(usize,usize,usize) {
-    crate::arch::without_interrupts(|| {let state=GLOBAL_ALLOC.state.lock();(state.slabs.live_bytes,state.slabs.reserved_bytes,state.slabs.allocations)})
+    crate::arch::without_interrupts(|| {
+        let state=GLOBAL_ALLOC.state.lock();
+        #[cfg(feature="kfence")]
+        let (sample_bytes,sample_objects,_)=super::fence::stats();
+        #[cfg(not(feature="kfence"))]
+        let (sample_bytes,sample_objects)=(0,0);
+        (state.slabs.live_bytes+sample_bytes,state.slabs.reserved_bytes,state.slabs.allocations+sample_objects)
+    })
 }
 pub fn init_heap() {
     let secret=crate::random::u64().unwrap_or_else(|_|crate::random::early_u64()) as usize;
     if !crate::random::ready() {crate::serial::write_line("[HEAP] WARNING: weak bootstrap entropy; free-list secrecy is not assured");}
     with_frame_allocator(|fa|GLOBAL_ALLOC.initialize(fa,secret)).expect("frame allocator before heap");
     crate::memory::stacks::init();
+}
+#[cfg(feature="test-heap-oom")]
+#[no_mangle]
+static mut HEAP_TEST_RESERVED:[u64;65536]=[0;65536];
+/// Regression VM only (256 MiB): apply real frame pressure, verify no
+/// partial mapping, restore the frames and require growth to succeed.
+#[cfg(feature="test-heap-oom")]
+pub fn oom_self_test() {
+    crate::arch::without_interrupts(|| {
+        let mut state=GLOBAL_ALLOC.state.lock();
+        with_frame_allocator(|fa| {
+            let mut count=0;
+            while fa.free_count()>100 {
+                assert!(count<65536,"heap OOM regression requires <=256 MiB VM");
+                let pa=fa.allocate_zeroed_frame().expect("pressure reservation");
+                unsafe {core::ptr::addr_of_mut!(HEAP_TEST_RESERVED).cast::<u64>().add(count).write(pa);}
+                count+=1;
+            }
+            let end=state.end as u64;
+            assert!(!crate::arch::stacks::mapped(end));
+            assert_eq!(crate::arch::heap_extend(end,2<<20,fa),None);
+            assert_eq!(fa.free_count(),100,"failed growth consumed frames");
+            assert!(!crate::arch::stacks::mapped(end),"failed growth published a partial mapping");
+            for i in 0..count {
+                let pa=unsafe {core::ptr::addr_of!(HEAP_TEST_RESERVED).cast::<u64>().add(i).read()};
+                fa.deallocate_frame(pa);
+            }
+            let grown=crate::arch::heap_extend(end,2<<20,fa).expect("growth after pressure release");
+            assert!(crate::arch::stacks::mapped(end));
+            state.end+=grown as usize;GROWN_FRAMES.fetch_add((grown/4096) as usize,Ordering::Relaxed);
+        }).unwrap();
+    });
+    crate::serial::write_line("[HEAP TEST] exhaustion preserved frames/mappings; restored capacity grows");
 }

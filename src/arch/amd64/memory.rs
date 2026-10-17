@@ -67,6 +67,7 @@ pub fn heap_init(fa: &mut FrameAllocator) -> (u64, u64) {
 pub fn heap_extend(end: u64, needed: u64, fa: &mut FrameAllocator) -> Option<u64> {
     let grow = (needed + HEAP_GROW_CHUNK - 1) / HEAP_GROW_CHUNK * HEAP_GROW_CHUNK;
     if end.checked_add(grow)?>heap_limit() {return None;}
+    if fa.free_count()<crate::memory::slab::backing_frames(end,grow)? {return None;}
     map_heap_pages(end, grow, fa);
     Some(grow)
 }

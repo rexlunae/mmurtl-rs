@@ -86,7 +86,7 @@ jobs:
           python3 tools/test-arm-predictor.py
       - name: Build and audit optional sampled heap guards
         run: |
-          make build arm64 KERNEL_FEATURES=kfence
+          make build arm64 KERNEL_FEATURES=kfence,test-heap-oom
           python3 tools/test-kernel-cfi.py
           python3 tools/test-kernel-return.py
           python3 tools/test-stack-sizes.py

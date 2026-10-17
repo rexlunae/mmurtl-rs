@@ -7,6 +7,16 @@ pub const MIN_SHIFT:usize=4;
 pub const MAX_SHIFT:usize=24;
 const CLASSES:usize=MAX_SHIFT-MIN_SHIFT+1;
 pub const MAX_SLABS:usize=4096;
+/// Upper bound includes every potentially missing table at each level.
+/// Under the frame lock this preflight makes growth all-or-nothing without
+/// publishing mappings that would later need rollback and a shootdown.
+pub fn backing_frames(start:u64,bytes:u64)->Option<usize> {
+    if bytes==0||start%PAGE as u64!=0||bytes%PAGE as u64!=0 {return None;}
+    let last=start.checked_add(bytes)?.checked_sub(1)?;
+    let mut needed=bytes/PAGE as u64;
+    for shift in [39,30,21] {needed=needed.checked_add((last>>shift)-(start>>shift)+1)?;}
+    usize::try_from(needed).ok()
+}
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum Error {Layout,Range,Alignment,DoubleFree,Corrupt,Exhausted}
 #[derive(Clone,Copy)]
