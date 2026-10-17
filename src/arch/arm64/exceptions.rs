@@ -51,6 +51,24 @@ global_asm!(
     .macro VENTRY kind
     .balign 0x80
     sub sp, sp, #272
+    .if \kind == 4
+    // No stack access until the synchronous guard check is complete.
+    // TPIDRRO_EL0 is kernel-owned and otherwise zero (no read-only TLS ABI).
+    msr tpidrro_el0, x0
+    mov x0, sp
+    ubfx x0, x0, #39, #9
+    cmp x0, #448
+    b.ne .Lstack_ok\@
+    mov x0, sp
+    and x0, x0, #65535
+    cmp x0, #4096
+    b.lo arm64_stack_overflow
+    cmp x0, #9, lsl #12
+    b.hs arm64_stack_overflow
+.Lstack_ok\@:
+    mrs x0, tpidrro_el0
+    msr tpidrro_el0, xzr
+    .endif
     stp x0, x1, [sp, #0]
     mov x0, #\kind
     b exception_common

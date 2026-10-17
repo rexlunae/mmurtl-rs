@@ -244,11 +244,11 @@ fn device_not_available_handler(stack_frame: &mut InterruptStackFrame) {
 }
 
 fn double_fault_handler(
-    stack_frame: &mut InterruptStackFrame,
+    _stack_frame: &mut InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
     super::protection::clear_access();
-    panic!("DOUBLE FAULT\n{:#?}", stack_frame);
+    crate::memory::stacks::kernel_stack_fatal();
 }
 
 fn invalid_tss_handler(

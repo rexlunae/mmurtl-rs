@@ -487,5 +487,5 @@ extern "C" fn arm64_high_main(state: *const BootState) -> ! {
         }
     }
 
-    crate::kernel_run()
+    crate::memory::stacks::enter_main()
 }

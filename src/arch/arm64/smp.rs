@@ -16,14 +16,12 @@
 //! exactly the role `ap_entry` plays on amd64.
 
 use alloc::boxed::Box;
-use alloc::vec;
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::fdt::{MachineInfo, PsciConduit};
 
 const PSCI_CPU_ON: u64 = 0xC400_0003;
-const AP_STACK_SIZE: usize = 64 * 1024;
 
 static CPUS_ONLINE: AtomicUsize = AtomicUsize::new(1);
 static AP_READY: AtomicBool = AtomicBool::new(false);
@@ -105,9 +103,9 @@ pub fn boot_secondaries(info: &MachineInfo) {
             continue;
         }
         if next_cpu as usize >= crate::scheduler::MAX_CPUS { break; }
-        let stack: &'static mut [u8] = Box::leak(vec![0u8; AP_STACK_SIZE].into_boxed_slice());
+        let stack = crate::memory::stacks::allocate();
         let boot = Box::leak(Box::new(ApBoot {
-            stack_top: stack.as_ptr() as u64 + AP_STACK_SIZE as u64,
+            stack_top: stack.virt + stack.size,
             cpu: next_cpu,
             mair: regs.mair,
             tcr: regs.tcr,

@@ -62,6 +62,12 @@ pub fn putc(byte: u8) {
     }
     wr(DR, byte as u32);
 }
+pub fn emergency_byte(byte: u8) {
+    for _ in 0..100000 {
+        if rd(FR) & FR_TXFF == 0 { wr(DR, byte as u32); return; }
+        core::hint::spin_loop();
+    }
+}
 
 /// Enable RX interrupts (after the GIC routes the UART's SPI)
 pub fn enable_rx_irq() {

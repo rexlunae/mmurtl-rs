@@ -128,7 +128,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::virtio::pci::init(&devices);
 
     // Architecture-neutral second half: self-tests, IPC, tasks, userspace
-    crate::kernel_run()
+    crate::memory::stacks::enter_main()
 }
 
 /// Bootloader config that enables physical memory offset mapping
