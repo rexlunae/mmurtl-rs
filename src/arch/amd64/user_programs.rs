@@ -350,6 +350,14 @@ user_rogue_align_end:
 
     .globl user_uaccess_start
 user_uaccess_start:
+    movq $-1, %rax
+    int $0x80
+    cmpq $-2, %rax
+    jne 1f
+    movl $11, %eax
+    int $0x80
+    cmpq $-2, %rax
+    jne 1f
     leaq 4096(%rip), %rdi
     movl $16, %esi
     movl $1, %eax

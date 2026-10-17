@@ -15,15 +15,11 @@ pub static SMAP_ENTRY_ENABLED: AtomicU8 = AtomicU8::new(0);
 
 pub fn enumerate(cpu: usize) {
     super::cpu_features::enumerate(cpu);
+    let features = crate::security::caps(cpu).expect("missing CPU capabilities").features;
+    use crate::security::feature as F;
     let mut caps = 0;
-    unsafe {
-        if core::arch::x86_64::__cpuid(0).eax >= 7 {
-            let leaf = core::arch::x86_64::__cpuid_count(7, 0);
-            if leaf.ebx & (1 << 7) != 0 { caps |= SMEP; }
-            if leaf.ebx & (1 << 20) != 0 { caps |= SMAP; }
-            if leaf.ecx & (1 << 2) != 0 { caps |= UMIP; }
-            if leaf.eax >= 1 && core::arch::x86_64::__cpuid_count(7, 1).eax & (1 << 6) != 0 { caps |= LASS; }
-        }
+    for (feature, flag) in [(F::SMEP, SMEP), (F::SMAP, SMAP), (F::UMIP, UMIP), (F::LASS, LASS)] {
+        if features & feature != 0 { caps |= flag; }
     }
     unsafe {
         let mut cr4: u64;

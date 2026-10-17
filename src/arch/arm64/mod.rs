@@ -154,3 +154,4 @@ pub fn init_user_counter_policy() {
 pub mod uaccess;
 
 pub mod cpu_features;
+pub mod nospec;

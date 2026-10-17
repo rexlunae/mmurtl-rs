@@ -79,6 +79,15 @@ impl CommonCaps {
 pub struct PatchSite { target: AtomicUsize }
 impl PatchSite {
     pub const fn new() -> Self { Self { target: AtomicUsize::new(0) } }
+    /// Select only an enabled, affected family's implementation whose
+    /// required instruction/control features exist on every admitted CPU.
+    pub fn select_checked(&self, policy: Policy, common: CommonCaps, family: Vulnerability,
+        required: u64, implementation: fn()) -> bool {
+        let enabled = policy.enabled(family) && common.features & required == required
+            && common.not_affected & family.bit() == 0;
+        self.select(enabled, implementation);
+        enabled
+    }
     pub fn select(&self, enabled: bool, implementation: fn()) {
         self.target.store(if enabled { implementation as *const () as usize } else { 0 }, Ordering::Release);
     }
@@ -88,3 +97,7 @@ impl PatchSite {
         if target != 0 { unsafe { core::mem::transmute::<usize, fn()>(target)(); } }
     }
 }
+
+/// SMCCC architecture services use a signed 32-bit return status even
+/// when the firmware leaves the upper half of x0 zero or unspecified.
+pub fn smccc_status(value: u64) -> i64 { value as u32 as i32 as i64 }

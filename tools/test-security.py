@@ -22,6 +22,7 @@ def main():
     parser.add_argument('--arch', choices=['amd64', 'arm64'], required=True)
     parser.add_argument('--cpus', type=int, default=4)
     parser.add_argument('--cpu')
+    parser.add_argument('--bootargs', help='mitigation policy / kernel boot arguments')
     parser.add_argument('--uefi', action='store_true')
     parser.add_argument('--el2', action='store_true')
     parser.add_argument('--nmi', action='store_true', help='inject an amd64 NMI and verify the shell remains responsive')
@@ -46,6 +47,13 @@ def main():
         if args.cpu and args.arch == 'amd64': command += ['-cpu', args.cpu]
         qmp_path = str(Path(temporary) / 'qmp.sock')
         if args.nmi: command += ['-qmp', f'unix:{qmp_path},server=on,wait=off']
+        if args.bootargs is not None:
+            if args.arch == 'amd64':
+                bootargs_path = Path(temporary) / 'bootargs'
+                bootargs_path.write_text(args.bootargs)
+                command += ['-fw_cfg', f'name=opt/mmurtl/bootargs,file={bootargs_path}']
+            else:
+                command += ['-append', args.bootargs]
         command += ['-m', '256M', '-smp', str(args.cpus)]
         proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         output = bytearray()

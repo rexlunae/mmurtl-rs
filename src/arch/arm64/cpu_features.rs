@@ -19,7 +19,8 @@ pub fn smccc(function: u64, argument: u64) -> i64 {
             _ => return -1,
         }
     }
-    result as i64
+    // Architecture service functions use SMC32/HVC32: upper bits are not a sign extension.
+    crate::security::smccc_status(result)
 }
 pub fn enumerate(cpu: usize) {
     let mut caps = SpecCaps::default();
@@ -33,8 +34,9 @@ pub fn enumerate(cpu: usize) {
     caps.vendor = *b"ARM         ";
     let csv2 = (caps.raw[0] >> 56) & 15;
     let csv3 = (caps.raw[0] >> 60) & 15;
-    if csv2 != 0 && csv2 != 15 { caps.not_affected |= V::SpectreV2.bit(); }
-    if csv3 != 0 && csv3 != 15 { caps.not_affected |= V::Meltdown.bit(); }
+    if matches!(csv2, 1..=3) { caps.not_affected |= V::SpectreV2.bit(); }
+    if csv2 == 3 { caps.not_affected |= V::Bhb.bit(); }
+    if csv3 == 1 { caps.not_affected |= V::Meltdown.bit(); }
     if (caps.raw[0] >> 48) & 15 == 1 { caps.features |= F::DIT; }
     if matches!((caps.raw[1] >> 4) & 15, 1 | 2) { caps.features |= F::SSBS; }
     if (caps.raw[2] >> 60) & 15 == 1 { caps.features |= F::ECBHB; }
@@ -44,7 +46,7 @@ pub fn enumerate(cpu: usize) {
     if caps.identity >> 24 & 255 == 0x41 {
         let part = (caps.identity >> 4) & 0xfff;
         if matches!(part, 0xd03 | 0xd04 | 0xd05) { // Cortex-A53/A35/A55
-            caps.not_affected |= V::SpectreV2.bit() | V::Bhb.bit();
+            caps.not_affected |= V::SpectreV2.bit() | V::Bhb.bit() | V::Ssb.bit();
         }
         if matches!(part, 0xd03 | 0xd04 | 0xd05 | 0xd07 | 0xd08 | 0xd09 | 0xd0b) {
             caps.not_affected |= V::Meltdown.bit(); // known unaffected cores; A75 excluded
@@ -55,7 +57,11 @@ pub fn enumerate(cpu: usize) {
     for (index, function, feature) in [(4,0x8000_8000,F::WA1),(5,0x8000_7fff,F::WA2),(6,0x8000_3fff,F::WA3)] {
         let status = if version >= 0x10001 { smccc(0x8000_0001, function) } else { -1 };
         caps.raw[index] = status as u64;
-        if status >= 0 { caps.features |= feature; }
+        if matches!(status, 0 | 1) { caps.features |= feature; }
     }
     crate::security::record(cpu, caps);
+}
+
+pub fn applicable(family: V) -> bool {
+    matches!(family, V::SpectreV1 | V::SpectreV2 | V::Meltdown | V::Ssb | V::Bhb)
 }

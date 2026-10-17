@@ -1,5 +1,5 @@
 //! CPUID-gated reads only: capability does not imply a mitigation is active.
-use crate::security::{SpecCaps, Vulnerability as V, feature as F};
+use crate::security::{SpecCaps, Vulnerability as V};
 pub fn enumerate(cpu: usize) {
     use core::arch::x86_64::{__cpuid, __cpuid_count};
     let base = __cpuid(0);
@@ -11,56 +11,19 @@ pub fn enumerate(cpu: usize) {
     if base.eax >= 7 {
         let leaf = __cpuid_count(7, 0);
         caps.raw[0] = leaf.edx as u64; caps.raw[5] = leaf.ebx as u64; caps.raw[6] = leaf.ecx as u64;
-        for (bit, feature) in [(26,F::IBRS | F::IBPB),(27,F::STIBP),(28,F::L1D_FLUSH),
-            (29,F::ARCH_CAPS),(31,F::SSBD),(10,F::MD_CLEAR)] {
-            if leaf.edx & (1 << bit) != 0 { caps.features |= feature; }
-        }
-        if leaf.ebx & (1 << 7) != 0 { caps.features |= F::SMEP; }
-        if leaf.ebx & (1 << 20) != 0 { caps.features |= F::SMAP; }
-        if leaf.ecx & (1 << 2) != 0 { caps.features |= F::UMIP; }
-        if leaf.eax >= 1 {
-            caps.raw[7] = __cpuid_count(7, 1).eax as u64;
-            if caps.raw[7] & (1 << 6) != 0 { caps.features |= F::LASS; }
-        }
-        if leaf.eax >= 2 {
-            caps.raw[1] = __cpuid_count(7, 2).edx as u64;
-            for (bit, feature) in [(0,F::PSFD),(1,F::IPRED_CTRL),(2,F::RRSBA_CTRL),(4,F::BHI_CTRL)] {
-                if caps.raw[1] & (1 << bit) != 0 { caps.features |= feature; }
-            }
-        }
-        if caps.features & F::ARCH_CAPS != 0 {
-            let (lo, hi): (u32, u32);
-            unsafe { core::arch::asm!("rdmsr", in("ecx") 0x10au32, out("eax") lo, out("edx") hi, options(nostack)); }
-            caps.raw[4] = (hi as u64) << 32 | lo as u64;
-            for (bit, family) in [(0,V::Meltdown),(4,V::Ssb),(5,V::Mds),(8,V::Taa),
-                (20,V::Bhi),(26,V::Gds),(27,V::Rfds)] {
-                if caps.raw[4] & (1 << bit) != 0 { caps.not_affected |= family.bit(); }
-            }
-            if caps.raw[4] & ((1 << 13)|(1 << 14)|(1 << 15)) == ((1 << 13)|(1 << 14)|(1 << 15)) {
-                caps.not_affected |= V::Mmio.bit();
-            }
-            for (bit, feature) in [(1,F::EIBRS),(12,F::DOITM),(25,F::GDS_CTRL),(28,F::RFDS_CLEAR)] {
-                if caps.raw[4] & (1 << bit) != 0 { caps.features |= feature; }
-            }
-        }
+        if leaf.eax >= 1 { caps.raw[7] = __cpuid_count(7, 1).eax as u64; }
+        if leaf.eax >= 2 { caps.raw[1] = __cpuid_count(7, 2).edx as u64; }
     }
     let max_ext = __cpuid(0x8000_0000).eax;
     if caps.vendor == *b"AuthenticAMD" {
-        if max_ext >= 0x8000_0008 {
-            caps.raw[2] = __cpuid(0x8000_0008).ebx as u64;
-            for (bit, feature) in [(12,F::IBPB),(14,F::IBRS),(15,F::STIBP),
-                (24,F::SSBD),(25,F::VIRT_SSBD),(30,F::IBPB_RET)] {
-                if caps.raw[2] & (1 << bit) != 0 { caps.features |= feature; }
-            }
-            if caps.raw[2] & (1 << 26) != 0 { caps.not_affected |= V::Ssb.bit(); }
-        }
-        if max_ext >= 0x8000_0021 {
-            caps.raw[3] = __cpuid(0x8000_0021).eax as u64;
-            if caps.raw[3] & (1 << 8) != 0 { caps.features |= F::AUTOIBRS; }
-            if caps.raw[3] & (1 << 27) != 0 { caps.features |= F::SBPB; }
-            if caps.raw[3] & (1 << 29) != 0 { caps.not_affected |= V::Srso.bit(); }
-        }
+        if max_ext >= 0x8000_0008 { caps.raw[2] = __cpuid(0x8000_0008).ebx as u64; }
+        if max_ext >= 0x8000_0021 { caps.raw[3] = __cpuid(0x8000_0021).eax as u64; }
     }
+    let caps = crate::security::x86_decode::decode(caps, || {
+        let (lo, hi): (u32, u32);
+        unsafe { core::arch::asm!("rdmsr", in("ecx") 0x10au32, out("eax") lo, out("edx") hi, options(nostack)); }
+        (hi as u64) << 32 | lo as u64
+    });
     crate::security::record(cpu, caps);
 }
 
@@ -97,3 +60,5 @@ pub fn bootargs(buffer: &mut [u8; 512]) -> Option<usize> {
         None
     }
 }
+
+pub fn applicable(family: V) -> bool { family != V::Bhb }

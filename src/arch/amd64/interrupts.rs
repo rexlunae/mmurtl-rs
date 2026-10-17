@@ -97,6 +97,23 @@ extern "x86-interrupt" fn com1_handler(_frame: InterruptStackFrame) {
     irq_eoi(4);
 }
 
+/// Test-only DPL0 interrupt: deliberately change carry in the handler.
+/// IRET must restore the interrupted comparison's CF before SBB resumes.
+extern "x86-interrupt" fn nospec_flags_handler(_frame: InterruptStackFrame) {
+    super::protection::clear_access();
+    unsafe { core::arch::asm!("cmc", options(nostack)); }
+}
+
+pub fn nospec_interrupt_self_test() {
+    for (index, size, expected) in [(0usize, 1usize, usize::MAX), (1, 1, 0), (usize::MAX, 11, 0)] {
+        let mask: usize;
+        unsafe { core::arch::asm!("cmp {index}, {size}", "int 0x84", "sbb {mask}, {mask}",
+            index = in(reg) index, size = in(reg) size, mask = lateout(reg) mask); }
+        assert_eq!(mask, expected, "interrupt changed nospec carry mask");
+    }
+    crate::serial::write_line("[TEST] nospec CMP/interrupt/SBB preserves bounds mask");
+}
+
 /// Hardware interrupt numbers
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -536,6 +553,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt.stack_segment_fault.set_handler_fn(stack_segment_handler);
     idt.general_protection_fault.set_handler_fn(general_protection_handler);
     idt.page_fault.set_handler_fn(page_fault_handler);
+    idt[0x84].set_handler_fn(nospec_flags_handler);
     unsafe { idt[0x83].set_handler_addr(x86_64::VirtAddr::new(super::protection::test_gate_address())); }
     idt.x87_floating_point.set_handler_fn(x87_fpu_handler);
     idt.alignment_check.set_handler_fn(alignment_check_handler);

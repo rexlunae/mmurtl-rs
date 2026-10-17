@@ -211,6 +211,8 @@ pub fn range_ok(ptr: u64, len: u64, write: bool) -> bool {
     if ptr < USER_BASE || end > USER_END {
         return false;
     }
+    let ptr = mask_user_ptr(ptr, len);
+    crate::arch::nospec::barrier_nospec();
     let mut page = ptr & !(PAGE - 1);
     while page < end {
         match crate::arch::query_page(page) {
@@ -229,19 +231,31 @@ pub fn range_ok(ptr: u64, len: u64, write: bool) -> bool {
 /// Cheap overflow-safe bounds check. Hardware enforces page permissions
 /// during the fault-tolerant copy; no check-then-use page walk is needed.
 pub fn bounds_ok(ptr: u64, len: u64) -> bool {
-    len == 0 || (ptr >= USER_BASE && ptr < USER_END && len <= USER_END - ptr)
+    super::user_bounds::bounds_ok(ptr, len, USER_BASE, USER_END)
+}
+
+/// Mask invalid pointers to the permanently unmapped end of the user
+/// window. Opaque assembly comparisons preserve a data dependency even
+/// when a preceding bounds-check branch is mistrained.
+#[inline(always)]
+pub fn mask_user_ptr(ptr: u64, len: u64) -> u64 {
+    super::user_bounds::mask_user_ptr(ptr, len, USER_BASE, USER_END)
 }
 
 /// On failure, the destination may contain a copied prefix. Callers must
 /// discard it (RQBs are decoded only after this returns true).
+#[inline(never)]
 pub fn copy_from_user(dst: &mut [u8], src: u64) -> bool {
     if !bounds_ok(src, dst.len() as u64) { return false; }
+    let src = mask_user_ptr(src, dst.len() as u64);
     unsafe { crate::arch::uaccess::copy_from_user(dst.as_mut_ptr(), src, dst.len()) == 0 }
 }
 
 /// Failure may have written a prefix of the user buffer.
+#[inline(never)]
 pub fn copy_to_user(dst: u64, src: &[u8]) -> bool {
     if !bounds_ok(dst, src.len() as u64) { return false; }
+    let dst = mask_user_ptr(dst, src.len() as u64);
     unsafe { crate::arch::uaccess::copy_to_user(dst, src.as_ptr(), src.len()) == 0 }
 }
 
@@ -418,6 +432,11 @@ pub fn uaccess_self_test() {
         }
     };
     let mut pass = true;
+    for (ptr, len, expected) in [(USER_BASE, 1, USER_BASE), (USER_END - 1, 1, USER_END - 1),
+        (USER_BASE - 1, 1, USER_END), (USER_END - 1, 2, USER_END),
+        (u64::MAX, 2, USER_END), (USER_BASE, u64::MAX, USER_END)] {
+        pass &= mask_user_ptr(ptr, len) == expected;
+    }
     let mut removed = 0;
     crate::arch::without_interrupts(|| {
         let cpu = crate::arch::cpu_index();

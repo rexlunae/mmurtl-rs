@@ -30,3 +30,5 @@ pub fn init(usable: &[PhysRange], reserved: &[PhysRange], min_addr: u64) {
     crate::serial::write_dec(usable_mib);
     crate::serial::write_str(" MiB usable RAM\n");
 }
+
+mod user_bounds;
