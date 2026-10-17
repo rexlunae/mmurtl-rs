@@ -2,7 +2,9 @@
 pub fn counter() -> u64 {
     let value: u64; unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) value, options(nomem, nostack)); } value
 }
-pub fn collect() {
+pub fn collect() { collect_inner(false); }
+pub fn early_collect() { collect_inner(true); }
+fn collect_inner(quiet: bool) {
     let isar: u64;
     unsafe { core::arch::asm!("mrs {}, id_aa64isar0_el1", out(reg) isar, options(nomem, nostack)); }
     if (isar >> 60) & 15 == 1 {
@@ -22,10 +24,14 @@ pub fn collect() {
                 }
                 complete &= got;
             }
-            crate::random::seed(if reseed { "RNDRRS" } else { "RNDR" }, &mut bytes, if complete { 256 } else { 0 });
+            let name = if reseed { "RNDRRS" } else { "RNDR" };
+            let credit = if complete { 256 } else { 0 };
+            if quiet { crate::random::seed_quiet(name, &mut bytes, credit); }
+            else { crate::random::seed(name, &mut bytes, credit); }
         }
     }
     if let Some(mut bytes) = super::cpu_features::trng_seed() {
-        crate::random::seed("SMCCC TRNG", &mut bytes, 256);
+        if quiet { crate::random::seed_quiet("SMCCC TRNG", &mut bytes, 256); }
+        else { crate::random::seed("SMCCC TRNG", &mut bytes, 256); }
     }
 }

@@ -1,3 +1,6 @@
+KERNEL_FEATURES ?=
+KERNEL_FEATURE_FLAGS = $(if $(KERNEL_FEATURES),--features $(KERNEL_FEATURES),)
+
 TARGET = x86_64-unknown-none.json
 KERNEL_BIN = target/x86_64-unknown-none/release/mmurtl-rs
 BIOS_IMG = target/mmurtl-rs-bios.img
@@ -17,7 +20,7 @@ all: build
 # Build the amd64 kernel ELF
 build:
 	cargo build -Z build-std=core,compiler_builtins,alloc -Z json-target-spec \
-		--target $(TARGET) \
+		--target $(TARGET) $(KERNEL_FEATURE_FLAGS) \
 		--release
 
 # Create BIOS and UEFI boot images. The dependency patch keeps the
@@ -49,7 +52,7 @@ run-uefi: uefi
 # Build the arm64 kernel ELF
 arm64:
 	cargo build -Z build-std=core,compiler_builtins,alloc \
-		--target $(ARM64_TARGET) \
+		--target $(ARM64_TARGET) $(KERNEL_FEATURE_FLAGS) \
 		--release
 
 # arm64 Linux-style "Image" (raw binary with the standard header), for

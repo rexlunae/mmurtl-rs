@@ -42,7 +42,10 @@ struct ApBoot {
     ttbr0: u64,
     ttbr1: u64,
     sctlr: u64,
+    kernel_offset: u64,
 }
+
+const _: () = assert!(core::mem::offset_of!(ApBoot, kernel_offset) == 56);
 
 extern "C" {
     fn secondary_start();
@@ -110,6 +113,7 @@ pub fn boot_secondaries(info: &MachineInfo) {
             ttbr0: regs.ttbr0,
             ttbr1: regs.ttbr1,
             sctlr: regs.sctlr,
+            kernel_offset: regs.kernel_offset,
         }));
         clean_dcache(boot as *const ApBoot as u64, core::mem::size_of::<ApBoot>());
 

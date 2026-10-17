@@ -39,7 +39,6 @@ pub fn phys_to_virt(phys: u64) -> *mut u8 {
 // ========================================================================
 
 /// Heap start virtual address (in the kernel's higher-half region)
-const HEAP_START: u64 = 0xFFFF_9000_0000_0000;
 /// Size of the initial kernel heap (4 MiB)
 const INITIAL_HEAP_SIZE: u64 = 4 * 1024 * 1024;
 /// Growth granularity (2 MiB)
@@ -47,8 +46,10 @@ const HEAP_GROW_CHUNK: u64 = 512 * FRAME_SIZE;
 
 /// Map the initial heap; returns its [start, end)
 pub fn heap_init(fa: &mut FrameAllocator) -> (u64, u64) {
-    map_heap_pages(HEAP_START, INITIAL_HEAP_SIZE, fa);
-    (HEAP_START, HEAP_START + INITIAL_HEAP_SIZE)
+    // 21 bits of 2-MiB placement within a bootloader-excluded 4-TiB range.
+    let start = crate::security::kaslr::amd_heap(crate::random::early_u64());
+    map_heap_pages(start, INITIAL_HEAP_SIZE, fa);
+    (start, start + INITIAL_HEAP_SIZE)
 }
 
 /// Grow the heap past `end` by at least `needed` bytes; returns the bytes

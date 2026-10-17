@@ -27,3 +27,12 @@ impl Generator {
     }
 }
 impl Drop for Generator { fn drop(&mut self) { erase(&mut self.key); } }
+
+/// Keyed BLAKE2s for pointer identifiers, separate from entropy derivation.
+pub fn keyed_hash(key: &[u8; 32], pointer: &[u8]) -> [u8; 32] {
+    use blake2::{Blake2sMac256, digest::{KeyInit, Mac}};
+    let mut h = <Blake2sMac256 as KeyInit>::new_from_slice(key).expect("32-byte key");
+    Mac::update(&mut h, b"MMURTL pointer identifier v1");
+    Mac::update(&mut h, pointer);
+    h.finalize().into_bytes().into()
+}

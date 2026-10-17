@@ -1089,8 +1089,8 @@ bare-metal validation and is not exercised by the VM tests.
 
 ### arm64 TTBR1 and ASIDs
 
-The kernel executes at `0xffff000000000000 + physical_address`, with RAM,
-devices, heap and stacks in TTBR1. The primary stub rebases absolute references
+The kernel image and the RAM/device physical window have independent randomized
+placements in TTBR1. Heap and allocated stacks use the physical window. The primary stub rebases absolute references
 before enabling translation, then branches high. Secondary entry/context and
 spin-table release values remain physical for firmware; their stacks and Rust
 entry points are high virtual addresses. The temporary TTBR0 maps only physical
@@ -1104,7 +1104,7 @@ A generation allocator reserves tags still loaded on other CPUs. Rollover
 broadcasts and completes TLBI before reusing retired tags; freeing/unmapping
 an image invalidates its ASID before its frames are recycled. Normal context
 switches change TTBR0/ASID without flushing the TLB. Kernel mappings are still
-present in TTBR1 at EL0 with supervisor-only permissions; KPTI/E0PD and independent virtual KASLR are separate follow-ups.
+present in TTBR1 at EL0 with supervisor-only permissions; KPTI/E0PD remains a separate follow-up.
 
 Boot audits check TTBR1 permissions, the empty kernel TTBR0 and the private
 bootstrap map. A real translation test switches through 600 private images
@@ -1135,3 +1135,45 @@ rejected kernel pointers, inherited UAO, exception return and execute-only
 pages (EPAN or software PAN). Host tests check feature decoding and saved
 PSTATE preservation. Hardware PAN does not remove TTBR1 from EL0; KPTI is
 tracked separately.
+
+### Kernel address randomization and diagnostics
+
+The amd64 bootloader randomizes its PIE image, physical window, boot info and
+boot stack within `0xffff800000000000..0xffffbfffffffffff`. The heap has a
+separate, excluded range starting at `0xffffc00000000000`, with 21 bits of
+2-MiB placement selected after early microcode and CPU entropy initialization.
+Emergency stacks use a separate randomized region beginning at
+`0xffffc80000000000`, also excluded from bootloader and heap placement.
+The temporary SIPI identity page is retired after AP admission; a timed-out
+late AP may still need its read-only executable entry page.
+
+ARM chooses independent image and linear-map regions before enabling
+translation. The physical window has 128 possible 512-GiB slots; the image
+has 128 separate slots and 17 bits of 2-MiB displacement within its slot.
+Relative relocations and AP handoffs carry the image offset; physical table
+walks, devices, DMA and heap use the linear offset. The image's physical alias
+is NX, with text/constants read-only. Both aliases retain W^X.
+
+Early ARM seeding consumes and erases DT `rng-seed`/`kaslr-seed` before mapping,
+and uses RNDR or firmware TRNG where available. These credits assume a trusted
+source. With less than 128 credited bits, ARM reports that placement is not
+cryptographically assured; the amd64 heap does likewise. The x86 bootloader
+uses its own RDRAND/TSC/PIT seed, so its assurance depends on that source too.
+A host-backed virtio RNG discovered later cannot retroactively improve the
+already selected layout. KASLR alone does not prevent cache/prefetch attacks;
+KPTI and other transient-execution mitigations remain separate work.
+
+Routine kernel pointers use keyed BLAKE2s boot-secret identifiers, or `(ptr)`
+before a credited RNG is ready. User-fault addresses outside the user window
+are restricted the same way. Bootloader routine address logs are suppressed.
+`make bios arm64-image KERNEL_FEATURES=debug-addresses` explicitly enables raw
+address diagnostics. Rebuild without that option before normal use.
+
+`python3 tools/test-kaslr.py --arch amd64 --debug` (or `arm64`) runs 20 complete
+boots cycling 1/2/4 CPUs and checks image, physical-map and heap diversity.
+After a normal rebuild, omit `--debug` to verify default log pointer hygiene.
+Host tests also check canonical ranges, alignment, non-overlap, pointer
+redaction and keyed identifier stability. The BIOS compatibility patch gives
+stage 4 a dedicated stack because ASLR's RNG overflows its inherited stack,
+corrects bootloader 0.11.17's inverted TSC capability gate, and bounds ASLR
+offsets to the slots actually reserved (including exactly full PML4 spans).

@@ -280,12 +280,12 @@ fn kernel_fault(what: &str, esr: u64, frame: &TaskContext) -> ! {
     let mut line: heapless::String<160> = heapless::String::new();
     let _ = write!(
         line,
-        "\n[EXC] Kernel {}: ESR=0x{:x} (EC 0x{:x}) ELR=0x{:x} FAR=0x{:x}\n",
+        "\n[EXC] Kernel {}: ESR=0x{:x} (EC 0x{:x}) ELR={} FAR={}\n",
         what,
         esr,
         esr >> 26,
-        frame.elr,
-        far()
+        crate::kptr::KPtr(frame.elr),
+        crate::kptr::KPtr(far())
     );
     crate::serial::write_str(&line);
     panic!("unhandled kernel exception");

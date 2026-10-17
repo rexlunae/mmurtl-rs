@@ -28,6 +28,7 @@ mod security;
 #[cfg(target_arch = "x86_64")]
 mod microcode;
 mod random;
+mod kptr;
 
 use core::panic::PanicInfo;
 
@@ -52,6 +53,7 @@ pub fn print_banner() {
 /// up the console, memory, interrupts, the scheduler, all CPUs, and the
 /// devices it found; this runs the self-tests and starts the tasks.
 pub fn kernel_run() -> ! {
+    kptr::init();
     random::report();
     // Driver proof-of-life: block device write/read/verify + ARP round trip
     serial::write_str("[TEST] Storage self-test...\n");

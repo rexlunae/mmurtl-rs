@@ -10,7 +10,7 @@ pub mod user;
 
 pub use frame_allocator::PhysRange;
 
-/// Initialize the frame allocator and kernel heap.
+/// Initialize the frame allocator. Call heap::init_heap after early entropy.
 ///
 /// `usable` lists RAM the kernel may hand out; `reserved` carves holes in
 /// it (low memory, boot structures); the allocator's own bitmap is placed
@@ -20,7 +20,7 @@ pub fn init(usable: &[PhysRange], reserved: &[PhysRange], min_addr: u64) {
     crate::serial::write_str("[MEM] Initializing memory manager...\n");
 
     let frame_allocator = frame_allocator::FrameAllocator::init(usable, reserved, min_addr);
-    heap::init_heap(frame_allocator);
+    unsafe { heap::set_frame_allocator(frame_allocator as *mut _); }
 
     let free_mib = (frame_allocator.free_count() as u64 * frame_allocator::FRAME_SIZE) / (1024 * 1024);
     let usable_mib = usable.iter().map(|r| r.end - r.start).sum::<u64>() / (1024 * 1024);

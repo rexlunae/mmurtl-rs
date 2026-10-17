@@ -152,13 +152,19 @@ pub fn init() {
 fn install_guarded_stacks(cpu: usize, tss: *mut TaskStateSegment) {
     use super::page_table::{self, BumpFrameAllocator};
     use x86_64::{PhysAddr, structures::paging::{Page, PhysFrame, page_table::PageTableFlags as F}};
-    const BASE: u64 = 0xffff_a000_0000_0000;
+    static BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let mut base = BASE.load(Ordering::Acquire);
+    if cpu == 0 && base == 0 {
+        base = crate::security::kaslr::amd_ist(crate::random::early_u64());
+        BASE.store(base, Ordering::Release);
+    }
+    assert!(base != 0, "BSP must place emergency stacks before AP startup");
     const PAGES: u64 = 8; // 32 KiB, plus one guard page per stack
     let mut tops = [0u64; 4];
     crate::memory::heap::with_frame_allocator(|fa| {
         let mut adapter = BumpFrameAllocator::new(fa);
         for (slot, top) in tops.iter_mut().enumerate() {
-            let guard = BASE + (cpu as u64 * 4 + slot as u64) * (PAGES + 1) * 4096;
+            let guard = base + (cpu as u64 * 4 + slot as u64) * (PAGES + 1) * 4096;
             assert!(page_table::query_page(VirtAddr::new(guard)).is_none());
             for page in 1..=PAGES {
                 let pa = fa.allocate_zeroed_frame().expect("OOM: emergency stack");

@@ -1,5 +1,6 @@
 //! Boot policy, admitted-CPU capability intersection, and truthful status.
 pub mod types;
+pub mod kaslr;
 pub mod store_bypass;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_decode;
@@ -71,8 +72,8 @@ pub fn report() {
             #[cfg(target_arch = "aarch64")]
             {
                 let mut firmware: heapless::String<128> = heapless::String::new();
-                let _ = write!(firmware, "[SPEC] CPU{} SMCCC_VERSION={:#x} WA1={} WA2={} WA3={}\n",
-                    cpu, caps.raw[8], caps.raw[4] as i64, caps.raw[5] as i64, caps.raw[6] as i64);
+                let _ = write!(firmware, "[SPEC] CPU{} SMCCC_VERSION={} WA1={} WA2={} WA3={}\n",
+                    cpu, smccc_status(caps.raw[8]), caps.raw[4] as i64, caps.raw[5] as i64, caps.raw[6] as i64);
                 crate::serial::write_str(&firmware);
             }
         }

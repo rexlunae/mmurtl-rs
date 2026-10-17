@@ -214,7 +214,7 @@ extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     super::protection::clear_access();
     crate::serial::write_str("[BREAKPOINT] at ");
-    crate::serial::write_hex(stack_frame.instruction_pointer.as_u64());
+    crate::kptr::write(stack_frame.instruction_pointer.as_u64());
     crate::serial::write_str("\n");
 }
 
@@ -322,8 +322,8 @@ extern "x86-interrupt" fn page_fault_handler(
     }
 
     crate::serial::write_str("\n[PAGE FAULT]\n");
-    crate::serial::write_str("  Address: 0x");
-    crate::serial::write_hex(address.as_u64());
+    crate::serial::write_str("  Address: ");
+    crate::kptr::write(address.as_u64());
     crate::serial::write_str("\n");
     crate::serial::write_str("  Error code:");
     crate::serial::write_hex_byte(error_code.bits() as u8);

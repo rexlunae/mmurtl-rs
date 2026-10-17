@@ -540,8 +540,8 @@ pub fn create_task(entry: extern "C" fn() -> !, priority: TaskPriority, name: &'
         let mut line: heapless::String<96> = heapless::String::new();
         let _ = write!(
             line,
-            "[SCHED] Created task \"{}\" TID={} prio={} stack=0x{:x}\n",
-            name, tid, priority, stack_bottom
+            "[SCHED] Created task \"{}\" TID={} prio={} stack={}\n",
+            name, tid, priority, crate::kptr::KPtr(stack_bottom)
         );
         crate::serial::write_str(&line);
     }

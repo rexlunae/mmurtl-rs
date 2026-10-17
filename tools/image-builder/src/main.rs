@@ -26,7 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  BIOS:   {}", bios_path.display());
     println!("  UEFI:   {}", uefi_path.display());
 
+    let mut boot_config = bootloader::BootConfig::default();
+    boot_config.log_level = bootloader_boot_config::LevelFilter::Warn;
     let mut builder = bootloader::DiskImageBuilder::new(kernel_path);
+    builder.set_boot_config(&boot_config);
     if let Some(path) = std::env::var_os("MMURTL_MICROCODE") {
         let path = PathBuf::from(path);
         if !path.is_file() { return Err("MMURTL_MICROCODE must name a vendor container file".into()); }
