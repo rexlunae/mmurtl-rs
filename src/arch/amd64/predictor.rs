@@ -49,7 +49,11 @@ pub fn init() {
         if p.sibling_safe&&p.ibpb {crate::security::installed(V::SpectreV2,"retpolines, RSB fill, user IBPB; STIBP or isolated siblings");}
         else {crate::security::unavailable(V::SpectreV2,if !p.sibling_safe {"retpolines active; SMT enabled without common STIBP"} else {"kernel retpolines active; user-to-user IBPB unavailable"});}
     }
-    if crate::security::policy().enabled(V::Bhi) {crate::security::installed(V::Bhi,if p.set&(1<<10)!=0 {"BHI_DIS_S + IBHF"} else if p.bhb_loop {"Intel long BHB clear + retpolines"} else {"retpolines; return predictor caveats reported separately"});}
+    if crate::security::policy().enabled(V::Bhi) {
+        if p.set&(1<<10)!=0 {crate::security::installed(V::Bhi,"BHI_DIS_S + IBHF");}
+        else if p.bhb_loop {crate::security::installed(V::Bhi,"Intel long BHB clear + retpolines");}
+        else {crate::security::unavailable(V::Bhi,"retpolines active; no verified history-clearing control");}
+    }
     if intel&&crate::security::policy().enabled(V::Its) {crate::security::installed(V::Its,"retpolines + all near RETs in upper cacheline halves; current microcode required for IBPB");}
     crate::serial::write_line(if p.ibpb {"[SPEC] IBPB: different user task identity on this CPU (root reuse cannot skip barrier)"} else {"[SPEC] IBPB unavailable or disabled; cross-task predictor isolation not guaranteed"});
     super::returns::report(p);

@@ -20,6 +20,7 @@ impl Plan {
         for (feature,mask,enabled) in [(F::IBRS,1,matches!(mode,Mode::LegacyIbrs|Mode::EnhancedIbrs)),
             (F::STIBP,2,v2),(F::RRSBA_CTRL,1<<6,v2),
             (F::BHI_CTRL,1<<10,policy.enabled(V::Bhi)),
+            // Intel SPEC_CTRL table: IPRED_DIS_U=3, IPRED_DIS_S=4.
             (F::IPRED_CTRL,1<<4,policy.enabled(V::Its))] {
             if caps.features&feature!=0 {clear|=mask;if enabled {set|=mask;}}
         }

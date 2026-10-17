@@ -54,7 +54,9 @@ pub fn prepare_boot() {
     let draw=(crate::random::early_u64() as usize)&511;
     let base=(0..512).map(|i|origin.wrapping_add((((i+draw)%512) as u64).wrapping_sub(256)<<21))
         .filter(|base|*base>=0xffff800000000000 && *base<0xffffc00000000000)
-        .find(|base| (0..512).all(|page|super::page_table::translate_virtual(VirtAddr::new(base+page*4096)).is_none()))
+        // Only these two pages belong to the backend. Other unmapped holes
+        // within the aligned region are not a reservation requirement.
+        .find(|base| [0,0x104000].iter().all(|offset|super::page_table::translate_virtual(VirtAddr::new(base+offset)).is_none()))
         .expect("no nearby return code region");
     crate::memory::heap::with_frame_allocator(|fa| {
         assert!(fa.free_count()>=16,"return code frame budget");

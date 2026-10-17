@@ -10,6 +10,8 @@ fn main() {
     let f=feature::IBRS|feature::EIBRS|feature::IBPB|feature::STIBP|feature::BHI_CTRL|feature::RRSBA_CTRL|feature::IPRED_CTRL;
     let p=Plan::select(CommonCaps {features:f,not_affected:0},auto,true,false);
     assert_eq!(p.mode,PredictorMode::EnhancedIbrs);assert_eq!(p.set,1|2|1<<6|1<<10|1<<4);assert!(p.ibpb&&p.ibhf&&p.sibling_safe&&!p.bhb_loop);
+    let supervisor=Plan::select(CommonCaps {features:feature::IPRED_CTRL,not_affected:0},auto,true,true);
+    assert_ne!(supervisor.set&(1<<4),0);assert_eq!(supervisor.set&(1<<3),0);
     let p=Plan::select(CommonCaps {features:feature::AUTOIBRS,not_affected:0},auto,false,true);assert_eq!(p.mode,PredictorMode::AutoIbrs);assert_eq!(p.set,0);
     let p=Plan::select(CommonCaps {features:feature::IBRS,not_affected:0},auto,true,true);assert_eq!(p.mode,PredictorMode::LegacyIbrs);assert_eq!(p.set,1);
     let p=Plan::select(CommonCaps {features:feature::EIBRS,not_affected:0},auto,true,true);assert_eq!(p.mode,PredictorMode::Retpolines);assert_eq!(p.set,0);

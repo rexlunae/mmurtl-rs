@@ -21,6 +21,8 @@ def main():
     parser.add_argument('--cpu')
     args=parser.parse_args()
     if args.kind=='bti' and args.arch!='arm64' or args.kind=='ibt' and args.arch!='amd64':parser.error('landing test kind does not match architecture')
+    if args.kind=='retpoline' and args.arch!='amd64':parser.error('retpoline requires amd64')
+    if args.kind=='pac' and args.arch!='arm64':parser.error('PAC requires arm64')
     if args.arch=='amd64':
         command=['qemu-system-x86_64','-cpu',args.cpu or 'max','-drive',f'format=raw,file={ROOT/"target/mmurtl-rs-bios.img"}','-snapshot']
     else:
