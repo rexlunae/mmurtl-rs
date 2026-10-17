@@ -670,7 +670,9 @@ with a marker and scans scrubbed free frames after reaping.
 
 Memory encryption remains a boot/firmware integration project: AMD SME
 requires consistent C-bit mappings from the bootloader onward; Intel TME
-must be configured by firmware. Neither is enabled or claimed here.
+must be configured by firmware. amd64 reports its TME activation/lock/bypass
+status when CPUID advertises the MSR, and reports SME support without
+changing encryption configuration. Neither is enabled by this kernel.
 There is currently no OS shutdown/reboot service. The allocator provides
 `scrub_free_memory()` for a future orderly shutdown after CPUs and DMA
 are quiesced; that service must also wipe live heap/stack allocations
