@@ -230,7 +230,11 @@ pub fn boot_aps() {
         if apic_id == bsp_id {
             continue;
         }
-        boot_one_ap(apic_id, cpu_num);
+        if !boot_one_ap(apic_id, cpu_num) {
+            // The low-memory mailbox/stack fields are shared. Never reuse
+            // them after a timeout while the old AP might still read them.
+            break;
+        }
         cpu_num += 1;
     }
 
@@ -240,7 +244,7 @@ pub fn boot_aps() {
 }
 
 /// Boot a single AP and wait for it to report in
-fn boot_one_ap(apic_id: u32, cpu_num: u64) {
+fn boot_one_ap(apic_id: u32, cpu_num: u64) -> bool {
     // Per-CPU boot stack, leaked: the AP keeps using it forever
     let stack: Box<[u8]> = alloc::vec![0u8; AP_STACK_SIZE].into_boxed_slice();
     let stack = Box::leak(stack);
@@ -269,7 +273,7 @@ fn boot_one_ap(apic_id: u32, cpu_num: u64) {
     crate::arch::apic::send_sipi(apic_id, sipi_vector);
 
     if wait_for_ap(20) {
-        return;
+        return true;
     }
 
     // Slow starter — the spec says send a second SIPI
@@ -280,7 +284,9 @@ fn boot_one_ap(apic_id: u32, cpu_num: u64) {
         crate::serial::write_str(" (APIC ID ");
         crate::serial::write_dec(apic_id as u64);
         crate::serial::write_str(") failed to start!\n");
+        return false;
     }
+    true
 }
 
 /// Wait up to `timeout_ms` for the AP ready flag
@@ -304,18 +310,18 @@ pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
     crate::arch::fpu::init();
     crate::arch::protection::enumerate(cpu_num as usize);
     crate::arch::set_user_counter_access(false);
-    // Per-CPU GDT/TSS/IST, shared IDT, then enable this CPU's LAPIC
-    crate::arch::gdt::init_ap(cpu_num as usize);
-    crate::arch::interrupts::init_ap();
-    crate::arch::apic::enable_current_cpu();
-
-    // Join the scheduler: this park loop becomes the CPU's idle task, and
-    // the per-CPU LAPIC timer starts delivering 100 Hz scheduler ticks.
-    crate::scheduler::register_ap(cpu_num as usize);
-
+    if !crate::arch::protection::admit_ap(cpu_num as usize, || {
+        crate::arch::gdt::init_ap(cpu_num as usize);
+        crate::arch::interrupts::init_ap();
+        crate::arch::apic::enable_current_cpu();
+        crate::scheduler::register_ap(cpu_num as usize);
+        CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
+    }) {
+        // Finalized policy is immutable. This CPU never loads its IDT or
+        // joins the scheduler, and cannot execute unsupported entry CLAC.
+        loop { unsafe { core::arch::asm!("cli", "hlt", options(nomem, nostack)); } }
+    }
     let apic_id = crate::arch::apic::local_apic_id();
-    CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
-
     crate::serial::write_str("[SMP] CPU ");
     crate::serial::write_dec(cpu_num);
     crate::serial::write_str(" online (APIC ID ");

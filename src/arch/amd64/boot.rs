@@ -73,6 +73,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         Optional::None => None,
     };
     super::memory::init(&boot_info.memory_regions, phys_offset);
+    super::memory::protect_image_aliases(boot_info.kernel_addr, boot_info.kernel_len, boot_info.kernel_image_offset);
     super::gdt::protect_bsp_stacks();
     crate::scheduler::debug_lock_self_test();
 

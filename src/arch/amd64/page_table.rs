@@ -95,7 +95,7 @@ pub fn translate_virtual(vaddr: VirtAddr) -> Option<PhysAddr> {
         }
         if pdpte.flags().contains(Flags::HUGE_PAGE) {
             return Some(PhysAddr::new(
-                pdpte.addr().as_u64() + (vaddr.as_u64() & (512 * 1024 * 1024 - 1))
+                pdpte.addr().as_u64() + (vaddr.as_u64() & (1024 * 1024 * 1024 - 1))
             ));
         }
         let pd_phys = pdpte.addr();
@@ -224,17 +224,34 @@ pub unsafe fn set_page_uncached(
     vaddr: VirtAddr,
     frame_allocator: &mut BumpFrameAllocator,
 ) -> Result<(), &'static str> {
+    let pte = leaf_page(vaddr, frame_allocator)?;
+    pte.set_flags(pte.flags() | Flags::NO_CACHE | Flags::WRITE_THROUGH);
+    x86_64::instructions::tlb::flush(vaddr);
+    Ok(())
+}
+
+/// Restrict one physmap alias without affecting neighboring huge-page
+/// mappings. Must run before AP startup; no remote TLBs exist yet.
+pub unsafe fn set_page_readonly(vaddr: VirtAddr, frame_allocator: &mut BumpFrameAllocator) -> Result<(), &'static str> {
+    let pte = leaf_page(vaddr, frame_allocator)?;
+    pte.set_flags((pte.flags() - Flags::WRITABLE) | Flags::NO_EXECUTE);
+    x86_64::instructions::tlb::flush(vaddr);
+    Ok(())
+}
+
+unsafe fn leaf_page(vaddr: VirtAddr, frame_allocator: &mut BumpFrameAllocator)
+    -> Result<&'static mut x86_64::structures::paging::page_table::PageTableEntry, &'static str> {
     let pml4 = active_pml4();
 
     let pml4e = &mut pml4[vaddr.p4_index()];
     if !pml4e.flags().contains(Flags::PRESENT) {
-        return Err("set_page_uncached: PML4E not present");
+        return Err("leaf_page: PML4E not present");
     }
 
     let pdpt = &mut *phys_to_virt(pml4e.addr()).as_mut_ptr::<PageTable>();
     let pdpte = &mut pdpt[vaddr.p3_index()];
     if !pdpte.flags().contains(Flags::PRESENT) {
-        return Err("set_page_uncached: PDPTE not present");
+        return Err("leaf_page: PDPTE not present");
     }
     if pdpte.flags().contains(Flags::HUGE_PAGE) {
         // 1 GiB page → table of 512 × 2 MiB pages
@@ -244,7 +261,7 @@ pub unsafe fn set_page_uncached(
     let pd = &mut *phys_to_virt(pdpte.addr()).as_mut_ptr::<PageTable>();
     let pde = &mut pd[vaddr.p2_index()];
     if !pde.flags().contains(Flags::PRESENT) {
-        return Err("set_page_uncached: PDE not present");
+        return Err("leaf_page: PDE not present");
     }
     if pde.flags().contains(Flags::HUGE_PAGE) {
         // 2 MiB page → table of 512 × 4 KiB pages
@@ -254,15 +271,9 @@ pub unsafe fn set_page_uncached(
     let pt = &mut *phys_to_virt(pde.addr()).as_mut_ptr::<PageTable>();
     let pte = &mut pt[vaddr.p1_index()];
     if !pte.flags().contains(Flags::PRESENT) {
-        return Err("set_page_uncached: PTE not present");
+        return Err("leaf_page: PTE not present");
     }
-    pte.set_addr(
-        pte.addr(),
-        pte.flags() | Flags::NO_CACHE | Flags::WRITE_THROUGH,
-    );
-
-    x86_64::instructions::tlb::flush(vaddr);
-    Ok(())
+    Ok(pte)
 }
 
 /// Split a huge-page entry into a freshly allocated next-level table of

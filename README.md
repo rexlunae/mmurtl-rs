@@ -661,6 +661,12 @@ Actual #MF/#XM delivery remains unavailable while FP/SIMD is disabled.
 
 amd64 intersects SMEP, SMAP, and UMIP support across online CPUs, then
 applies that common policy and CR0.WP before each CPU runs scheduled tasks.
+CPU admission is serialized with policy publication; late starters are
+parked before loading the shared IDT. AP startup stops on timeout so its
+shared low-memory mailbox is never reused while a late CPU may read it.
+Loaded read-only image pages (including RELRO) also have read-only NX
+physmap aliases, protected before AP startup by splitting huge mappings.
+The boot test verifies writes through a text alias fault.
 SMAP access decisions are cached; syscall/timer/yield assembly entries
 conditionally clear AC before saving registers, and every Rust exception
 or IRQ handler clears it before its body. STAC/CLAC include compiler memory

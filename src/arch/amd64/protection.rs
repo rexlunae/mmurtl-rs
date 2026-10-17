@@ -6,6 +6,8 @@ const LASS: u64 = 1 << 27;
 const UMIP: u64 = 1 << 11;
 static CAPS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
 static APPLIED: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
+static ADMISSION: spin::Mutex<()> = spin::Mutex::new(());
+static ADMITTED: AtomicU64 = AtomicU64::new(1); // BSP
 static READY: AtomicBool = AtomicBool::new(false);
 static COMMON: AtomicU64 = AtomicU64::new(0);
 /// Assembly entries read this byte without clobbering any incoming register.
@@ -35,12 +37,19 @@ pub fn enumerate(cpu: usize) {
 }
 
 pub fn finalize() {
+    let admission = ADMISSION.lock();
+    let admitted = ADMITTED.load(Ordering::Acquire);
     let mut common = SMEP | SMAP | UMIP;
-    for cpu in 0..super::smp::cpus_online() { common &= CAPS[cpu].load(Ordering::Acquire); }
+    for cpu in 0..64 {
+        if admitted & (1 << cpu) != 0 { common &= CAPS[cpu].load(Ordering::Acquire); }
+    }
     COMMON.store(common, Ordering::Release);
     SMAP_ENTRY_ENABLED.store(u8::from(common & SMAP != 0), Ordering::Release);
     READY.store(true, Ordering::Release);
+    drop(admission);
     apply_current(0);
+    assert!(!admit_ap(63, || panic!("late AP admitted after finalization")));
+    crate::serial::write_line("[TEST] finalized CPU admission rejects late starters");
     crate::serial::write_str("[CPU] common access protections:");
     for (mask, name) in [(SMEP, " SMEP"), (SMAP, " SMAP"), (UMIP, " UMIP")] {
         if common & mask != 0 { crate::serial::write_str(name); }
@@ -48,9 +57,20 @@ pub fn finalize() {
     crate::serial::write_line(" (enforced before each CPU runs tasks)");
     // This kernel's code and physmap may occupy the lower canonical half.
     // LASS would reject legitimate supervisor instruction/data accesses.
-    if (0..super::smp::cpus_online()).all(|cpu| CAPS[cpu].load(Ordering::Acquire) & LASS != 0) {
+    if (0..64).filter(|cpu| admitted & (1 << cpu) != 0).all(|cpu| CAPS[cpu].load(Ordering::Acquire) & LASS != 0) {
         crate::serial::write_line("[CPU] LASS supported, deferred: kernel mappings require higher-half relocation");
     } else { crate::serial::write_line("[CPU] LASS: unavailable on common CPU feature set"); }
+}
+
+/// Serialize admission with finalization. A late AP is rejected before
+/// loading the shared IDT, whose CLAC policy might be unsupported there.
+/// CPU indices need not be contiguous; only admitted CPUs are intersected.
+pub fn admit_ap(cpu: usize, initialize: impl FnOnce()) -> bool {
+    let _admission = ADMISSION.lock();
+    if READY.load(Ordering::Acquire) { return false; }
+    initialize();
+    ADMITTED.fetch_or(1 << cpu, Ordering::Release);
+    true
 }
 
 /// Called with interrupts disabled before choosing a task's page tables.
@@ -158,6 +178,12 @@ pub fn self_test() {
         Err(_) => { crate::serial::write_line("[TEST] access protections skipped: no test memory"); return; }
     };
     let mut pass = true;
+    let text = self_test as *const () as u64;
+    let pa = super::page_table::translate_virtual(x86_64::VirtAddr::new(text)).expect("test text unmapped");
+    let alias = super::page_table::phys_to_virt(pa).as_u64();
+    let original = unsafe { (alias as *const u8).read_volatile() };
+    pass &= unsafe { super::uaccess::copy_to_user(alias, [original ^ 1].as_ptr(), 1) } == 1;
+    pass &= unsafe { (alias as *const u8).read_volatile() } == original;
     super::without_interrupts(|| {
         super::switch_address_space(0, img.space);
         if common & SMAP != 0 {
@@ -173,7 +199,7 @@ pub fn self_test() {
     });
     crate::memory::user::release(img.space, img.slot);
     assert!(pass, "SMEP/SMAP fault probes failed");
-    crate::serial::write_line("[TEST] access protections: inherited AC cleared, unguarded read/execute denied");
+    crate::serial::write_line("[TEST] access protections: inherited AC cleared, unguarded read/execute and physmap writes denied");
 }
 
 /// Syscall entry must close user-controlled AC before any Rust handler.
