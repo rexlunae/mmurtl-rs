@@ -3,6 +3,21 @@
 use topology::{Core, Source, Admission, Reason, disable_smt};
 fn core(id:u32,shift:u32)->Core { Core::x86(id,shift,6,1<<shift,Source::IntelB).unwrap() }
 fn main() {
+    // 80 interleaved SMT2 IDs must place all 40 candidate cores before
+    // siblings consume the 64 unique, never-recycled boot indices.
+    let ids: Vec<u64> = (0..80).collect();
+    let bsp = core(0,1);
+    let mut order = Vec::new();
+    for preferred in [true,false] {
+        for (i,id) in ids.iter().copied().enumerate().skip(1) {
+            if topology::preferred_candidate(id,ids[..i].iter().copied(),bsp)==preferred { order.push(id); }
+        }
+    }
+    assert_eq!(order.len(),79);
+    assert_eq!(order[..39].iter().filter(|id| **id%2==0).count(),39);
+    let mut a=Admission::<64>::new(true); a.bsp(bsp);
+    for (index,id) in order.into_iter().take(63).enumerate() { a.admit(index+1,core(id as u32,1)); }
+    assert_eq!(a.records.iter().filter(|r|r.reason==Reason::Online).count(),40);
     assert_eq!(disable_smt("",false,false),Ok(true));
     assert_eq!(disable_smt("",true,false),Ok(false));
     assert_eq!(disable_smt("nosmt=off",false,false),Ok(false));

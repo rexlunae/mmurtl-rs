@@ -35,7 +35,8 @@ pub fn probe() -> Core {
                 if let Some(core) = Core::x86(r.eax, shift, { let ecx = __cpuid(0x80000008).ecx; let bits = (ecx >> 12) & 15; if bits != 0 { bits } else { 32 - (ecx & 255).leading_zeros() } }, threads, Source::Amd1e) { return core; }
             }
         }
-        if one.edx & (1 << 28) == 0 { return Core::x86(legacy_id,0,0,1,Source::Legacy).unwrap(); }
+        // Absence of HTT alone is not used as a positive topology result.
+        // Require a structural topology/cache/core-count leaf below.
         let logical = (one.ebx >> 16) & 255;
         let cache = if max >= 4 { __cpuid_count(4,0) } else { __cpuid_count(0,0) };
         if max >= 4 && cache.eax & 31 != 0 && (cache.eax >> 5) & 7 == 1 {

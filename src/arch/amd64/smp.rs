@@ -233,18 +233,25 @@ pub fn boot_aps() {
     }
 
     let mut cpu_num = 1u64; // BSP is CPU 0
-    for &apic_id in madt.cpu_apic_ids.iter() {
+    let bsp_topology = super::topology::probe();
+    let prioritize = crate::topology::isolating();
+    'startup: for preferred in [true, false] {
+    for (index, &apic_id) in madt.cpu_apic_ids.iter().enumerate() {
         if apic_id == bsp_id {
             continue;
         }
-        if cpu_num as usize >= crate::scheduler::MAX_CPUS { break; }
+        let first = !prioritize || crate::topology::policy::preferred_candidate(apic_id as u64,
+            madt.cpu_apic_ids[..index].iter().map(|id| *id as u64), bsp_topology);
+        if first != preferred { continue; }
+        if cpu_num as usize >= crate::scheduler::MAX_CPUS { break 'startup; }
         if !boot_one_ap(apic_id, cpu_num) {
             POSSIBLE_LATE_AP.store(true, Ordering::Release);
             // The low-memory mailbox/stack fields are shared. Never reuse
             // them after a timeout while the old AP might still read them.
-            break;
+            break 'startup;
         }
         cpu_num += 1;
+    }
     }
 
     crate::arch::microcode::seal();

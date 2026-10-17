@@ -56,3 +56,12 @@ pub fn disable_smt(args: &str, mitigations_off: bool, forced_nosmt: bool) -> Res
     }
     Ok(forced || disable)
 }
+
+/// Startup ordering only, never an admission decision. Prioritize the first
+/// firmware ID in each BSP-width group before spending bounded boot slots
+/// on likely siblings. Each started CPU still supplies its own topology.
+pub fn preferred_candidate(id: u64, preceding: impl Iterator<Item = u64>, bsp: Core) -> bool {
+    if !bsp.known() || bsp.mask == 0 { return true; }
+    let group = id & !bsp.mask;
+    group != bsp.base && !preceding.into_iter().any(|old| old & !bsp.mask == group)
+}
