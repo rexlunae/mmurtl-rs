@@ -979,3 +979,28 @@ Frame allocator host regression (dirty simulated RAM and released-frame checks):
 rustc --edition=2021 tools/tests/frame_allocator.rs -o /tmp/mmurtl-frame-test
 /tmp/mmurtl-frame-test
 ```
+
+### Strict kernel W^X
+
+arm64 maps kernel text as EL1 read-only/executable, constants and relocated
+GOT/data as read-only/non-executable, and all other RAM (including user-frame
+identity aliases, heap, stacks and page tables) as writable/non-executable.
+The image uses 4 KiB pages; ordinary RAM remains in 2 MiB blocks. Relocations
+finish before enabling these permissions. Every CPU enables SCTLR_EL1.WXN.
+
+amd64 starts APs through a supervisor RX trampoline, patching its mailbox only
+through the NX physical alias. GDT descriptors have their accessed bits set
+before paging. Once CPU admission closes, the BSP removes the identity mapping,
+makes the physical alias RO/NX, and synchronously flushes all admitted CPUs'
+TLBs, including global entries. If an AP timed out and could still be executing
+the low trampoline, its RX identity mapping is retained; no writable executable
+mapping or writable physical alias remains.
+
+Before launching untrusted tasks, both ports walk the kernel page tables and
+reject W+X or user-accessible kernel mappings. Controlled boot fault probes
+verify text writes, ordinary RAM execution and execution through a user-code
+physical alias are denied. These probes use a private image owned by the boot
+test, without exposing a syscall that executes arbitrary kernel pointers.
+arm64 also probes rodata and RELRO writes. Run `make arm64-image` and
+`python3 tools/test-security.py --arch arm64 --raw-image --cpus 4` to check the
+relocated raw Image path as well as the usual ELF boot.

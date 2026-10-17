@@ -7,7 +7,8 @@
 //!   - device regions (UART, interrupt controller, virtio, PCIe, ...):
 //!     Device-nGnRnE, 2 MiB blocks covering each region
 //! Both are EL1-only (AP=00) and never executable from EL0 (UXN); devices
-//! are never executable at all (PXN). Level-2 tables for the kernel map
+//! and RAM are non-executable (PXN); only read-only kernel text executes.
+//! Level-2 tables for the kernel map
 //! come from a static pool, since the map is built before memory
 //! management exists (with the MMU still off). User pages (the
 //! `memory::user` window) are 4 KiB pages in dynamically allocated tables.
@@ -53,9 +54,9 @@ const MIB2: u64 = 2 << 20;
 const MAIR: u64 = 0x00 | (0xFF << 8) | (0x44 << 16);
 
 /// SCTLR_EL1: ARMv8.0 RES1 bits + M (MMU), C (D-cache), SA (SP alignment
-/// check), I (I-cache). EL0 access to DAIF (UMA), cache maintenance, and
+/// check), I (I-cache), WXN (writable implies execute-never). EL0 access to DAIF (UMA), cache maintenance, and
 /// WFI/WFE all trap.
-const SCTLR: u64 = 0x30D0_0800 | (1 << 0) | (1 << 2) | (1 << 3) | (1 << 12);
+const SCTLR: u64 = (1 << 19) | 0x30D0_0800 | (1 << 0) | (1 << 2) | (1 << 3) | (1 << 12);
 
 /// Register values every CPU loads to share the boot CPU's address space
 #[derive(Clone, Copy)]
@@ -129,8 +130,70 @@ unsafe fn map_block(pa: u64, attrs: u64) -> bool {
     true
 }
 
-const RAM_ATTRS: u64 = ATTR_NORMAL | SH_INNER | AF | UXN | VALID;
+const RAM_ATTRS: u64 = ATTR_NORMAL | SH_INNER | AF | PXN | UXN | VALID;
 const DEVICE_ATTRS: u64 = ATTR_DEVICE | AF | PXN | UXN | VALID;
+
+// Boot-only pool: image pages require finer permissions than the RAM blocks.
+const L3_POOL: usize = 16;
+static mut L3: [Table; L3_POOL] = [const { Table([0; ENTRIES]) }; L3_POOL];
+static mut L3_USED: usize = 0;
+
+unsafe fn protect_kernel_image() {
+    extern "C" {
+        static __kernel_start: u8; static __kernel_end: u8;
+        static __text_start: u8; static __text_end: u8;
+        static __rodata_start: u8; static __rodata_end: u8;
+        static __relro_start: u8; static __relro_end: u8;
+    }
+    let start = core::ptr::addr_of!(__kernel_start) as u64;
+    let end = core::ptr::addr_of!(__kernel_end) as u64;
+    let text = core::ptr::addr_of!(__text_start) as u64..core::ptr::addr_of!(__text_end) as u64;
+    let ro = core::ptr::addr_of!(__rodata_start) as u64..core::ptr::addr_of!(__rodata_end) as u64;
+    let relro = core::ptr::addr_of!(__relro_start) as u64..core::ptr::addr_of!(__relro_end) as u64;
+    for pa in (start..end).step_by(4096) {
+        let l2 = l2_for(pa / GIB).expect("kernel outside mapped RAM");
+        let slot = l2.add(((pa % GIB) / MIB2) as usize);
+        let mut d = slot.read_volatile();
+        if d & TABLE == 0 {
+            assert!(d & !ADDR_MASK == RAM_ATTRS, "kernel outside Normal RAM");
+            let used = core::ptr::addr_of_mut!(L3_USED);
+            assert!(*used < L3_POOL, "kernel exceeds boot L3 pool");
+            let table = core::ptr::addr_of_mut!((*core::ptr::addr_of_mut!(L3))[*used]) as *mut u64;
+            *used += 1;
+            let base = pa & !(MIB2 - 1);
+            for i in 0..ENTRIES { table.add(i).write_volatile((base + i as u64 * 4096) | RAM_ATTRS | TABLE); }
+            d = table as u64 | VALID | TABLE;
+            slot.write_volatile(d);
+        }
+        let mut attrs = RAM_ATTRS | TABLE;
+        if text.contains(&pa) { attrs = (attrs | AP_RO_BIT) & !PXN; }
+        else if ro.contains(&pa) || relro.contains(&pa) { attrs |= AP_RO_BIT; }
+        ((d & ADDR_MASK) as *mut u64).add(((pa >> 12) & 511) as usize).write_volatile(pa | attrs);
+    }
+}
+
+/// Audit the shared kernel map before launching untrusted tasks.
+pub fn audit_kernel_wx() {
+    unsafe fn visit(table: u64, level: u32, read_only: bool, nx: bool) {
+        for i in 0..ENTRIES {
+            let d = (table as *const u64).add(i).read_volatile();
+            if d & VALID == 0 { continue; }
+            if level < 3 && d & TABLE != 0 {
+                visit(d & ADDR_MASK, level + 1, read_only || d & (1 << 62) != 0, nx || d & (1 << 59) != 0);
+            } else {
+                assert!(d & AP_EL0_BIT == 0, "EL0 access to kernel map");
+                assert!(read_only || d & AP_RO_BIT != 0 || nx || d & PXN != 0, "writable executable kernel mapping");
+            }
+        }
+    }
+    unsafe {
+        visit(kernel_root(), 0, false, false);
+        let sctlr: u64;
+        asm!("mrs {}, sctlr_el1", out(reg) sctlr);
+        assert!(sctlr & (1 << 19) != 0, "WXN disabled");
+    }
+    crate::serial::write_line("[MMU] Kernel W^X audit passed (text RX, constants RO/NX, RAM RW/NX)");
+}
 
 /// Build the kernel's identity map from the device tree's RAM and device
 /// regions and turn the MMU on (boot CPU, MMU off). Returns the RAM
@@ -170,6 +233,7 @@ pub unsafe fn early_init(ram: &[(u64, u64)], devices: &[(u64, u64)]) -> heapless
         }
     }
 
+    protect_kernel_image();
     enable(&regs());
     mapped
 }
@@ -414,4 +478,11 @@ pub unsafe fn remove_test_page(root: u64, va: u64) -> u64 {
     entry.write_volatile(0);
     asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb");
     desc & ADDR_MASK
+}
+
+/// Boot test only: caller owns the private user image.
+pub unsafe fn test_user_physical(root: u64, va: u64) -> u64 {
+    let d = walk(root, va, false).expect("test image page").read_volatile();
+    assert!(d & VALID != 0);
+    (d & ADDR_MASK) | (va & 4095)
 }

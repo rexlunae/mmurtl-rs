@@ -553,6 +553,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt.stack_segment_fault.set_handler_fn(stack_segment_handler);
     idt.general_protection_fault.set_handler_fn(general_protection_handler);
     idt.page_fault.set_handler_fn(page_fault_handler);
+    idt[0x32].set_handler_fn(super::wx::tlb_handler);
     idt[0x84].set_handler_fn(nospec_flags_handler);
     unsafe { idt[0x83].set_handler_addr(x86_64::VirtAddr::new(super::protection::test_gate_address())); }
     idt.x87_floating_point.set_handler_fn(x87_fpu_handler);

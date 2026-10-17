@@ -13,12 +13,16 @@ SECTIONS
     . = 0x40200000;
     __kernel_start = .;
 
+    __text_start = .;
     .text : {
         KEEP(*(.text.boot))
         *(.text .text.*)
     }
 
-    .rodata : ALIGN(4096) {
+    . = ALIGN(4096);
+    __text_end = .;
+    __rodata_start = .;
+    .rodata : {
         *(.rodata .rodata.*)
     }
 
@@ -29,15 +33,21 @@ SECTIONS
         __rela_end = .;
     }
 
-    .dynamic : { *(.dynamic) }
     .dynsym : { *(.dynsym) }
     .dynstr : { *(.dynstr) }
     .gnu.hash : { *(.gnu.hash) }
     .hash : { *(.hash) }
 
-    .data : ALIGN(4096) {
+    . = ALIGN(4096);
+    __rodata_end = .;
+    __relro_start = .;
+    .dynamic : { *(.dynamic) }
+    .data.rel.ro : { *(.data.rel.ro .data.rel.ro.*) *(.got .got.*) }
+    . = ALIGN(4096);
+    __relro_end = .;
+
+    .data : {
         *(.data .data.*)
-        *(.got .got.*)
     }
 
     .bss (NOLOAD) : ALIGN(4096) {

@@ -231,7 +231,7 @@ pub unsafe fn set_page_uncached(
 }
 
 /// Restrict one physmap alias without affecting neighboring huge-page
-/// mappings. Must run before AP startup; no remote TLBs exist yet.
+/// mappings. Caller must invalidate every CPU that can cache this alias.
 pub unsafe fn set_page_readonly(vaddr: VirtAddr, frame_allocator: &mut BumpFrameAllocator) -> Result<(), &'static str> {
     let pte = leaf_page(vaddr, frame_allocator)?;
     pte.set_flags((pte.flags() - Flags::WRITABLE) | Flags::NO_EXECUTE);
@@ -239,7 +239,7 @@ pub unsafe fn set_page_readonly(vaddr: VirtAddr, frame_allocator: &mut BumpFrame
     Ok(())
 }
 
-unsafe fn leaf_page(vaddr: VirtAddr, frame_allocator: &mut BumpFrameAllocator)
+pub(super) unsafe fn leaf_page(vaddr: VirtAddr, frame_allocator: &mut BumpFrameAllocator)
     -> Result<&'static mut x86_64::structures::paging::page_table::PageTableEntry, &'static str> {
     let pml4 = active_pml4();
 
