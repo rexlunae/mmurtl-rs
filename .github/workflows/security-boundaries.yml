@@ -24,3 +24,7 @@ jobs:
         run: |
           rustc --edition=2021 tools/tests/cpu_policy.rs -o /tmp/mmurtl-cpu-policy
           /tmp/mmurtl-cpu-policy
+      - name: Verify store-bypass policy and control preservation
+        run: |
+          rustc --edition=2021 tools/tests/store_bypass.rs -o /tmp/mmurtl-store-bypass
+          /tmp/mmurtl-store-bypass

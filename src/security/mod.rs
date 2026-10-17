@@ -1,5 +1,6 @@
 //! Boot policy, admitted-CPU capability intersection, and truthful status.
 pub mod types;
+pub mod store_bypass;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_decode;
 pub use types::*;
@@ -38,14 +39,18 @@ pub fn freeze() -> u64 {
 pub fn common() -> CommonCaps { COMMON.get().copied().unwrap_or_default() }
 /// Record actual installed behavior, never just advertised capability.
 pub fn installed(family: Vulnerability, description: &'static str) { INSTALLED.lock()[family as usize] = Some(description); }
-pub fn report() {
+pub fn finalize() -> CommonCaps {
     let admitted = freeze();
     let common = {
         let caps = CAPS.lock();
         CommonCaps::intersection((0..64).filter(|cpu| admitted & (1 << cpu) != 0)
             .map(|cpu| caps[cpu].unwrap_or_default()))
     };
-    COMMON.call_once(|| common);
+    *COMMON.call_once(|| common)
+}
+pub fn report() {
+    let admitted = freeze();
+    let common = finalize();
     use core::fmt::Write;
     let mut summary: heapless::String<128> = heapless::String::new();
     let _ = write!(summary, "[SPEC] common: {} CPUs, features={:#x}, immunity={:#x}\n",

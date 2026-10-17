@@ -316,7 +316,7 @@ user_uaccess_start:
     svc #0
     cmn x0, #2
     b.ne 1f
-    mov x8, #11
+    mov x8, #12
     svc #0
     cmn x0, #2
     b.ne 1f
@@ -339,11 +339,129 @@ user_uaccess_start:
     .globl user_uaccess_end
 user_uaccess_end:
 
+    .arch armv8.5-a
+    .globl user_ssb_start
+user_ssb_start:
+    mov x19, x0
+    and x20, x0, #3
+    mov x8, #11
+    mov x0, #3
+    svc #0
+    cmn x0, #3
+    b.ne .Lssb_fail
+    cbz x20, .Lssb_off
+    cmp x20, #1
+    b.eq .Lssb_on
+    tbz x19, #2, .Lssb_unsupported
+    mov x8, #11
+    mov x0, #2
+    svc #0
+    cmp x0, #1
+    b.ne .Lssb_fail
+    mov x8, #11
+    mov x0, #0
+    svc #0
+    cbnz x0, .Lssb_fail
+    mov x8, #11
+    mov x0, #2
+    svc #0
+    cbnz x0, .Lssb_fail
+    tbz x19, #3, .Lssb_enable
+    mrs x0, ssbs
+    tbz x0, #12, .Lssb_fail
+.Lssb_enable:
+    mov x8, #11
+    mov x0, #1
+    svc #0
+    cbnz x0, .Lssb_fail
+    mov x22, #4
+.Lssb_sleep:
+    mov x8, #6
+    mov x0, #20
+    svc #0
+    mov x8, #11
+    mov x0, #2
+    svc #0
+    cmp x0, #1
+    b.ne .Lssb_fail
+    tbz x19, #3, .Lssb_next
+    mrs x0, ssbs
+    tbnz x0, #12, .Lssb_fail
+.Lssb_next:
+    subs x22, x22, #1
+    b.ne .Lssb_sleep
+    mov x21, #1
+    b .Lssb_readback
+.Lssb_on:
+    mov x8, #11
+    mov x0, #0
+    svc #0
+    cmn x0, #5
+    b.ne .Lssb_fail
+    tbz x19, #2, .Lssb_unsupported
+    mov x8, #11
+    mov x0, #2
+    svc #0
+    cmp x0, #1
+    b.ne .Lssb_fail
+    mov x21, #1
+    b .Lssb_readback
+.Lssb_off:
+    mov x8, #11
+    mov x0, #1
+    svc #0
+    cmn x0, #5
+    b.ne .Lssb_fail
+    b .Lssb_clear
+.Lssb_unsupported:
+    mov x8, #11
+    mov x0, #2
+    svc #0
+    cmn x0, #4
+    b.ne .Lssb_fail
+    mov x8, #11
+    mov x0, #1
+    svc #0
+    cmn x0, #4
+    b.ne .Lssb_fail
+    cmp x20, #1
+    b.eq .Lssb_exit
+.Lssb_clear:
+    mov x8, #11
+    mov x0, #0
+    svc #0
+    cbnz x0, .Lssb_fail
+    mov x8, #6
+    mov x0, #20
+    svc #0
+    mov x8, #11
+    mov x0, #2
+    svc #0
+    cbnz x0, .Lssb_fail
+    mov x21, #0
+.Lssb_readback:
+    tbz x19, #3, .Lssb_exit
+    mrs x0, ssbs
+    ubfx x0, x0, #12, #1
+    eor x0, x0, #1
+    cmp x0, x21
+    b.ne .Lssb_fail
+.Lssb_exit:
+    mov x8, #0
+    svc #0
+.Lssb_fail:
+    brk #0
+    .globl user_ssb_end
+user_ssb_end:
+    .arch armv8-a
+
     .popsection
     "#
 );
 
 extern "C" {
+    static user_ssb_start: u8;
+    static user_ssb_end: u8;
     static user_uaccess_start: u8;
     static user_uaccess_end: u8;
     static user_time_denied_start: u8;
@@ -409,3 +527,5 @@ program!(coarse, user_coarse_start, user_coarse_end);
 program!(time_denied, user_time_denied_start, user_time_denied_end);
 
 program!(uaccess, user_uaccess_start, user_uaccess_end);
+
+program!(ssb, user_ssb_start, user_ssb_end);

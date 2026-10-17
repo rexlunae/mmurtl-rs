@@ -354,7 +354,7 @@ user_uaccess_start:
     int $0x80
     cmpq $-2, %rax
     jne 1f
-    movl $11, %eax
+    movl $12, %eax
     int $0x80
     cmpq $-2, %rax
     jne 1f
@@ -400,12 +400,119 @@ user_ac_start:
 2:  ud2
     .globl user_ac_end
 user_ac_end:
+    .globl user_ssb_start
+user_ssb_start:
+    movq %rdi, %r12
+    movq %rdi, %r13
+    andl $3, %r13d
+    movl $11, %eax
+    movl $3, %edi
+    int $0x80
+    cmpq $-3, %rax
+    jne .Lssb_fail
+    testl %r13d, %r13d
+    jz .Lssb_off
+    cmpl $1, %r13d
+    je .Lssb_on
+    testq $4, %r12
+    jz .Lssb_unsupported
+    movl $11, %eax
+    movl $2, %edi
+    int $0x80
+    cmpq $1, %rax
+    jne .Lssb_fail
+    movl $11, %eax
+    xorl %edi, %edi
+    int $0x80
+    testq %rax, %rax
+    jnz .Lssb_fail
+    movl $11, %eax
+    movl $2, %edi
+    int $0x80
+    testq %rax, %rax
+    jnz .Lssb_fail
+    movl $11, %eax
+    movl $1, %edi
+    int $0x80
+    testq %rax, %rax
+    jnz .Lssb_fail
+    movl $4, %r13d
+.Lssb_sleep:
+    movl $6, %eax
+    movl $20, %edi
+    int $0x80
+    movl $11, %eax
+    movl $2, %edi
+    int $0x80
+    cmpq $1, %rax
+    jne .Lssb_fail
+    decl %r13d
+    jnz .Lssb_sleep
+    jmp .Lssb_exit
+.Lssb_on:
+    movl $11, %eax
+    xorl %edi, %edi
+    int $0x80
+    cmpq $-5, %rax
+    jne .Lssb_fail
+    testq $4, %r12
+    jz .Lssb_unsupported
+    movl $11, %eax
+    movl $2, %edi
+    int $0x80
+    cmpq $1, %rax
+    jne .Lssb_fail
+    jmp .Lssb_exit
+.Lssb_off:
+    movl $11, %eax
+    movl $1, %edi
+    int $0x80
+    cmpq $-5, %rax
+    jne .Lssb_fail
+    jmp .Lssb_clear
+.Lssb_unsupported:
+    movl $11, %eax
+    movl $2, %edi
+    int $0x80
+    cmpq $-4, %rax
+    jne .Lssb_fail
+    movl $11, %eax
+    movl $1, %edi
+    int $0x80
+    cmpq $-4, %rax
+    jne .Lssb_fail
+    cmpl $1, %r13d
+    je .Lssb_exit
+.Lssb_clear:
+    movl $11, %eax
+    xorl %edi, %edi
+    int $0x80
+    testq %rax, %rax
+    jnz .Lssb_fail
+    movl $6, %eax
+    movl $20, %edi
+    int $0x80
+    movl $11, %eax
+    movl $2, %edi
+    int $0x80
+    testq %rax, %rax
+    jnz .Lssb_fail
+.Lssb_exit:
+    xorl %eax, %eax
+    int $0x80
+.Lssb_fail:
+    ud2
+    .globl user_ssb_end
+user_ssb_end:
+
     .popsection
     "#,
     options(att_syntax)
 );
 
 extern "C" {
+    static user_ssb_start: u8;
+    static user_ssb_end: u8;
     static user_sidt_start: u8;
     static user_sidt_end: u8;
     static user_ac_start: u8;
@@ -488,3 +595,5 @@ program!(uaccess, user_uaccess_start, user_uaccess_end);
 
 program!(sidt, user_sidt_start, user_sidt_end);
 program!(ac, user_ac_start, user_ac_end);
+
+program!(ssb, user_ssb_start, user_ssb_end);

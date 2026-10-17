@@ -105,6 +105,8 @@ exception_common:
     bl arm64_exception          // x0 = kind, x1 = frame -> x0 = frame to resume
     mov sp, x0
     bl scheduler_unlock         // releases the lock only if we switched
+    mov x0, sp
+    bl arm64_user_return_policy
 
     ldp x1, x2, [sp, #256]
     msr elr_el1, x1

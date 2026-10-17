@@ -352,6 +352,8 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
 
     crate::serial::write_str("[INIT] SMP...\n");
     super::smp::boot_secondaries(&info);
+    crate::security::finalize();
+    super::store_bypass::init();
     crate::security::report();
 
     crate::serial::write_str("[INIT] Virtio drivers...\n");
