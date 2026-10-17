@@ -33,6 +33,12 @@ pub struct Admission<const N: usize> { pub disable_smt: bool, pub records: [Reco
 impl<const N: usize> Admission<N> {
     pub const fn new(disable_smt: bool) -> Self { Self { disable_smt, records: [Record::EMPTY; N] } }
     pub fn bsp(&mut self, core: Core) { self.records[0] = Record { core, reason: Reason::Online }; }
+    /// Startup hint based on topology actually supplied by an admitted CPU.
+    /// Defer IDs inside its sibling range until other cores have started.
+    pub fn covered_candidate(&self, id: u64) -> bool {
+        self.disable_smt && self.records.iter().any(|r| r.reason == Reason::Online
+            && r.core.known() && (id ^ r.core.base) & !r.core.mask == 0)
+    }
     pub fn admit(&mut self, cpu: usize, core: Core) -> bool {
         if cpu == 0 || cpu >= N || self.records[cpu].reason != Reason::Empty { return false; }
         let reason = if !self.disable_smt { Reason::Online }
@@ -55,13 +61,4 @@ pub fn disable_smt(args: &str, mitigations_off: bool, forced_nosmt: bool) -> Res
         }
     }
     Ok(forced || disable)
-}
-
-/// Startup ordering only, never an admission decision. Prioritize the first
-/// firmware ID in each BSP-width group before spending bounded boot slots
-/// on likely siblings. Each started CPU still supplies its own topology.
-pub fn preferred_candidate(id: u64, preceding: impl Iterator<Item = u64>, bsp: Core) -> bool {
-    if !bsp.known() || bsp.mask == 0 { return true; }
-    let group = id & !bsp.mask;
-    group != bsp.base && !preceding.into_iter().any(|old| old & !bsp.mask == group)
 }

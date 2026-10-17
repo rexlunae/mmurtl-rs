@@ -22,6 +22,7 @@ pub fn bsp_ready() {
 /// Called inside the security admission seal. On x86 the prepared CPU has
 /// guarded NMI/MC gates before parking; on ARM it parks with DAIF masked.
 pub fn admit(cpu: usize) -> bool { STATE.lock().admit(cpu, crate::arch::topology::probe()) }
+pub fn covered_candidate(id: u64) -> bool { STATE.lock().covered_candidate(id) }
 pub fn isolating() -> bool { CONFIGURED.load(Ordering::Acquire) && STATE.lock().disable_smt }
 pub fn core_id(cpu: usize) -> Option<u64> {
     let state = STATE.lock();

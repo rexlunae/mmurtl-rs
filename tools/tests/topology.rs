@@ -3,21 +3,23 @@
 use topology::{Core, Source, Admission, Reason, disable_smt};
 fn core(id:u32,shift:u32)->Core { Core::x86(id,shift,6,1<<shift,Source::IntelB).unwrap() }
 fn main() {
-    // 80 interleaved SMT2 IDs must place all 40 candidate cores before
-    // siblings consume the 64 unique, never-recycled boot indices.
-    let ids: Vec<u64> = (0..80).collect();
-    let bsp = core(0,1);
-    let mut order = Vec::new();
-    for preferred in [true,false] {
-        for (i,id) in ids.iter().copied().enumerate().skip(1) {
-            if topology::preferred_candidate(id,ids[..i].iter().copied(),bsp)==preferred { order.push(id); }
+    // Learn wider AP sibling ranges as each core starts. SMT2 BSP +
+    // forty SMT4 AP cores must not spend first-pass indices on siblings.
+    for shift in [1,2] {
+        let end=if shift==1 {80} else {164};
+        let start=if shift==1 {1} else {4};
+        let mut a=Admission::<64>::new(true); a.bsp(core(0,1));
+        let mut index=1; let mut deferred=Vec::new();
+        for id in start..end {
+            if a.covered_candidate(id as u64) { deferred.push(id); continue; }
+            assert!(index<64,"sibling consumed a core's boot index");
+            assert!(a.admit(index,core(id,shift))); index+=1;
         }
+        let expected=if shift==1 {40} else {41};
+        assert_eq!(index,expected);
+        for id in deferred { if index==64 {break;} assert!(!a.admit(index,core(id,shift))); index+=1; }
+        assert_eq!(a.records.iter().filter(|r|r.reason==Reason::Online).count(),expected);
     }
-    assert_eq!(order.len(),79);
-    assert_eq!(order[..39].iter().filter(|id| **id%2==0).count(),39);
-    let mut a=Admission::<64>::new(true); a.bsp(bsp);
-    for (index,id) in order.into_iter().take(63).enumerate() { a.admit(index+1,core(id as u32,1)); }
-    assert_eq!(a.records.iter().filter(|r|r.reason==Reason::Online).count(),40);
     assert_eq!(disable_smt("",false,false),Ok(true));
     assert_eq!(disable_smt("",true,false),Ok(false));
     assert_eq!(disable_smt("nosmt=off",false,false),Ok(false));
