@@ -144,9 +144,8 @@ This is an initial CLI port: legacy `.RUN` binaries, program arguments,
 batch files, wildcards, history, `REN`, and the original monitor/debugger
 commands are not implemented. Ctrl-C cancels input; it does not interrupt
 a running program. There is one mounted volume, with no drive letters.
-File reads are limited to 1 MiB per command; the current kernel bump
-allocator does not reclaim filesystem allocations, so long shell sessions
-consume memory. Moving the CLI to userspace requires console and filesystem
+File reads are limited to 1 MiB per command. Filesystem allocations are
+reclaimed into segregated size-class caches. Moving the CLI to userspace requires console and filesystem
 syscalls that are not yet implemented.
 
 Shell validation (requires QEMU and exfatprogs; uses disposable test disks):
@@ -311,18 +310,18 @@ Originally by Richard Burgess (1994):
 - `unmap_page()` — unmaps and returns the freed frame
 - `query_page()` — checks flags for any mapped page
 
-### Kernel Heap (Bump Allocator)
-- 4 MiB initial, auto-extends in 1 MiB chunks
+### Kernel Heap (Reclaiming Slabs)
+- 4 MiB initial on amd64, 16 MiB on arm64; grows in 2 MiB chunks
 - Backed by frame allocator page mappings (allocates physical pages on demand)
 - `#[global_allocator]` enabling Vec, Box, String, format! from Rust's `alloc` crate
-- Fast bump-pointer, OOM handled by extension loop
+- Scrubbed object reuse within immutable domain/size caches
 
 ### Boot output:
 ```
 [MEM] Initializing memory manager...
 [PAGING] Physical memory offset: 0xffff800000000000
 [FRAME] Bitmap at physical 0x1000000, total=8388608, free=8382408 frames (32744 MiB)
-[HEAP] Bump allocator at 0xffff900000000000 (4096 KiB)
+[HEAP] Slab allocator at (ptr) (4096 KiB initial backing)
 [MEM] Memory manager initialized: 32744 MiB free / 32768 MiB total
 [TEST] Box: 42
 [TEST] Vec: [0, 100, 200, 300, 400, 500, 600, 700, 800, 900]
@@ -831,9 +830,8 @@ set explicitly on BIOS/UEFI amd64 and on arm64 entry/secondary paths,
 including inherited firmware settings. User FP/SIMD attempts are killed
 and checked at boot as `rogue_fp` and `rogue_simd`; kernel FP use is a bug.
 
-Limitations: the kernel heap is a bump allocator, so small kernel-side
-task metadata is not recycled; ELF programs are static executables (no
-dynamic linking or relocation).
+ELF programs support static executables and static PIE with relative
+relocations; dynamic linking remains unsupported.
 
 ## Architecture ports (amd64 + arm64)
 
@@ -1114,8 +1112,8 @@ bare-metal validation and is not exercised by the VM tests.
 ### arm64 TTBR1 and ASIDs
 
 The kernel image and the RAM/device physical window have independent randomized
-placements in TTBR1. The heap uses the physical window; allocated stacks use
-a separate guarded virtual region. The primary stub rebases absolute references
+placements in TTBR1. The heap and guarded stacks use separate virtual
+regions backed by independent frames. The primary stub rebases absolute references
 before enabling translation, then branches high. Secondary entry/context and
 spin-table release values remain physical for firmware; their stacks and Rust
 entry points are high virtual addresses. The temporary TTBR0 maps only physical
@@ -1165,7 +1163,7 @@ tracked separately.
 
 The amd64 bootloader randomizes its PIE image, physical window, boot info and
 boot stack within `0xffff800000000000..0xffffbfffffffffff`. The heap has a
-separate, excluded range starting at `0xffffc00000000000`, with 21 bits of
+separate, excluded range starting at `0xffffc00000000000`, with nearly 21 bits of
 2-MiB placement selected after early microcode and CPU entropy initialization.
 Emergency stacks use a separate randomized region beginning at
 `0xffffc80000000000`, also excluded from bootloader and heap placement.
@@ -1176,7 +1174,9 @@ ARM chooses independent image and linear-map regions before enabling
 translation. The physical window has 128 possible 512-GiB slots; the image
 has 128 separate slots and 17 bits of 2-MiB displacement within its slot.
 Relative relocations and AP handoffs carry the image offset; physical table
-walks, devices, DMA and heap use the linear offset. The image's physical alias
+walks, devices and DMA use the linear offset. The heap has an independent
+2-MiB-aligned placement in `0xffffd00000000000..0xffffd40000000000`;
+heap/stack firmware pointers use page-table translation. The image's physical alias
 is NX, with text/constants read-only. Both aliases retain W^X.
 
 Early ARM seeding consumes and erases DT `rng-seed`/`kaslr-seed` before mapping,
@@ -1330,8 +1330,8 @@ make bios arm64  # restore normal images
 The state regression seeds initialized stack memory, observes it cleared on
 the next user entry, checks varying offsets and runs 1,000 short task
 lifetimes. Its frame accounting includes stack page-table reclamation;
-existing bump-heap growth remains separately accounted for and is not fixed
-by this change.
+mapped heap growth remains separately accounted for. The slab regression
+below also checks stable live objects and cache backing after warmup.
 
 ### User-space ASLR and runtime guards
 
@@ -1363,7 +1363,7 @@ writable+executable user mapping is created. Legacy ET_EXEC code keeps
 its linked address while its stack is randomized.
 The 64 MiB memory limit includes zero-filled segments and does not raise
 the CLI's existing 1 MiB file-read cap, which remains intentional until
-streaming reads and heap reclamation are implemented (#28).
+streaming reads are implemented.
 
 `make user user-arm64` builds the runtime with PIE and strong compiler
 stack protectors. ELF entry receives a private 32-byte startup block in
@@ -1494,3 +1494,75 @@ python3 tools/test-kernel-return.py
 ```
 `test-weak-entropy` deliberately gives every source zero credit and must
 only be used for regression images.
+
+### Reclaiming and segregated heap
+
+The global allocator uses power-of-two size classes from 16 bytes through
+16 MiB, with fixed metadata for at most 4096 slabs. A slab has one immutable
+domain/size owner and is never reassigned, including after every object is
+freed. Backing remains cached at each class's peak footprint. This trades
+release of empty cache pages for protection against cross-cache VA reuse;
+object reclamation stops steady workloads from growing indefinitely.
+Scheduler slots retain exited-task bookkeeping until replacement drops the
+old task box/inbox. The churn assertion measures steady-state ownership,
+rather than requiring every metadata object to disappear immediately.
+Large classes use an aligned span; small classes share one page.
+ARM heap pages now have independent physical backing in a separate virtual
+region, removing the contiguous-physical-growth requirement. x86 establishes
+all heap PML4 links before private roots copy them.
+Every random start retains at least 128 GiB plus one growth chunk of virtual
+headroom, covering the allocator's span/alignment bounds. Growth preflights
+data and a conservative upper bound on page-table frames under FRAME_LOCK;
+insufficient capacity returns failure before any mapping is published.
+
+Free-list words encode `next ^ boot_secret ^ slot_address`, and every pop
+validates range, alignment, cache ownership and allocation bitmap before
+following a pointer. Each new slab receives a shuffled slot order from RNG
+draws. Metadata lives outside client allocations. Free erases the entire
+class slot with volatile stores, then writes only its encoded linkage word;
+allocation clears that word, returning zeroed capacity. Double frees,
+interior pointers, mismatched classes/domains and corrupt links fail closed.
+Weak bootstrap entropy is reported and does not provide assured free-list
+secrecy. Task boxes and RQB inbox buffers use separate allocator domains;
+ordinary/user-sized buffers cannot reclaim their slots. Page-table frames
+and their static registries remain outside the object heap. `MEM` reports
+live bytes, cache backing and live allocation count.
+
+The optional `kfence` feature samples roughly one in 64 eligible generic
+allocations of at most one page, after scheduling starts with IRQs enabled.
+Each sample has its own page between unmapped guards. Free scrubs the object
+immediately; the reaper subsequently unmaps it and releases backing after
+the TLB shootdown. UAF detection begins after that deferred unmap. Freed
+sample VAs stay unmapped permanently. A fixed 128-sample lifetime budget
+bounds metadata; allocation falls back to normal slabs when it is exhausted.
+Dedicated task/inbox caches and IRQ-masked allocations are not sampled.
+Guard/UAF diagnostics use lock-free UART output with allocation/free task
+and CPU context, cache, size and restricted fault addresses. Unwinding and
+allocation/free stack traces are unavailable in this aborting kernel.
+Live sample bytes/objects are included in heap totals; mapped sample backing,
+including pending unmaps, is reported separately from retained slab backing.
+MTE tagging is not implemented; tagging would be an additional probabilistic
+layer, rather than replacing ownership checks and scrubbing.
+
+CI runs mock-backed alignment, isolation, scrub/reuse, corruption and
+1,000-wave tests and builds both sampling configurations. VM regressions:
+```sh
+make bios arm64 KERNEL_FEATURES=test-heap-churn
+python3 tools/test-security.py --arch amd64 --cpus 4 --nmi \
+  --require '[HEAP TEST] 1000 task lifetimes'
+python3 tools/test-security.py --arch arm64 --cpu max --cpus 4 --el2 \
+  --require '[SMP] 4 CPU(s) online' --require '[HEAP TEST] 1000 task lifetimes'
+make bios arm64 KERNEL_FEATURES=test-kfence
+python3 tools/test-cfi.py --arch amd64 --kind kfence
+python3 tools/test-cfi.py --arch arm64 --kind kfence
+make bios arm64 KERNEL_FEATURES=test-heap-oom
+python3 tools/test-security.py --arch amd64 --cpus 4 \
+  --require '[HEAP TEST] exhaustion preserved frames/mappings'
+python3 tools/test-security.py --arch arm64 --cpu max --cpus 4 \
+  --require '[HEAP TEST] exhaustion preserved frames/mappings'
+make bios arm64
+```
+The task test warms caches, then requires stable live objects, cache backing
+and mapped heap backing across 1,000 further lifetimes. The guard test records
+an allocation and free, waits for unmapping, then deliberately writes through
+the stale pointer and requires a diagnosed page fault.

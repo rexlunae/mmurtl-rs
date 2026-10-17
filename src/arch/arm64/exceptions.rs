@@ -346,6 +346,8 @@ unsafe extern "C" fn arm64_exception(kind: u64, frame: *mut TaskContext) -> u64 
                 (*frame).spsr &= !(3<<10);
                 return sp;
             }
+            #[cfg(feature="kfence")]
+            if esr>>26==0x25 {crate::memory::fence::fault(far(),(*frame).elr);}
             kernel_fault("synchronous exception", esr, &*frame)
         }
         // IRQ from kernel or user code

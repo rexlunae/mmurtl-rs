@@ -16,7 +16,7 @@ ROOT=Path(__file__).resolve().parent.parent
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--arch',choices=['amd64','arm64'],required=True)
-    parser.add_argument('--kind',choices=['kcfi','bti','ibt','canary','pac'],default='kcfi')
+    parser.add_argument('--kind',choices=['kcfi','bti','ibt','canary','pac','kfence'],default='kcfi')
     parser.add_argument('--allow-unavailable',action='store_true')
     parser.add_argument('--cpu')
     args=parser.parse_args()
@@ -37,9 +37,12 @@ def main():
         if 'positive test skipped' in text:
             assert args.kind!='kcfi' and args.allow_unavailable,text[-4000:]
             print(args.arch+': '+args.kind+' unavailable; positive enforcement test explicitly skipped');return
-        kind={'kcfi':'KCFI','bti':'BTI','ibt':'CET-IBT/#CP','canary':'stack canary','pac':'PAC authentication'}[args.kind]
+        kind={'kcfi':'KCFI','bti':'BTI','ibt':'CET-IBT/#CP','canary':'stack canary','pac':'PAC authentication','kfence':'KFENCE use-after-free'}[args.kind]
         target='(unknown)' if args.kind in ['canary','pac'] else '(ptr)'
         assert f'[CFI] fatal {kind} at (ptr) target {target}; CPU halted' in text,text[-4000:]
+        if args.kind=='kfence':
+            assert '[KFENCE] use-after-free; alloc T' in text and '; free T' in text,text[-4000:]
+            assert '[KFENCE TEST] touching unmapped object' in text,text[-4000:]
         assert '[CFI TEST] ERROR' not in text,text[-4000:]
         print(args.arch+': '+args.kind+' violation trapped before target execution, PC/target diagnostics restricted')
     finally:

@@ -69,6 +69,7 @@ fn next_task_id() -> u32 {
 /// Saved register context for a task — the architecture's exception
 /// frame (general registers + return state), stored on its kernel stack
 pub use crate::arch::TaskContext;
+pub type TaskBox=Box<TaskControlBlock,crate::memory::heap::CacheAllocator<1>>;
 
 /// Task Control Block — describes a single execution context
 #[repr(C)]
@@ -99,7 +100,7 @@ pub struct TaskControlBlock {
     /// switched out, so tasks with `on_cpu.is_some()` are never picked.
     pub on_cpu: Option<u8>,
     /// Pending requests sent to this task (delivered by `receive`)
-    pub inbox: VecDeque<Rqb>,
+    pub inbox: VecDeque<Rqb,crate::memory::heap::CacheAllocator<2>>,
     /// Reply slot, filled by the receiver's `reply` while we are in
     /// WaitingReply
     pub reply: Option<Rqb>,
@@ -152,7 +153,7 @@ impl TaskControlBlock {
         stack: KernelStack,
         priority: TaskPriority,
         name: &'static str,
-    ) -> Box<Self> {
+    ) -> TaskBox {
         let stack_top = stack.virt + stack.size;
         let stack_bottom = stack.virt;
         #[cfg(target_arch="aarch64")]
@@ -182,7 +183,7 @@ impl TaskControlBlock {
             { (*(ctx_addr as *mut TaskContext)).x[18] = shadow.virt; }
         }
 
-        Box::new(Self {
+        Box::new_in(Self {
             id: next_task_id(),
             state: TaskState::Ready,
             priority,
@@ -193,7 +194,7 @@ impl TaskControlBlock {
             total_ticks: 0,
             pinned_cpu: None,
             on_cpu: None,
-            inbox: VecDeque::new(),
+            inbox: VecDeque::new_in(crate::memory::heap::RQB_ALLOC),
             reply: None,
             wait_for: 0,
             wake_tick: 0,
@@ -208,7 +209,7 @@ impl TaskControlBlock {
             #[cfg(target_arch="aarch64")]
             shadow_phys: shadow.phys,
             reaped: false,
-        })
+        },crate::memory::heap::TASK_ALLOC)
     }
 
     /// Create a user-mode task (ring 3 / EL0). `stack` becomes its kernel
@@ -224,7 +225,7 @@ impl TaskControlBlock {
         stack: KernelStack,
         priority: TaskPriority,
         name: &'static str,
-    ) -> Box<Self> {
+    ) -> TaskBox {
         // Reuse the kernel-task constructor for the stack bookkeeping, then
         // rewrite its initial frame for a privilege-level change
         let dummy: extern "C" fn() -> ! = user_entry_placeholder;
@@ -245,8 +246,8 @@ impl TaskControlBlock {
     /// Used for per-CPU idle tasks: the CPU's boot/park loop *becomes* the
     /// idle task. No initial context is crafted — `context_ptr` is filled
     /// in the first time the timer interrupt saves this context.
-    pub fn adopt_current(name: &'static str, priority: TaskPriority, cpu: u8) -> Box<Self> {
-        Box::new(Self {
+    pub fn adopt_current(name: &'static str, priority: TaskPriority, cpu: u8) -> TaskBox {
+        Box::new_in(Self {
             id: next_task_id(),
             state: TaskState::Running,
             priority,
@@ -257,7 +258,7 @@ impl TaskControlBlock {
             total_ticks: 0,
             pinned_cpu: Some(cpu),
             on_cpu: Some(cpu),
-            inbox: VecDeque::new(),
+            inbox: VecDeque::new_in(crate::memory::heap::RQB_ALLOC),
             reply: None,
             wait_for: 0,
             wake_tick: 0,
@@ -272,7 +273,7 @@ impl TaskControlBlock {
             #[cfg(target_arch="aarch64")]
             shadow_phys: 0,
             reaped: false,
-        })
+        },crate::memory::heap::TASK_ALLOC)
     }
 }
 

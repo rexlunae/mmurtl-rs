@@ -37,6 +37,8 @@ jobs:
           /tmp/mmurtl-stack-layout-test
       - name: Verify frame scrubbing
         run: |
+          rustc --edition=2021 -O tools/tests/slab.rs -o /tmp/mmurtl-slab-test
+          /tmp/mmurtl-slab-test
           rustc --edition=2021 tools/tests/frame_allocator.rs -o /tmp/mmurtl-frame-test
           /tmp/mmurtl-frame-test
       - name: Verify CPU policy and heterogeneous capability intersection
@@ -82,3 +84,16 @@ jobs:
           rustc --edition=2021 tools/tests/arm_predictor.rs -o /tmp/mmurtl-arm-predictor-test
           /tmp/mmurtl-arm-predictor-test
           python3 tools/test-arm-predictor.py
+      - name: Build and audit optional sampled heap guards
+        run: |
+          make build arm64 KERNEL_FEATURES=kfence,test-heap-oom
+          python3 tools/test-kernel-cfi.py
+          python3 tools/test-kernel-return.py
+          python3 tools/test-stack-sizes.py
+      - name: Install QEMU for frame-pressure boot regressions
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-system-arm
+      - name: Boot both kernels under real heap frame pressure
+        run: |
+          make bios arm64 KERNEL_FEATURES=test-heap-oom
+          python3 tools/test-security.py --arch amd64 --cpus 4 --nmi --require '[HEAP TEST] exhaustion preserved frames/mappings'
+          python3 tools/test-security.py --arch arm64 --cpu max --cpus 4 --el2 --require '[SMP] 4 CPU(s) online' --require '[HEAP TEST] exhaustion preserved frames/mappings'

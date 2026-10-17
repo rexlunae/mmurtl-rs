@@ -336,6 +336,8 @@ fn page_fault_handler(
         kill_user_task(&stack_frame, what, Some(address.as_u64()));
     }
 
+    #[cfg(feature="kfence")]
+    crate::memory::fence::fault(address.as_u64(),stack_frame.instruction_pointer.as_u64());
     crate::serial::write_str("\n[PAGE FAULT]\n");
     crate::serial::write_str("  Address: ");
     crate::kptr::write(address.as_u64());

@@ -44,3 +44,7 @@ test-shadow-overflow = []
 # Regression only: treat all entropy sources as uncredited.
 test-weak-entropy = []
 test-psci-failure = []
+test-heap-churn = []
+test-heap-oom = []
+kfence = []
+test-kfence = ["kfence"]

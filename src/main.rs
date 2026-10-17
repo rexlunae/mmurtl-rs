@@ -8,6 +8,7 @@
 
 #![no_std]
 #![no_main]
+#![feature(allocator_api)]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 
 extern crate alloc;
@@ -58,6 +59,10 @@ pub fn print_banner() {
 pub fn kernel_run() -> ! {
     kptr::init();
     random::report();
+    #[cfg(feature="test-heap-oom")]
+    memory::heap::oom_self_test();
+    #[cfg(feature="test-kfence")]
+    memory::fence::test();
     serial::write_line("[RETURN] strong compiler stack guards active");
     #[cfg(target_arch="aarch64")]
     serial::write_line("[RETURN] guarded shadow call stacks active; x18 reserved");

@@ -34,7 +34,7 @@ def main():
             image, linear = map(lambda s: int(s, 16), match.groups())
             assert image >= 0xffff000000000000 and linear >= 0xffff000000000000
             layouts.append((image, linear))
-            match = re.search(r'\[HEAP\] Bump allocator at (0x[0-9a-f]+)', text)
+            match = re.search(r'\[HEAP\] Slab allocator at (0x[0-9a-f]+)', text)
             assert match, 'missing raw heap address'
             heap.append(int(match[1], 16))
         else:

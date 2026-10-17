@@ -1,18 +1,11 @@
-//! Kernel Heap Allocator — Simple bump allocator.
-//!
-//! Provides the global allocator for Rust's `alloc` crate. The bump
-//! allocator just increments a pointer, making it fast but unable to free
-//! individual allocations (dealloc is a no-op).
-//!
-//! Where the heap lives is the architecture's business
-//! (`crate::arch::heap_init` / `heap_extend`): amd64 maps fresh frames at a
-//! randomized higher-half address and can grow the heap page by page; arm64
-//! carves one physically contiguous block in its randomized linear map.
-
-use core::alloc::{GlobalAlloc, Layout};
+//! Reclaiming size-class slabs with immutable cache ownership. Metadata is
+//! outside client allocations; free-list links are secret/address encoded.
+use core::alloc::{AllocError, Allocator, GlobalAlloc, Layout};
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::memory::frame_allocator;
+const _:()=assert!((2*super::slab::MAX_SLABS*(1<<super::slab::MAX_SHIFT)) as u64+(2<<20)<=crate::security::kaslr::HEAP_VA_BUDGET);
 
 /// Global frame allocator pointer — set once during memory init
 static mut FRAME_ALLOC_PTR: *mut frame_allocator::FrameAllocator = core::ptr::null_mut();
@@ -62,121 +55,136 @@ pub fn with_frame_allocator<R>(
     })
 }
 
-// ========================================================================
-// Bump Allocator
-// ========================================================================
 
-/// A simple bump-pointer allocator over an architecture-provided region.
-pub struct BumpAllocator {
-    initialized: AtomicBool,
-    heap_end: AtomicUsize,
-    next_free: AtomicUsize,
+struct HeapState {
+    slabs: super::slab::Slabs,
+    next: usize,
+    end: usize,
 }
-
-unsafe impl Sync for BumpAllocator {}
-
-impl BumpAllocator {
-    pub const fn new() -> Self {
-        Self {
-            initialized: AtomicBool::new(false),
-            heap_end: AtomicUsize::new(0),
-            next_free: AtomicUsize::new(0),
-        }
+impl HeapState {
+    const fn new() -> Self {Self {slabs:super::slab::Slabs::new(),next:0,end:0}}
+}
+pub struct KernelAllocator {
+    ready: AtomicBool,
+    state: spin::Mutex<HeapState>,
+}
+impl KernelAllocator {
+    pub const fn new()->Self {Self {ready:AtomicBool::new(false),state:spin::Mutex::new(HeapState::new())}}
+    fn initialize(&self,fa:&mut frame_allocator::FrameAllocator,secret:usize) {
+        let (start,end)=crate::arch::heap_init(fa);
+        let mut state=self.state.lock();state.next=start as usize;state.end=end as usize;state.slabs.seed(secret);
+        self.ready.store(true,Ordering::Release);
+        drop(state);
+        crate::serial::write_str("[HEAP] Slab allocator at ");crate::kptr::write(start);
+        crate::serial::write_str(" (");crate::serial::write_dec((end-start)/1024);crate::serial::write_line(" KiB initial backing)");
+        crate::serial::write_line("[HEAP] reclaiming slabs; immutable domain/size caches; randomized encoded free lists; scrub on free");
     }
-
-    /// Initialize the heap over the architecture's initial region
-    pub fn init(&self, frame_alloc: &mut frame_allocator::FrameAllocator) {
-        if self.initialized.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let (start, end) = crate::arch::heap_init(frame_alloc);
-
-        crate::serial::write_str("[HEAP] Bump allocator at ");
-        crate::kptr::write(start);
-        crate::serial::write_str(" (");
-        crate::serial::write_dec((end - start) / 1024);
-        crate::serial::write_str(" KiB)\n");
-
-        self.heap_end.store(end as usize, Ordering::SeqCst);
-        self.next_free.store(start as usize, Ordering::SeqCst);
-    }
-
-    /// Allocate memory — bump the pointer, extend if needed
-    fn alloc_impl(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size();
-        let align = layout.align();
-
-        loop {
-            let current = self.next_free.load(Ordering::Acquire);
-            let aligned = (current + align - 1) & !(align - 1);
-            let new_free = aligned + size;
-
-            let heap_end = self.heap_end.load(Ordering::Acquire);
-
-            if new_free <= heap_end {
-                // Fast path: fits in current heap
-                if self.next_free.compare_exchange(
-                    current, new_free, Ordering::SeqCst, Ordering::Relaxed,
-                ).is_ok() {
-                    return aligned as *mut u8;
-                }
-                // CAS failed — retry
-                continue;
+    fn allocate_domain(&self,layout:Layout,domain:usize)->*mut u8 {
+        if !self.ready.load(Ordering::Acquire) {return core::ptr::null_mut();}
+        #[cfg(feature="kfence")]
+        if let Some(pointer)=super::fence::allocate(layout,domain,false) {return pointer;}
+        crate::arch::without_interrupts(|| {
+            let mut state=self.state.lock();
+            match unsafe {state.slabs.allocate(layout,domain)} {
+                Ok(Some(pointer))=>return pointer as *mut u8,
+                Ok(None)=>{},
+                Err(super::slab::Error::Layout)=>return core::ptr::null_mut(),
+                Err(_)=>integrity_failure(),
             }
-
-            // Need to extend. Two CPUs can get here at once, so extension
-            // happens under FRAME_LOCK, and only if nobody else extended
-            // the heap since we sampled heap_end (otherwise just retry).
-            let extended = crate::arch::without_interrupts(|| {
-                let _guard = FRAME_LOCK.lock();
-                if self.heap_end.load(Ordering::Acquire) != heap_end {
-                    return Some(0); // raced: someone else grew the heap
-                }
-                unsafe {
-                    let fa = FRAME_ALLOC_PTR;
-                    if fa.is_null() {
-                        return None;
-                    }
-                    let needed = (new_free - current) as u64;
-                    let grown = crate::arch::heap_extend(heap_end as u64, needed, &mut *fa)?;
-                    self.heap_end.store(heap_end + grown as usize, Ordering::SeqCst);
-                    Some(grown)
-                }
-            });
-            match extended {
-                None => return core::ptr::null_mut(),
-                Some(0) => {}
-                Some(bytes) => {
-                    GROWN_FRAMES.fetch_add((bytes / 4096) as usize, Ordering::Relaxed);
-                    crate::serial::write_str("[HEAP] Extended by ");
-                    crate::serial::write_dec(bytes / 1024);
-                    crate::serial::write_str(" KiB\n");
-                }
+            if !state.slabs.has_metadata() {return core::ptr::null_mut();}
+            let req=super::slab::request(layout,domain).unwrap();
+            let Some(base)=state.next.checked_add(req.align-1).map(|v|v&!(req.align-1)) else {return core::ptr::null_mut();};
+            let Some(end)=base.checked_add(req.span).filter(|v|*v<=crate::arch::memory::heap_limit() as usize) else {return core::ptr::null_mut();};
+            if end>state.end {
+                let needed=(end-state.end) as u64;
+                let Some(grown)=with_frame_allocator(|fa|crate::arch::heap_extend(state.end as u64,needed,fa)).flatten() else {return core::ptr::null_mut();};
+                state.end+=grown as usize;
+                GROWN_FRAMES.fetch_add((grown/4096) as usize,Ordering::Relaxed);
             }
-            // Loop back and retry the allocation
-        }
+            state.next=end;
+            if unsafe {state.slabs.add(base,req,||crate::random::u64().unwrap_or_else(|_|crate::random::early_u64()) as usize)}.is_err() {integrity_failure();}
+            match unsafe {state.slabs.allocate(layout,domain)} {
+                Ok(Some(pointer))=>pointer as *mut u8,
+                _=>integrity_failure(),
+            }
+        })
+    }
+    unsafe fn deallocate_domain(&self,pointer:*mut u8,layout:Layout,domain:usize) {
+        #[cfg(feature="kfence")]
+        if super::fence::deallocate(pointer,layout,domain) {return;}
+        crate::arch::without_interrupts(|| {
+            let mut state=self.state.lock();
+            if state.slabs.deallocate(pointer as usize,layout,domain).is_err() {integrity_failure();}
+        });
     }
 }
-
-// ========================================================================
-// GlobalAlloc trait implementation
-// ========================================================================
-
-unsafe impl GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.alloc_impl(layout)
-    }
-
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Bump allocator: dealloc is a no-op
-    }
+pub(super) fn integrity_failure()->! {crate::cfi::fatal(b"heap integrity",0,None)}
+unsafe impl GlobalAlloc for KernelAllocator {
+    unsafe fn alloc(&self,layout:Layout)->*mut u8 {self.allocate_domain(layout,0)}
+    unsafe fn dealloc(&self,pointer:*mut u8,layout:Layout) {self.deallocate_domain(pointer,layout,0);}
 }
-
+/// Security-sensitive clients use explicit domains instead of relying on
+/// matching allocation sizes to identify object types.
+#[derive(Clone,Copy)]
+pub struct CacheAllocator<const DOMAIN:usize>;
+pub const TASK_ALLOC:CacheAllocator<1>=CacheAllocator;
+pub const RQB_ALLOC:CacheAllocator<2>=CacheAllocator;
+unsafe impl<const DOMAIN:usize> Allocator for CacheAllocator<DOMAIN> {
+    fn allocate(&self,layout:Layout)->Result<NonNull<[u8]>,AllocError> {
+        let pointer=NonNull::new(GLOBAL_ALLOC.allocate_domain(layout,DOMAIN)).ok_or(AllocError)?;
+        Ok(NonNull::slice_from_raw_parts(pointer,layout.size()))
+    }
+    unsafe fn deallocate(&self,pointer:NonNull<u8>,layout:Layout) {GLOBAL_ALLOC.deallocate_domain(pointer.as_ptr(),layout,DOMAIN);}
+}
 #[global_allocator]
-static GLOBAL_ALLOC: BumpAllocator = BumpAllocator::new();
-
-/// Initialize the kernel heap
+static GLOBAL_ALLOC:KernelAllocator=KernelAllocator::new();
+/// (live slab/sample bytes, permanently slab-owned backing bytes, live objects).
+pub fn stats()->(usize,usize,usize) {
+    crate::arch::without_interrupts(|| {
+        let state=GLOBAL_ALLOC.state.lock();
+        #[cfg(feature="kfence")]
+        let (sample_bytes,sample_objects,_)=super::fence::stats();
+        #[cfg(not(feature="kfence"))]
+        let (sample_bytes,sample_objects)=(0,0);
+        (state.slabs.live_bytes+sample_bytes,state.slabs.reserved_bytes,state.slabs.allocations+sample_objects)
+    })
+}
 pub fn init_heap() {
-    with_frame_allocator(|fa| GLOBAL_ALLOC.init(fa)).expect("frame allocator before heap");
+    let secret=crate::random::u64().unwrap_or_else(|_|crate::random::early_u64()) as usize;
+    if !crate::random::ready() {crate::serial::write_line("[HEAP] WARNING: weak bootstrap entropy; free-list secrecy is not assured");}
+    with_frame_allocator(|fa|GLOBAL_ALLOC.initialize(fa,secret)).expect("frame allocator before heap");
     crate::memory::stacks::init();
+}
+#[cfg(feature="test-heap-oom")]
+#[no_mangle]
+static mut HEAP_TEST_RESERVED:[u64;65536]=[0;65536];
+/// Regression VM only (256 MiB): apply real frame pressure, verify no
+/// partial mapping, restore the frames and require growth to succeed.
+#[cfg(feature="test-heap-oom")]
+pub fn oom_self_test() {
+    crate::arch::without_interrupts(|| {
+        let mut state=GLOBAL_ALLOC.state.lock();
+        with_frame_allocator(|fa| {
+            let mut count=0;
+            while fa.free_count()>100 {
+                assert!(count<65536,"heap OOM regression requires <=256 MiB VM");
+                let pa=fa.allocate_zeroed_frame().expect("pressure reservation");
+                unsafe {core::ptr::addr_of_mut!(HEAP_TEST_RESERVED).cast::<u64>().add(count).write(pa);}
+                count+=1;
+            }
+            let end=state.end as u64;
+            assert!(!crate::arch::stacks::mapped(end));
+            assert_eq!(crate::arch::heap_extend(end,2<<20,fa),None);
+            assert_eq!(fa.free_count(),100,"failed growth consumed frames");
+            assert!(!crate::arch::stacks::mapped(end),"failed growth published a partial mapping");
+            for i in 0..count {
+                let pa=unsafe {core::ptr::addr_of!(HEAP_TEST_RESERVED).cast::<u64>().add(i).read()};
+                fa.deallocate_frame(pa);
+            }
+            let grown=crate::arch::heap_extend(end,2<<20,fa).expect("growth after pressure release");
+            assert!(crate::arch::stacks::mapped(end));
+            state.end+=grown as usize;GROWN_FRAMES.fetch_add((grown/4096) as usize,Ordering::Relaxed);
+        }).unwrap();
+    });
+    crate::serial::write_line("[HEAP TEST] exhaustion preserved frames/mappings; restored capacity grows");
 }

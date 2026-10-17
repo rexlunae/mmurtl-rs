@@ -384,6 +384,13 @@ fn kernel_root() -> u64 {
 /// Dedicated high TTBR1 stack region; FRAME_LOCK serializes table mutation.
 pub fn map_stack_page(va: u64, pa: u64, fa: &mut crate::memory::frame_allocator::FrameAllocator) {
     assert!((0xffff_e000_0000_0000..0xffff_e080_0000_0000).contains(&va));
+    map_kernel_ram_page(va,pa,fa);
+}
+pub fn map_heap_page(va:u64,pa:u64,fa:&mut crate::memory::frame_allocator::FrameAllocator) {
+    assert!((0xffff_d000_0000_0000..0xffff_d400_0000_0000).contains(&va));
+    map_kernel_ram_page(va,pa,fa);
+}
+fn map_kernel_ram_page(va:u64,pa:u64,fa:&mut crate::memory::frame_allocator::FrameAllocator) {
     unsafe {
         let mut table = table_pointer(kernel_root());
         for level in 0..3 {
@@ -406,6 +413,12 @@ pub fn map_stack_page(va: u64, pa: u64, fa: &mut crate::memory::frame_allocator:
 }
 pub fn stack_page_mapped(va: u64) -> bool {
     unsafe { walk(kernel_root(), va, false).is_some_and(|entry| core::ptr::read_volatile(entry) & VALID != 0) }
+}
+pub fn dynamic_kernel_phys(va:u64)->Option<u64> {
+    unsafe {
+        let descriptor=walk(kernel_root(),va,false)?.read_volatile();
+        if descriptor&VALID==0 {None} else {Some((descriptor&ADDR_MASK)|(va&4095))}
+    }
 }
 /// Boot-only: no user task is runnable yet. GP is installed only when
 /// every admitted CPU supports BTI, then broadcast-invalidated.
