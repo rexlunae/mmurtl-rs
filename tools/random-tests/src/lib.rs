@@ -24,6 +24,7 @@ fn crypto_and_entropy_policy() {
     let mut output = [0; 32]; g.fill(&mut output);
     assert_eq!(output, block[32..]); // secret rekey half is not output
     let first = output; g.fill(&mut output); assert_ne!(first, output);
+    assert!(!kptr::RAW_ADDRESSES, "normal and emergency address diagnostics must be restricted");
     assert!(!random::ready());
     assert_eq!(format!("{}", kptr::KPtr(0xffff800012345678)), "(ptr)");
     let mut denied = [0x55; 32]; assert!(random::fill(&mut denied).is_err()); assert_eq!(denied, [0x55; 32]);

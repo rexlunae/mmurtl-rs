@@ -1,5 +1,6 @@
 //! Address diagnostics use boot-secret identifiers; raw output is opt-in.
 use core::fmt;
+pub const RAW_ADDRESSES: bool = cfg!(feature = "debug-addresses");
 static KEY: spin::Once<[u8; 32]> = spin::Once::new();
 pub fn init() {
     if !crate::random::ready() { return; }
@@ -8,7 +9,7 @@ pub fn init() {
 pub struct KPtr(pub u64);
 impl fmt::Display for KPtr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if cfg!(feature = "debug-addresses") { return write!(f, "0x{:x}", self.0); }
+        if RAW_ADDRESSES { return write!(f, "0x{:x}", self.0); }
         let Some(key) = KEY.get() else { return f.write_str("(ptr)"); };
         let mut hash = crate::random::crypto::keyed_hash(key, &self.0.to_le_bytes());
         let id = u64::from_le_bytes(hash[..8].try_into().unwrap());

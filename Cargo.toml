@@ -24,3 +24,5 @@ bootloader = "0.11.15"
 [features]
 # Explicit opt-in: raw kernel addresses in diagnostic logs defeat KASLR.
 debug-addresses = []
+# Regression image: enter the fatal machine-check path instead of starting the shell.
+test-machine-check = []

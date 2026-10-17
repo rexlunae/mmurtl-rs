@@ -1165,7 +1165,8 @@ KPTI and other transient-execution mitigations remain separate work.
 
 Routine kernel pointers use keyed BLAKE2s boot-secret identifiers, or `(ptr)`
 before a credited RNG is ready. User-fault addresses outside the user window
-are restricted the same way. Bootloader routine address logs are suppressed.
+are restricted the same way. Bootloader routine address logs are suppressed. The lock-free fatal machine-check
+logger also redacts RIP, address and auxiliary fields unless diagnostics are enabled.
 `make bios arm64-image KERNEL_FEATURES=debug-addresses` explicitly enables raw
 address diagnostics. Rebuild without that option before normal use.
 
@@ -1177,3 +1178,11 @@ redaction and keyed identifier stability. The BIOS compatibility patch gives
 stage 4 a dedicated stack because ASLR's RNG overflows its inherited stack,
 corrects bootloader 0.11.17's inverted TSC capability gate, and bounds ASLR
 offsets to the slots actually reserved (including exactly full PML4 spans).
+
+The fatal logging regression uses a disposable image built with
+`make bios KERNEL_FEATURES=test-machine-check` and
+`python3 tools/test-machine-check.py`. It populates one synthetic MCA bank
+with kernel addresses and enters the real guarded #MC gate, checking that
+RIP/ADDR/MISC are restricted. Adding `,debug-addresses` and passing `--debug`
+checks the opt-in diagnostic output. Rebuild normally afterward: the test
+image intentionally halts instead of starting the shell.
