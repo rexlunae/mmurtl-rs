@@ -150,21 +150,25 @@ static DEBUG_EVENTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU
 static NMI_EVENTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 extern "x86-interrupt" fn debug_handler(mut stack_frame: InterruptStackFrame) {
-    let rip = stack_frame.instruction_pointer.as_u64();
-    // MOV SS can defer a user #DB into the first instruction of a gate.
-    // Do not disturb that entry's untouched register/frame state. TF in
-    // the original user frame will fault again on return to user mode.
-    if !from_user(&stack_frame) && [super::syscall::entry_address(), timer_handler as *const () as u64,
-        yield_handler as *const () as u64].contains(&rip) { return; }
-    unsafe { core::arch::asm!("mov dr6, {}", in(reg) 0xffff0ff0u64, options(nostack)); }
-    if from_user(&stack_frame) { kill_user_task(&stack_frame, "#DB debug trap", None); }
-    // There is no kernel debugger. Acknowledge it and stop single-step
-    // delivery, without logging or taking locks from an arbitrary entry.
-    unsafe {
-        core::arch::asm!("mov dr7, {}", in(reg) 0u64, options(nostack));
-        stack_frame.as_mut().update(|frame| frame.cpu_flags &= !(1 << 8));
+    // The saved CS describes where #DB was delivered, not who armed TF.
+    // A deferred user trap delivered ANYWHERE inside a kernel entry has
+    // CPL0 here. Keep that entire path independent of scheduler locks,
+    // including traps past the first instruction and during stack switches.
+    if !from_user(&stack_frame) {
+        let rip = stack_frame.instruction_pointer.as_u64();
+        if [super::syscall::entry_address(), timer_handler as *const () as u64,
+            yield_handler as *const () as u64].contains(&rip) { return; }
+        unsafe {
+            core::arch::asm!("mov dr6, {}", in(reg) 0xffff0ff0u64, options(nostack));
+            core::arch::asm!("mov dr7, {}", in(reg) 0u64, options(nostack));
+            stack_frame.as_mut().update(|frame| frame.cpu_flags &= !(1 << 8));
+        }
+        DEBUG_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return;
     }
-    DEBUG_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // Only a trap actually delivered at CPL3 may enter the scheduler.
+    unsafe { core::arch::asm!("mov dr6, {}", in(reg) 0xffff0ff0u64, options(nostack)); }
+    kill_user_task(&stack_frame, "#DB debug trap", None);
 }
 
 pub fn debug_self_test() {
@@ -174,7 +178,7 @@ pub fn debug_self_test() {
     let before = DEBUG_EVENTS.load(core::sync::atomic::Ordering::Relaxed);
     unsafe { core::arch::asm!("pushfq", "or qword ptr [rsp], 0x100", "popfq", "nop"); }
     assert!(DEBUG_EVENTS.load(core::sync::atomic::Ordering::Relaxed) > before);
-    crate::serial::write_line("[TEST] kernel #DB recovered, TF cleared");
+    crate::serial::write_line("[TEST] kernel #DB recovered, TF cleared (scheduler lock held)");
 }
 
 extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
