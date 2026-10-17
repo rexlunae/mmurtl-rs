@@ -51,7 +51,15 @@ def main():
         else:
             body=before_call('exception_common','arm64_exception')
             clears={int(m[1]) for _,op,args in body if op=='mov' and (m:=re.fullmatch(r'x(\d+),\s*xzr',args))}
-            assert set(range(2,31))<=clears,('ARM uncleared registers',set(range(2,31))-clears)
+            expected=set(range(2,31))-{18}
+            assert expected<=clears,('ARM uncleared registers',expected-clears)
+            # x18 is the compiler-reserved shadow-call-stack pointer. EL0's
+            # saved value must be replaced before the first compiled call;
+            # kernel reentry instead resumes its saved trusted pointer.
+            entry=before_call('exception_common','kernel_stack_offset')
+            loads=[args for _,op,args in entry if op=='ldr' and args.startswith('x18,')]
+            assert any('[x2, x1, lsl #3]' in args for args in loads),'missing trusted per-CPU user-entry SCS'
+            assert any('[sp, #0x90]' in args or '[sp, #144]' in args for args in loads),'missing kernel SCS resume'
             for i,(address,op,args) in enumerate(insns):
                 if op not in ['ret','eret','br','blr']: continue
                 after=insns[i+1:i+3]

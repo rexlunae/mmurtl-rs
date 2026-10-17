@@ -115,6 +115,8 @@ primary_entry:
     dsb sy
 
     msr tpidr_el1, xzr          // scheduler CPU index 0
+    adrp x18, ARM64_EARLY_SCS
+    add x18, x18, :lo12:ARM64_EARLY_SCS
     mov x0, x19                 // device tree
     adr x1, _start              // load address
     mov x2, x21                 // relocations applied
@@ -155,10 +157,26 @@ drop_to_el1:
     msr S3_6_C12_C12_5, x13
     isb
 6:  mov x13, #0x431             // SCR_EL3: RW (EL2/EL1 AArch64), HCE,
+    mrs x14, id_aa64isar1_el1
+    ubfx x14, x14, #4, #8
+    mrs x15, id_aa64isar2_el1
+    ubfx x15, x15, #12, #4
+    orr x14, x14, x15
+    cbz x14, .Lscr_pac_ready
+    orr x13, x13, #(3 << 16)    // APK/API: EL1 owns PAC keys/instructions
+.Lscr_pac_ready:
     msr scr_el3, x13            //   RES1 bits, NS (non-secure below)
     cbz x12, 8f                 // no EL2: go straight to EL1
     // ---- EL2 registers (from EL2 itself, or from EL3 on the way down) ----
 7:  mov x13, #(1 << 31)         // HCR_EL2.RW: EL1 is AArch64
+    mrs x14, id_aa64isar1_el1
+    ubfx x14, x14, #4, #8
+    mrs x15, id_aa64isar2_el1
+    ubfx x15, x15, #12, #4
+    orr x14, x14, x15
+    cbz x14, .Lhcr_pac_ready
+    orr x13, x13, #(3 << 40)    // APK/API
+.Lhcr_pac_ready:
     msr hcr_el2, x13
     mov x13, #0x33ff           // non-VHE RES1, TFP=0 (EL1 owns FP traps)
     ubfx x14, x10, #32, #4
@@ -230,6 +248,7 @@ arm64_enter_high:
     add x0, x1, x13            // BootState's linear alias
     add x11, sp, x13
     mov sp, x11
+    add x18, x18, x13          // shadow stack's new linear alias
     msr mair_el1, x2
     msr tcr_el1, x3
     msr ttbr0_el1, x4
@@ -266,6 +285,7 @@ secondary_start:
     ldr x5, [x19, #40]          // ttbr1
     ldr x6, [x19, #48]          // sctlr
     ldr x10, [x19, #56]         // kernel image offset, before translation
+    ldr x18, [x19, #64]         // guarded shadow stack, virtual address
     msr mair_el1, x2
     msr tcr_el1, x3
     msr ttbr0_el1, x4
@@ -280,14 +300,26 @@ secondary_start:
     dsb nsh
     isb
     mov x0, x1
-    adrp x9, arm64_secondary_main
-    add x9, x9, :lo12:arm64_secondary_main
+    adrp x9, arm64_secondary_pac_entry
+    add x9, x9, :lo12:arm64_secondary_pac_entry
     add x9, x9, x10
     mov x16, x9
     br x16
     dsb nsh
     isb
     b park
+
+    // The physical bootstrap maps text only. PAC's globals must be read
+    // after the high handoff, before the first protected Rust frame.
+    .global arm64_secondary_pac_entry
+arm64_secondary_pac_entry:
+    bti jc
+    bl arm64_enable_boot_pac
+    adrp x16, arm64_secondary_main
+    add x16, x16, :lo12:arm64_secondary_main
+    br x16
+    dsb nsh
+    isb
 
     // Secondary CPU entry (spin-table release): the firmware's holding
     // pen jumps here with no argument, so the ApBoot pointer comes from
@@ -408,6 +440,8 @@ extern "C" fn arm64_high_main(state: *const BootState) -> ! {
         }
     }
     crate::random::init();
+    unsafe { crate::return_protection::seed_boot_guard(); }
+    super::pac::init();
     for &(base, size) in &info.ram[..info.ram_count] {
         crate::random::mix(b"public DT RAM", &base.to_le_bytes(), 0);
         crate::random::mix(b"public DT RAM size", &size.to_le_bytes(), 0);

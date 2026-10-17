@@ -20,6 +20,8 @@ pub mod pcie;
 pub mod serial;
 pub mod smp;
 pub mod cfi;
+pub mod shadow;
+pub mod pac;
 pub mod stacks;
 pub mod timer;
 pub mod user_programs;

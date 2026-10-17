@@ -52,10 +52,10 @@ run-uefi: uefi
 		-serial stdio \
 		-m 256M
 
-# Build the arm64 kernel ELF
+# The pinned soft-float target plus compiler shadow-call-stack support.
 arm64:
-	cargo build -Z build-std=core,compiler_builtins,alloc \
-		--target $(ARM64_TARGET) $(KERNEL_FEATURE_FLAGS) \
+	cargo build -Z build-std=core,compiler_builtins,alloc -Z json-target-spec \
+		--target ./$(ARM64_TARGET).json $(KERNEL_FEATURE_FLAGS) \
 		--release
 
 # arm64 Linux-style "Image" (raw binary with the standard header), for

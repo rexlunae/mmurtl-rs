@@ -15,6 +15,7 @@ extern crate alloc;
 mod arch;
 mod topology;
 mod cfi;
+mod return_protection;
 mod serial;
 mod memory;
 mod scheduler;
@@ -57,6 +58,17 @@ pub fn print_banner() {
 pub fn kernel_run() -> ! {
     kptr::init();
     random::report();
+    serial::write_line("[RETURN] strong compiler stack guards active");
+    #[cfg(target_arch="aarch64")]
+    serial::write_line("[RETURN] guarded shadow call stacks active; x18 reserved");
+    #[cfg(target_arch="aarch64")]
+    arch::pac::audit();
+    #[cfg(all(target_arch="aarch64",feature="test-pac"))]
+    arch::pac::test();
+    #[cfg(all(target_arch="aarch64",feature="test-shadow-overflow"))]
+    arch::shadow::test_overflow();
+    #[cfg(feature="test-kernel-canary")]
+    return_protection::test_canary();
     #[cfg(feature="test-cfi")]
     cfi::test_mismatch();
     #[cfg(any(feature="test-bti",feature="test-ibt"))]

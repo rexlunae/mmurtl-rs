@@ -1436,3 +1436,61 @@ python3 tools/test-kernel-cfi.py
 The landing tests attempt a transfer to an instruction without a landing
 pad. ARM `-cpu max` positively traps this transfer; unsupported x86 tests
 explicitly skip and do not claim enforcement.
+
+### Kernel return protection
+
+Both kernels and their core/alloc libraries use strong compiler stack
+protectors with a global guard. A naked bootstrap installer lets the RNG
+helper return under the initial guard before publishing a fresh nonzero
+56-bit guard with a zero terminator byte. This happens before AP release;
+the BSP's older bootstrap frames never return and runtime code starts on a
+fresh guarded stack. The guard never changes during task migration. Weak
+entropy is reported explicitly. A failed compiler check uses bounded fatal
+UART diagnostics without scheduler, allocator or console locks.
+
+ARM additionally reserves x18 and compiles with shadow-call-stack
+instrumentation. The checked-in soft-float target mirrors the pinned
+built-in target and adds sanitizer support; user programs keep their
+existing target and ABI. Each task receives a separate guarded 32 KiB
+shadow stack, reclaimed and scrubbed after it is no longer running.
+Kernel preemption saves/restores the trusted x18 with the frame; EL0 entry
+loads a kernel-owned task pointer instead of using the user's x18.
+Assembly switches shadow stacks before calling Rust on a new task's stack.
+Guard exhaustion diverts to independent emergency normal/shadow stacks.
+The `stack-erase` policy also clears stale shadow return pointers before
+EL0 resumes. Early single-CPU bootstrap uses a bounded static shadow region
+until guarded allocation is available.
+
+PAC-ret, including leaf functions, adds another ARM layer when the BSP
+advertises a recognized address-authentication algorithm and credited
+entropy supplies a fresh 128-bit boot key. PAC activates only on fresh
+runtime frames. Secondary CPUs activate after entering the high mapping,
+before their first Rust call. A CPU with a different PAC algorithm/version
+is left offline when PAC is selected, so signed frames can migrate safely
+under the shared boot key. EL2/EL3 handoffs delegate PAC to EL1 when present.
+Kernel entry installs the kernel key; the last assembly step before EL0
+clears it and disables EnIA. User PAC has no supported ABI yet. Software
+shadow stacks remain active on older cores and with weak entropy. PAC is
+an architectural layer and does not address speculative PAC attacks.
+x86 supervisor CET shadow stacks remain a future extension; this change
+provides strong canaries on x86 and canaries/PAC/shadow stacks on ARM.
+
+Optimized-code audits check actual global guard loads, failure calls,
+PAC signing/authentication and shadow push/pop traffic. Regression images:
+```sh
+make bios arm64 KERNEL_FEATURES=test-kernel-canary
+python3 tools/test-cfi.py --arch amd64 --kind canary
+python3 tools/test-cfi.py --arch arm64 --kind canary
+make arm64 KERNEL_FEATURES=test-pac
+python3 tools/test-cfi.py --arch arm64 --kind pac
+make arm64 KERNEL_FEATURES=test-shadow-overflow
+python3 tools/test-stack-overflow.py --arch arm64
+make arm64 KERNEL_FEATURES=test-weak-entropy
+python3 tools/test-security.py --arch arm64 --cpu max --cpus 4 \
+  --require '[SMP] 4 CPU(s) online' \
+  --require '[RETURN] PAC unavailable or entropy insufficient'
+make bios arm64
+python3 tools/test-kernel-return.py
+```
+`test-weak-entropy` deliberately gives every source zero credit and must
+only be used for regression images.

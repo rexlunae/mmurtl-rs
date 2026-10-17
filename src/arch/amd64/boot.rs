@@ -81,6 +81,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     super::microcode::init(module, boot_info.ramdisk_len);
     assert!(super::microcode::apply(0, || {}));
     crate::random::init();
+    unsafe { crate::return_protection::seed_boot_guard(); }
     if !crate::random::ready() { crate::serial::write_line("[KASLR] WARNING: kernel heap entropy below 128 bits; placement is not cryptographically assured"); }
     crate::memory::heap::init_heap();
     crate::kptr::init();

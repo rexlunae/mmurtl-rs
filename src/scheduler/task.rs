@@ -122,6 +122,10 @@ pub struct TaskControlBlock {
     /// First physical frame of the kernel stack (0 = not ours to free,
     /// e.g. an adopted boot/idle context)
     pub kstack_phys: u64,
+    #[cfg(target_arch="aarch64")]
+    pub shadow_virt: u64,
+    #[cfg(target_arch="aarch64")]
+    pub shadow_phys: u64,
     /// Resources already released by the reaper; the slot may be reused
     pub reaped: bool,
 }
@@ -151,6 +155,8 @@ impl TaskControlBlock {
     ) -> Box<Self> {
         let stack_top = stack.virt + stack.size;
         let stack_bottom = stack.virt;
+        #[cfg(target_arch="aarch64")]
+        let shadow = crate::memory::stacks::allocate();
 
         // Build an initial context on the task's stack, shaped exactly
         // like one the timer interrupt saves, so the first switch into the
@@ -172,6 +178,8 @@ impl TaskControlBlock {
         debug_assert!(ctx_addr >= stack_bottom);
         unsafe {
             (ctx_addr as *mut TaskContext).write(crate::arch::kernel_context(entry as u64, stack_top));
+            #[cfg(target_arch="aarch64")]
+            { (*(ctx_addr as *mut TaskContext)).x[18] = shadow.virt; }
         }
 
         Box::new(Self {
@@ -195,6 +203,10 @@ impl TaskControlBlock {
             address_space: 0,
             user_slot: None,
             kstack_phys: stack.phys,
+            #[cfg(target_arch="aarch64")]
+            shadow_virt: shadow.virt,
+            #[cfg(target_arch="aarch64")]
+            shadow_phys: shadow.phys,
             reaped: false,
         })
     }
@@ -255,6 +267,10 @@ impl TaskControlBlock {
             address_space: 0,
             user_slot: None,
             kstack_phys: 0,
+            #[cfg(target_arch="aarch64")]
+            shadow_virt: 0,
+            #[cfg(target_arch="aarch64")]
+            shadow_phys: 0,
             reaped: false,
         })
     }

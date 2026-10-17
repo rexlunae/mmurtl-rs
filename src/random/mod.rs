@@ -18,6 +18,7 @@ static LOCAL: [CpuLocal; crate::scheduler::MAX_CPUS] = [const { CpuLocal(UnsafeC
 static TIMING: [AtomicU64; crate::scheduler::MAX_CPUS] = [const { AtomicU64::new(0) }; crate::scheduler::MAX_CPUS];
 
 pub fn mix(source: &[u8], bytes: &[u8], credited_bits: u16) {
+    let credited_bits=if cfg!(feature="test-weak-entropy") {0} else {credited_bits};
     crate::arch::without_interrupts(|| {
         let mut p = POOL.lock();
         let key = crypto::hash(&[b"MMURTL entropy v1", &p.key, &(source.len() as u64).to_le_bytes(), source, bytes]);

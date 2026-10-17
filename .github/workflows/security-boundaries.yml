@@ -25,8 +25,11 @@ jobs:
       - name: Verify kernel KCFI traps and branch landing pads
         run: |
           python3 tools/test-kernel-cfi.py
+          python3 tools/test-kernel-return.py
           rustc --edition=2021 tools/tests/cfi_policy.rs -o /tmp/mmurtl-cfi-policy-test
           /tmp/mmurtl-cfi-policy-test
+          rustc --edition=2021 tools/tests/return_policy.rs -o /tmp/mmurtl-return-policy-test
+          /tmp/mmurtl-return-policy-test
       - name: Verify kernel stack frame budgets and guarded layout
         run: |
           python3 tools/test-stack-sizes.py
