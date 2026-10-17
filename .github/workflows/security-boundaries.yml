@@ -18,6 +18,11 @@ jobs:
         run: python3 tools/test-nospec.py
       - name: Verify entry register clearing and SLS barriers
         run: python3 tools/test-entry-sls.py
+      - name: Verify kernel stack frame budgets and guarded layout
+        run: |
+          python3 tools/test-stack-sizes.py
+          rustc --edition=2021 tools/tests/stack_layout.rs -o /tmp/mmurtl-stack-layout-test
+          /tmp/mmurtl-stack-layout-test
       - name: Verify frame scrubbing
         run: |
           rustc --edition=2021 tools/tests/frame_allocator.rs -o /tmp/mmurtl-frame-test

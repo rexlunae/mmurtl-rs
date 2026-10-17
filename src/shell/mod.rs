@@ -139,6 +139,7 @@ fn prompt(cwd: &Path) {
     out!("{}> ", cwd.as_str());
 }
 
+#[inline(never)]
 fn execute(line: &str, cwd: &mut Path) -> Result<(), &'static str> {
     let cmd = Command::parse(line)?;
     if cmd.len() == 0 {
@@ -293,7 +294,7 @@ fn execute(line: &str, cwd: &mut Path) -> Result<(), &'static str> {
             scheduler::jiffies() * 1000 / scheduler::SCHEDULER_FREQUENCY_HZ as u64
         ),
         "PS" if count == 0 => {
-            let mut tasks = [(0, "", scheduler::TaskState::Exited, false);
+            let mut tasks = alloc::vec![(0, "", scheduler::TaskState::Exited, false);
                 scheduler::MAX_TASKS + scheduler::MAX_CPUS];
             let (count, truncated) = scheduler::task_snapshot(&mut tasks);
             for &(id, name, state, user) in &tasks[..count] {

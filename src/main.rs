@@ -56,6 +56,8 @@ pub fn print_banner() {
 pub fn kernel_run() -> ! {
     kptr::init();
     random::report();
+    #[cfg(feature = "test-stack-overflow")]
+    memory::stacks::test_overflow();
     #[cfg(all(target_arch = "x86_64", feature = "test-machine-check"))]
     arch::interrupts::test_machine_check();
     // Driver proof-of-life: block device write/read/verify + ARP round trip

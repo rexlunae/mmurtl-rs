@@ -411,6 +411,31 @@ pub fn unmap_stack_page(va: u64) -> u64 {
         descriptor & ADDR_MASK
     }
 }
+pub fn detach_stack_tables(va: u64) -> [u64; 2] {
+    unsafe {
+        let mut table = table_pointer(kernel_root());
+        let mut parents = [core::ptr::null_mut(); 3];
+        let mut descriptors = [0; 3];
+        for level in 0..3 {
+            let entry = table.add(index(va, level));
+            let descriptor = core::ptr::read_volatile(entry);
+            assert_eq!(descriptor & (VALID | TABLE), VALID | TABLE);
+            parents[level as usize] = entry;
+            descriptors[level as usize] = descriptor;
+            table = table_pointer(descriptor & ADDR_MASK);
+        }
+        let mut retired = [0; 2];
+        // Keep the L0 link permanently established for the stack region.
+        for level in (1..=2).rev() {
+            let pa = descriptors[level] & ADDR_MASK;
+            let entries = core::slice::from_raw_parts(table_pointer(pa), ENTRIES);
+            if entries.iter().any(|entry| core::ptr::read_volatile(entry) & VALID != 0) { break; }
+            core::ptr::write_volatile(parents[level], 0);
+            retired[2 - level] = pa;
+        }
+        retired
+    }
+}
 
 fn alloc_zeroed_frame() -> Option<u64> {
     let pa = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_zeroed_frame())??;

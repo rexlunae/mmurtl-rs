@@ -29,3 +29,7 @@ stack-erase = []
 debug-addresses = []
 # Regression image: enter the fatal machine-check path instead of starting the shell.
 test-machine-check = []
+# Regression image: deliberately overflow a guarded task stack.
+test-stack-overflow = []
+# Regression instrumentation: observe entry offsets and a seeded stack region.
+test-stack-state = []

@@ -1,4 +1,5 @@
 pub use super::mmu::{map_stack_page as map, stack_page_mapped as mapped, unmap_stack_page as unmap};
+pub use super::mmu::detach_stack_tables as detach_empty;
 pub fn invalidate() { unsafe { core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb"); } }
 #[no_mangle]
 static mut ARM64_STACK_EMERGENCY: [u64; crate::scheduler::MAX_CPUS] = [0; crate::scheduler::MAX_CPUS];

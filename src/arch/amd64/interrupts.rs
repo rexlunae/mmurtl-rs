@@ -506,6 +506,12 @@ core::arch::global_asm!(
     // NOTE: schedule_and_switch returns with the scheduler lock still
     // held, so no other CPU can resume the outgoing task while we are
     // still executing on its stack.
+    "mov rbx, rsp",
+    "mov rsi, [rsp + 128]",
+    "and esi, 3",
+    "call kernel_stack_offset",
+    "sub rsp, rax",
+    "mov rdi, rbx",
     "call schedule_and_switch",
     // Shared tail with yield_handler: switch stacks, unlock, restore
     "context_switch_tail:",
@@ -697,7 +703,20 @@ x86_exception_common:
     xor r14d, r14d
     xor r15d, r15d
     cld
+    mov rbx, rsp
+    mov r12, rdi
+    mov r13, rsi
+    mov r14, rdx
+    mov rdi, rsp
+    mov rsi, [rsp + 144]
+    and esi, 3
+    call kernel_stack_offset
+    sub rsp, rax
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, r14
     call x86_exception_dispatch
+    mov rsp, rbx
     mov rdi, rsp
     mov rsi, [rsp + 144]
     and esi, 3
@@ -798,8 +817,11 @@ extern "C" {
 }
 
 /// The IDT — initialized once at boot
-static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| unsafe {
-    let mut idt = InterruptDescriptorTable::new();
+static mut IDT_TABLE: InterruptDescriptorTable = InterruptDescriptorTable::new();
+static IDT: Lazy<()> = Lazy::new(|| unsafe {
+    // Initialize in place; returning a 4 KiB IDT by value used multiple
+    // stack copies in the Once/Lazy chain.
+    let idt = &mut *core::ptr::addr_of_mut!(IDT_TABLE);
 
     // CPU exceptions
     idt.divide_error.set_handler_addr(x86_64::VirtAddr::new(entry_divide_error_handler as *const () as u64));
@@ -859,17 +881,18 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| unsafe {
             .set_stack_index(crate::arch::gdt::DOUBLE_FAULT_IST_INDEX);
     }
 
-    idt
 });
 
 /// Initialize the IDT — call once at boot after GDT is initialized.
 pub fn init() {
-    IDT.load();
+    Lazy::force(&IDT);
+    unsafe { (&*core::ptr::addr_of!(IDT_TABLE)).load(); }
 }
 
 /// Load the shared IDT on an application processor.
 pub fn init_ap() {
-    IDT.load();
+    Lazy::force(&IDT);
+    unsafe { (&*core::ptr::addr_of!(IDT_TABLE)).load(); }
     enable_alignment_checks();
 }
 

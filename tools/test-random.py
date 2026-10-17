@@ -18,7 +18,17 @@ def main():
     for target in ['x86_64-unknown-none', 'aarch64-unknown-none-softfloat']:
         disassembly = subprocess.check_output([str(objdump), '-d', '--no-show-raw-insn', str(ROOT / 'target' / target / 'release/mmurtl-rs')], text=True)
         pattern = r'\b(?:xmm|ymm|zmm)\d+\b|\bvzero(?:upper|all)\b' if target.startswith('x86') else r'(?:\s|,)(?:v\d+\.\d*[bhsd]|[qdsz]\d+)\b'
-        violations = [line for line in disassembly.splitlines() if re.search(pattern, line)]
+        # The ARM Linux Image header includes data words before executable
+        # code. LLVM prints their raw bytes even with --no-show-raw-insn;
+        # a size byte such as d0 is not a floating-point register operand.
+        kernel_start = None
+        if target.startswith('aarch64'):
+            symbols = subprocess.check_output([str(objdump.parent/'llvm-nm'),'-n',str(ROOT/'target'/target/'release/mmurtl-rs')],text=True)
+            kernel_start = int(next(row.split()[0] for row in symbols.splitlines() if row.endswith(' __kernel_start')),16)
+        def header_data(line):
+            address = re.match(r'\s*([0-9a-f]+):',line)
+            return kernel_start is not None and address and kernel_start <= int(address[1],16) < kernel_start+64 and '.word' in line
+        violations = [line for line in disassembly.splitlines() if not header_data(line) and re.search(pattern, line)]
         assert not violations, f'{target}: SIMD appeared in kernel text: {violations[:5]}'
         print(f'{target}: scalar kernel text verified')
 
