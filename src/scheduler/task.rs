@@ -119,15 +119,15 @@ pub struct TaskControlBlock {
     pub address_space: u64,
     /// The task's slot in the user window (user tasks)
     pub user_slot: Option<u64>,
-    /// Physical base of the kernel stack's frames (0 = not ours to free,
+    /// First physical frame of the kernel stack (0 = not ours to free,
     /// e.g. an adopted boot/idle context)
     pub kstack_phys: u64,
     /// Resources already released by the reaper; the slot may be reused
     pub reaped: bool,
 }
 
-/// A kernel stack: `size` bytes of contiguous frames at `phys`, reached
-/// through `virt`
+/// A guarded, contiguous virtual stack backed by independent frames.
+/// `phys` identifies its first backing frame; reclamation walks the mapping.
 pub struct KernelStack {
     pub virt: u64,
     pub phys: u64,

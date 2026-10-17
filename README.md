@@ -1111,7 +1111,8 @@ bare-metal validation and is not exercised by the VM tests.
 ### arm64 TTBR1 and ASIDs
 
 The kernel image and the RAM/device physical window have independent randomized
-placements in TTBR1. Heap and allocated stacks use the physical window. The primary stub rebases absolute references
+placements in TTBR1. The heap uses the physical window; allocated stacks use
+a separate guarded virtual region. The primary stub rebases absolute references
 before enabling translation, then branches high. Secondary entry/context and
 spin-table release values remain physical for firmware; their stacks and Rust
 entry points are high virtual addresses. The temporary TTBR0 maps only physical
@@ -1269,3 +1270,62 @@ audits all vector slots, including firmware argument sanitization and saved
 registers. QEMU validates the available plain/loop paths and architectural
 behavior; positive firmware and CLRBHB/ECBHB hardware paths remain untested
 on this host.
+
+### Guarded kernel stacks and return erasure
+
+Task stacks and CPU runtime/secondary boot stacks occupy separate 64 KiB
+virtual slots with 32 KiB of supervisor RW/NX pages and unmapped gaps on
+both sides. Independent physical frames back the stack; physical contiguity
+is unnecessary. The region begins at a randomized 64 KiB offset within
+kernel slot 448, separate from the image, heap and physical window. Early
+entropy limitations apply as for the other KASLR placements. Virtual slots
+are never reused (the finite 512 GiB region supports millions of lifetimes).
+The reaper detaches mappings and empty lower page tables, synchronously
+invalidates every admitted CPU, then scrubs and returns their frames. The
+permanent root link is established before x86 private address spaces copy it.
+
+x86 overflows enter the guarded double-fault IST. ARM's kernel synchronous
+vector checks the stack bounds before its first stack store and can switch
+to a per-CPU guarded emergency stack. That check temporarily uses the
+kernel-owned TPIDRRO_EL0 register, restoring its normal zero value; no
+read-only user TLS ABI is currently provided. Fatal output identifies the
+CPU/task without taking scheduler, allocator or serial locks. The initial
+firmware/bootstrap stack remains in use only until guarded mappings exist;
+the BSP switches stacks before ordinary kernel execution.
+APs handle boot IPIs before task execution is released; ordinary scheduling
+starts only once the BSP finishes constructing boot tasks. Runtime stack
+allocation/reclamation requires interrupts enabled. x86 shootdowns pin the
+initiating task to its CPU until all acknowledgments arrive.
+
+User-origin syscalls/exceptions reserve a fresh 16-byte-aligned gap of up to
+1008 bytes below the saved register frame. They use the per-CPU CSPRNG when
+ready, with a weak early fallback if no credited entropy is available.
+Return assembly clears inactive task-stack bytes below the saved frame
+after the final Rust call, preserving user registers and flags. The default
+`stack-erase` Cargo feature enables erasure, including under
+`mitigations=off`; `KERNEL_NO_DEFAULT_FEATURES=1` disables this feature for
+overhead comparisons. Saved frames and suspended kernel continuations are
+never erased. Stack erasure does not reclaim heap objects or device buffers.
+
+`tools/test-stack-sizes.py` checks emitted optimized frame metadata on both
+architectures: ordinary Rust frames must fit 4 KiB, with an explicit 8 KiB
+allowance for ARM's early boot function on its 64 KiB bootstrap stack. This
+checks individual frames, not cumulative call depth. IDT initialization
+occurs in place and the shell's task snapshot uses reusable static storage to stay
+within that budget.
+
+Regression images and commands:
+```sh
+make bios arm64 KERNEL_FEATURES=test-stack-overflow
+python3 tools/test-stack-overflow.py --arch amd64
+python3 tools/test-stack-overflow.py --arch arm64
+make bios arm64 KERNEL_FEATURES=test-stack-state
+python3 tools/test-security.py --arch amd64 --cpus 4 --nmi --require '1000 churn tasks reclaimed'
+python3 tools/test-security.py --arch arm64 --cpus 4 --require '1000 churn tasks reclaimed'
+make bios arm64  # restore normal images
+```
+The state regression seeds initialized stack memory, observes it cleared on
+the next user entry, checks varying offsets and runs 1,000 short task
+lifetimes. Its frame accounting includes stack page-table reclamation;
+existing bump-heap growth remains separately accounted for and is not fixed
+by this change.

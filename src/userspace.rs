@@ -320,7 +320,7 @@ fn elf_loader_tests() -> (usize, usize) {
 /// leaked frames).
 fn churn_test() -> (usize, u64, i64) {
     use crate::memory::heap::{free_frames, grown_frames};
-    const WAVES: usize = 2;
+    const WAVES: usize = if cfg!(feature = "test-stack-state") { 125 } else { 2 };
     const PER_WAVE: usize = 8;
 
     wait_until(3000, || scheduler::unreaped_tasks() == 0);
@@ -336,6 +336,9 @@ fn churn_test() -> (usize, u64, i64) {
         }
         wait_until(5000, || tids.iter().all(exited));
         ran += tids.iter().filter(|t| t.load(Ordering::Relaxed) != 0).count();
+        // Extended runs must not outrun the bounded user-slot registry:
+        // exit precedes reaping and ownership release.
+        wait_until(3000, || scheduler::unreaped_tasks() == 0);
     }
     wait_until(3000, || scheduler::unreaped_tasks() == 0);
 
@@ -451,7 +454,8 @@ extern "C" fn user_check_task() -> ! {
     let (ran, frames, leaked) = churn_test();
     let mut what: heapless::String<64> = heapless::String::new();
     let _ = write!(what, "{} churn tasks reclaimed ({} frames)", ran, frames);
-    pass &= report(&what, ran == 16 && frames > 0 && leaked <= 0);
+    pass &= report(&what, ran == if cfg!(feature = "test-stack-state") { 1000 } else { 16 }
+        && frames > 0 && leaked <= 0);
     pass &= report("released frames contain no secrets",
         crate::memory::heap::with_frame_allocator(|fa| fa.released_frames_are_zero()).unwrap_or(false));
     if leaked > 0 {

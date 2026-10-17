@@ -19,6 +19,7 @@ pub mod mmu;
 pub mod pcie;
 pub mod serial;
 pub mod smp;
+pub mod stacks;
 pub mod timer;
 pub mod user_programs;
 pub mod virtio_mmio;

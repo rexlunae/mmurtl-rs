@@ -22,7 +22,14 @@ sha2 = { version = "0.10.9", default-features = false, features = ["force-soft"]
 bootloader = "0.11.15"
 
 [features]
+default = ["stack-erase"]
+# Clear inactive kernel stack bytes before every return to user mode.
+stack-erase = []
 # Explicit opt-in: raw kernel addresses in diagnostic logs defeat KASLR.
 debug-addresses = []
 # Regression image: enter the fatal machine-check path instead of starting the shell.
 test-machine-check = []
+# Regression image: deliberately overflow a guarded task stack.
+test-stack-overflow = []
+# Regression instrumentation: observe entry offsets and a seeded stack region.
+test-stack-state = []

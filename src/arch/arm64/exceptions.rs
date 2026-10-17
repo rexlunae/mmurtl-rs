@@ -51,6 +51,24 @@ global_asm!(
     .macro VENTRY kind
     .balign 0x80
     sub sp, sp, #272
+    .if \kind == 4
+    // No stack access until the synchronous guard check is complete.
+    // TPIDRRO_EL0 is kernel-owned and otherwise zero (no read-only TLS ABI).
+    msr tpidrro_el0, x0
+    mov x0, sp
+    ubfx x0, x0, #39, #9
+    cmp x0, #448
+    b.ne .Lstack_ok\@
+    mov x0, sp
+    and x0, x0, #65535
+    cmp x0, #4096
+    b.lo arm64_stack_overflow
+    cmp x0, #9, lsl #12
+    b.hs arm64_stack_overflow
+.Lstack_ok\@:
+    mrs x0, tpidrro_el0
+    msr tpidrro_el0, xzr
+    .endif
     stp x0, x1, [sp, #0]
     mov x0, #\kind
     b exception_common
@@ -149,12 +167,37 @@ exception_common:
     mov x28, xzr
     mov x29, xzr
     mov x30, xzr
-    mov x1, sp
+    mov x19, x0               // trusted vector kind
+    mov x20, sp               // original saved frame, above random gap
+    mov x0, sp
+    ldr x1, [sp, #264]
+    and x1, x1, #15
+    cmp x1, #0
+    cset x1, eq
+    bl kernel_stack_offset
+    sub sp, sp, x0
+    mov x0, x19
+    mov x1, x20
     bl arm64_exception          // x0 = kind, x1 = frame -> x0 = frame to resume
     mov sp, x0
     bl scheduler_unlock         // releases the lock only if we switched
     mov x0, sp
+    ldr x1, [sp, #264]
+    and x1, x1, #15
+    cmp x1, #0
+    cset x1, eq
+    bl kernel_stack_erase_bottom
+    mov x19, x0
+    mov x0, sp
     bl arm64_user_return_policy
+    mov x0, x19
+    cbz x0, .Lstack_erased
+    mov x1, sp
+.Lstack_erase:
+    str xzr, [x0], #8
+    cmp x0, x1
+    b.lo .Lstack_erase
+.Lstack_erased:
 
     ldp x1, x2, [sp, #256]
     msr elr_el1, x1

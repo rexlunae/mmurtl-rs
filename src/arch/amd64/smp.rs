@@ -11,14 +11,12 @@
 //!   3. STARTUP IPI (vector 0x08 → real-mode entry at 0x8000)
 //!   4. Wait for the AP to set the ready flag (retry SIPI once if needed)
 
-use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Physical address of the AP trampoline (must be 4K-aligned, below 1 MiB)
 pub const TRAMPOLINE_PHYS: u64 = 0x8000;
 
 /// Stack size for each AP's boot stack
-pub const AP_STACK_SIZE: usize = 64 * 1024;
 
 /// Number of CPUs that have completed bring-up (BSP counts as 1)
 static CPUS_ONLINE: AtomicUsize = AtomicUsize::new(1);
@@ -268,9 +266,8 @@ pub fn boot_aps() {
 /// Boot a single AP and wait for it to report in
 fn boot_one_ap(apic_id: u32, cpu_num: u64) -> bool {
     // Per-CPU boot stack, leaked: the AP keeps using it forever
-    let stack: Box<[u8]> = alloc::vec![0u8; AP_STACK_SIZE].into_boxed_slice();
-    let stack = Box::leak(stack);
-    let stack_top = (stack.as_ptr() as u64 + stack.len() as u64) & !0xF;
+    let stack = crate::memory::stacks::allocate();
+    let stack_top = stack.virt + stack.size;
 
     unsafe {
         tramp_field_ptr(&ap_tramp_stack).write_volatile(stack_top);

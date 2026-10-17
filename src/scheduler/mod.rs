@@ -164,6 +164,7 @@ impl Scheduler {
                 REAPING.fetch_add(1, Ordering::SeqCst);
                 let _ = out.push(Reapable {
                     kstack_phys: core::mem::take(&mut t.kstack_phys),
+                    kstack_virt: t.kernel_stack_bottom,
                     space: core::mem::take(&mut t.address_space),
                     slot: t.user_slot.take(),
                 });
@@ -231,6 +232,7 @@ impl Scheduler {
         let t = &mut self.tasks[next];
         t.state = TaskState::Running;
         t.on_cpu = Some(cpu as u8);
+        crate::memory::stacks::set_current_task(cpu, t.id);
         // Each task runs in its own address space (kernel tasks in the
         // kernel's). Loading the incoming task's space on every switch also
         // guarantees an exited task's space is loaded nowhere once it has
@@ -413,6 +415,11 @@ impl Scheduler {
 use spin::Mutex;
 
 static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+static STARTED: AtomicBool = AtomicBool::new(false);
+pub fn running() -> bool { STARTED.load(Ordering::Acquire) }
+/// APs may handle boot IPIs early, but must not run tasks/reclamation while
+/// the BSP is still constructing tasks with interrupts disabled.
+pub fn start() { STARTED.store(true, Ordering::Release); }
 
 /// Run a closure with the scheduler locked and interrupts disabled on the
 /// calling CPU (the only safe way to take the lock outside an interrupt).
@@ -479,6 +486,7 @@ pub fn register_ap(cpu: usize) {
 /// Only from interrupt context, with `current_sp` pointing at the saved
 /// context on the current task's stack.
 pub unsafe fn switch_from_interrupt(current_sp: u64, timer: bool) -> u64 {
+    if !running() { return current_sp; }
     let cpu = current_cpu();
     let mut sched = SCHEDULER.lock();
     crate::arch::nospec::barrier_nospec();
@@ -653,12 +661,7 @@ pub fn current_task_name() -> &'static str {
 
 /// Allocate a task stack from the kernel heap
 fn alloc_stack() -> KernelStack {
-    let pages = TASK_STACK_SIZE / 4096;
-    let phys = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_zeroed_contiguous(pages))
-        .flatten()
-        .expect("OOM allocating task stack");
-    let virt = crate::arch::phys_to_virt(phys);
-    KernelStack { virt: virt as u64, phys, size: TASK_STACK_SIZE as u64 }
+    crate::memory::stacks::allocate()
 }
 
 // ========================================================================
@@ -668,6 +671,7 @@ fn alloc_stack() -> KernelStack {
 /// Resources of an exited task, handed to the reaper
 struct Reapable {
     kstack_phys: u64,
+    kstack_virt: u64,
     space: u64,
     slot: Option<u64>,
 }
@@ -704,13 +708,7 @@ extern "C" fn reaper_task() -> ! {
         for r in &batch {
             let mut frames = 0u64;
             if r.kstack_phys != 0 {
-                let pages = (TASK_STACK_SIZE / 4096) as u64;
-                crate::memory::heap::with_frame_allocator(|fa| {
-                    for i in 0..pages {
-                        fa.deallocate_frame(r.kstack_phys + i * 4096);
-                    }
-                });
-                frames += pages;
+                frames += crate::memory::stacks::release(r.kstack_virt, r.kstack_phys);
             }
             if let Some(slot) = r.slot {
                 frames += crate::memory::user::release(r.space, slot) as u64;

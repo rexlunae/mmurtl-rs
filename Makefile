@@ -1,5 +1,6 @@
 KERNEL_FEATURES ?=
-KERNEL_FEATURE_FLAGS = $(if $(KERNEL_FEATURES),--features $(KERNEL_FEATURES),)
+KERNEL_NO_DEFAULT_FEATURES ?= 0
+KERNEL_FEATURE_FLAGS = $(if $(filter 1,$(KERNEL_NO_DEFAULT_FEATURES)),--no-default-features,) $(if $(KERNEL_FEATURES),--features $(KERNEL_FEATURES),)
 
 TARGET = x86_64-unknown-none.json
 KERNEL_BIN = target/x86_64-unknown-none/release/mmurtl-rs
