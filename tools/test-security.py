@@ -28,6 +28,7 @@ def main():
     parser.add_argument('--raw-image', action='store_true', help='boot the relocated arm64 Image (make arm64-image)')
     parser.add_argument('--nmi', action='store_true', help='inject an amd64 NMI and verify the shell remains responsive')
     parser.add_argument('--no-firmware-seed', action='store_true', help='disable QEMU arm64 DT seed properties')
+    parser.add_argument('--net', action='store_true', help='attach virtio networking for queue regressions')
     parser.add_argument('--rng', action='store_true', help='attach a host-backed virtio entropy device')
     parser.add_argument('--require', action='append', default=[])
     args = parser.parse_args()
@@ -59,6 +60,9 @@ def main():
                 command += ['-fw_cfg', f'name=opt/mmurtl/bootargs,file={bootargs_path}']
             else:
                 command += ['-append', args.bootargs]
+        if args.net:
+            net_device = 'virtio-net-pci' if args.arch == 'amd64' else 'virtio-net-device'
+            command += ['-netdev', 'user,id=net0', '-device', net_device + ',netdev=net0']
         if args.rng: command += ['-device', 'virtio-rng-pci' if args.arch == 'amd64' else 'virtio-rng-device']
         command += ['-m', '256M', '-smp', str(args.cpus)]
         proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

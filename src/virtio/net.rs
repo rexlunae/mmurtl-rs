@@ -166,7 +166,16 @@ fn recv_frame(dev: &mut NetDevice, out: &mut [u8], timeout_ms: u32) -> Option<us
     if dev.failed {
         return None;
     }
-    let (head, written) = dev.rx.wait_used(1, timeout_ms)?;
+    let (head, written) = match dev.rx.wait_used(1, timeout_ms) {
+        Some(completion) => completion,
+        None => {
+            if dev.rx.is_broken() {
+                dev.failed = true;
+                crate::serial::write_line("[NET] Invalid RX completion — device disabled (needs reset)");
+            }
+            return None;
+        }
+    };
     let written = written as usize;
 
     // Which RX buffer completed? Descriptor heads for the prefilled

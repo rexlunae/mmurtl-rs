@@ -93,7 +93,7 @@ pub fn trng_seed() -> Option<[u8; 48]> {
                 chunk[16..24].copy_from_slice(&x1.to_le_bytes());
                 success = true; break;
             }
-            if x0 as i64 != -3 { break; } // only NO_ENTROPY is retryable
+            if crate::security::smccc_status(x0) != -3 { break; } // only NO_ENTROPY is retryable
         }
         if !success { crate::random::crypto::erase(&mut bytes); return None; }
     }

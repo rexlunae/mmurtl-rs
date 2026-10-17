@@ -30,3 +30,7 @@ jobs:
           /tmp/mmurtl-store-bypass
       - name: Verify cryptographic vectors and entropy policy
         run: python3 tools/test-random.py
+      - name: Verify virtqueue descriptor ownership
+        run: |
+          rustc --edition=2021 tools/tests/virtqueue_ownership.rs -o /tmp/mmurtl-vq-test
+          /tmp/mmurtl-vq-test

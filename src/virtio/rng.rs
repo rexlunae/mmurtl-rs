@@ -19,6 +19,7 @@ pub fn init(transport: Box<dyn Transport>) {
     let mut completion = None;
     for _ in 0..100 {
         if let Some(used) = queue.pop_used_checked(1, Some(head)) { completion = Some(used); break; }
+        if queue.is_broken() { break; }
         crate::arch::delay_ms(1);
     }
     if let Some((_, len)) = completion.filter(|(_, len)| (16..=64).contains(len) && len % 8 == 0) {

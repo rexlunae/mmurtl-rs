@@ -40,7 +40,7 @@ pub fn healthy(bytes: &[u8]) -> bool {
     true
 }
 pub fn seed(source: &'static str, bytes: &mut [u8], bits: u16) {
-    let credit = if healthy(bytes) { bits.min((bytes.len() * 8).min(256) as u16) } else { 0 };
+    let credit = if healthy(bytes) { bits.min(bytes.len().saturating_mul(8).min(256) as u16) } else { 0 };
     mix(source.as_bytes(), bytes, credit);
     crypto::erase(bytes);
     crate::serial::write_str("[RNG] source "); crate::serial::write_str(source);

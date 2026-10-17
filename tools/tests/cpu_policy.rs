@@ -29,6 +29,8 @@ fn main() {
     assert_eq!(smccc_status(0xffff_ffff), -1);
     assert_eq!(smccc_status(u64::MAX - 1), -2);
     assert_eq!(smccc_status(0x10001), 0x10001);
+    assert_eq!(smccc_status(0xffff_fffd), -3); // zero-extended firmware NO_ENTROPY
+    assert_eq!(smccc_status(u64::MAX - 2), -3); // sign-extended firmware NO_ENTROPY
     let unknown = x86_decode::decode(SpecCaps::default(), || panic!("ungated MSR read"));
     assert_eq!(unknown.features, 0);
     let mut raw = SpecCaps::default();

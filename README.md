@@ -1023,7 +1023,10 @@ because kernel FP/SIMD context switching is not yet implemented.
 Boot mixes bounded, health-checked RDSEED/RDRAND or RNDRRS/RNDR, discovered
 SMCCC TRNG_RND64, firmware DT seeds, and an optional virtio-rng host source.
 DT seed properties and completed DMA seed samples are erased after consumption.
-The virtio-rng DMA allocations remain reserved even on timeout, so late DMA
+Virtqueue free lists and in-flight chain lengths live in CPU-owned metadata;
+invalid/duplicate completion IDs or ring-index jumps poison the queue until
+reset. Network RX marks the device failed rather than gradually losing posted
+buffers. The virtio-rng DMA allocations remain reserved even on timeout, so late DMA
 cannot hit recycled memory. Timestamps, normal interrupt timing, and public
 ACPI/DT machine data are supplements with **zero entropy credit**. This is not
 a validated jitterentropy implementation. Credits are conditional on trusting
