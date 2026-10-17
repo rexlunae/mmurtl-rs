@@ -46,3 +46,7 @@ jobs:
         run: |
           rustc --edition=2021 tools/tests/arm_pan.rs -o /tmp/mmurtl-pan-test
           /tmp/mmurtl-pan-test
+      - name: Verify KASLR placement ranges
+        run: |
+          rustc --edition=2021 tools/tests/kaslr.rs -o /tmp/mmurtl-kaslr-test
+          /tmp/mmurtl-kaslr-test

@@ -1,6 +1,6 @@
 //! arm64 MMU: 4 KiB granule, 48-bit user TTBR0 and high-half kernel TTBR1.
 //!
-//! The kernel runs at PHYS_OFFSET + PA, built from the device tree
+//! The image and physical window have separate randomized TTBR1 placements, built from the device tree
 //! so it works wherever RAM and devices are (RAM at 1 GiB on QEMU `virt`,
 //! at 0 on a Raspberry Pi, with the Pi's peripherals right after RAM):
 //!   - RAM ranges: Normal write-back, 2 MiB blocks (only whole blocks)
@@ -73,7 +73,12 @@ pub struct MmuRegs {
     pub ttbr0: u64,
     pub ttbr1: u64,
     pub sctlr: u64,
+    pub kernel_offset: u64,
+    pub physical_offset: u64,
 }
+
+const _: () = assert!(core::mem::offset_of!(MmuRegs, kernel_offset) == 40
+    && core::mem::offset_of!(MmuRegs, physical_offset) == 48);
 
 fn tcr_value() -> u64 {
     let parange: u64;
@@ -99,6 +104,8 @@ pub fn regs() -> MmuRegs {
         ttbr0: boot_root() | (255 << 48), // reserved, non-global bootstrap ASID
         ttbr1: kernel_root(),
         sctlr: SCTLR,
+        kernel_offset: super::memory::kernel_offset(),
+        physical_offset: super::memory::physical_offset(),
     }
 }
 
@@ -149,6 +156,34 @@ const L3_POOL: usize = 16;
 static mut L3: [Table; L3_POOL] = [const { Table([0; ENTRIES]) }; L3_POOL];
 static mut L3_USED: usize = 0;
 
+static mut IMAGE_L1: Table = Table([0; ENTRIES]);
+static mut IMAGE_L2: [Table; 2] = [const { Table([0; ENTRIES]) }; 2];
+static mut IMAGE_L3: [Table; 16] = [const { Table([0; ENTRIES]) }; 16];
+static mut IMAGE_L2_USED: usize = 0;
+static mut IMAGE_L3_USED: usize = 0;
+unsafe fn map_image_page(pa: u64, attrs: u64) {
+    let va = pa.checked_add(super::memory::kernel_offset()).expect("kernel VA overflow");
+    let top = ((va >> 39) & 511) as usize;
+    let l0 = &mut (*core::ptr::addr_of_mut!(L0)).0;
+    let l1_pa = super::memory::virt_to_phys(core::ptr::addr_of!(IMAGE_L1) as u64);
+    assert!(l0[top] == 0 || l0[top] == l1_pa | TABLE | VALID, "image leaves reserved slot");
+    l0[top] = l1_pa | TABLE | VALID;
+    let l1 = &mut (*core::ptr::addr_of_mut!(IMAGE_L1)).0;
+    let i = ((va >> 30) & 511) as usize;
+    if l1[i] == 0 {
+        assert!(IMAGE_L2_USED < 2, "kernel image exceeds L2 pool");
+        l1[i] = super::memory::virt_to_phys(core::ptr::addr_of!((*core::ptr::addr_of!(IMAGE_L2))[IMAGE_L2_USED]) as u64) | TABLE | VALID;
+        IMAGE_L2_USED += 1;
+    }
+    let l2 = table_pointer(l1[i] & ADDR_MASK).add(((va >> 21) & 511) as usize);
+    if l2.read() == 0 {
+        assert!(IMAGE_L3_USED < 16, "kernel image exceeds L3 pool");
+        l2.write(super::memory::virt_to_phys(core::ptr::addr_of!((*core::ptr::addr_of!(IMAGE_L3))[IMAGE_L3_USED]) as u64) | TABLE | VALID);
+        IMAGE_L3_USED += 1;
+    }
+    table_pointer(l2.read() & ADDR_MASK).add(((va >> 12) & 511) as usize).write(pa | attrs);
+}
+
 unsafe fn protect_kernel_image() {
     extern "C" {
         static __kernel_start: u8; static __kernel_end: u8;
@@ -177,9 +212,12 @@ unsafe fn protect_kernel_image() {
             slot.write_volatile(d);
         }
         let mut attrs = RAM_ATTRS | TABLE;
-        if text.contains(&pa) { attrs = (attrs | AP_RO_BIT) & !PXN; }
+        if text.contains(&pa) { attrs |= AP_RO_BIT; }
         else if ro.contains(&pa) || relro.contains(&pa) { attrs |= AP_RO_BIT; }
         table_pointer(d & ADDR_MASK).add(((pa >> 12) & 511) as usize).write_volatile(pa | attrs);
+        // Image has a separate alias; the physical window always stays NX.
+        let code_attrs = if text.contains(&pa) { attrs & !PXN } else { attrs };
+        map_image_page(pa, code_attrs);
     }
 }
 
@@ -199,6 +237,25 @@ pub fn audit_kernel_wx() {
     }
     unsafe {
         visit(kernel_root(), 0, false, false);
+        extern "C" { static __text_start: u8; }
+        let image_va = core::ptr::addr_of!(__text_start) as u64;
+        let pa = super::memory::virt_to_phys(image_va);
+        unsafe fn leaf(va: u64) -> u64 {
+            let mut table = kernel_root();
+            for level in 0..4 {
+                let d = table_pointer(table).add(((va >> (39 - level * 9)) & 511) as usize).read_volatile();
+                assert!(d & VALID != 0, "missing image alias");
+                if level == 3 || d & TABLE == 0 { return d; }
+                table = d & ADDR_MASK;
+            }
+            unreachable!()
+        }
+        let image = leaf(image_va);
+        let linear = leaf(super::memory::phys_to_virt(pa) as u64);
+        assert_eq!(image & (AP_RO_BIT | PXN | UXN | AP_EL0_BIT), AP_RO_BIT | UXN, "image text permissions");
+        assert_eq!(linear & (AP_RO_BIT | PXN | UXN | AP_EL0_BIT), AP_RO_BIT | PXN | UXN, "linear text alias permissions");
+        assert_eq!(image & ADDR_MASK, pa, "image translation");
+        assert_eq!(linear & ADDR_MASK, pa, "linear alias translation");
         let ttbr0: u64; let ttbr1: u64; let tcr: u64;
         asm!("mrs {}, ttbr0_el1", "mrs {}, ttbr1_el1", "mrs {}, tcr_el1", out(reg) ttbr0, out(reg) ttbr1, out(reg) tcr);
         assert_eq!(ttbr0 & ADDR_MASK, empty_root(), "kernel TTBR0 is not empty");
@@ -222,7 +279,7 @@ pub fn audit_kernel_wx() {
 /// Once, on the boot CPU, with the MMU off.
 pub unsafe fn early_init(ram: &[(u64, u64)], devices: &[(u64, u64)]) -> heapless::Vec<(u64, u64), 8> {
     let l0 = &mut *core::ptr::addr_of_mut!(L0);
-    l0.0[0] = super::memory::virt_to_phys(core::ptr::addr_of!(L1) as u64) | TABLE | VALID;
+    l0.0[((super::memory::physical_offset() >> 39) & 511) as usize] = super::memory::virt_to_phys(core::ptr::addr_of!(L1) as u64) | TABLE | VALID;
 
     // Devices first: every block a region touches. A RAM range that
     // overlaps a peripheral block (a firmware-reported size covering the
@@ -531,8 +588,8 @@ pub fn finalize_asids() {
         ASID_WIDTH.store(bits, Ordering::Release);
         apply_asid_width(); flush_all();
     });
-    crate::serial::write_str("[MMU] kernel at 0x");
-    crate::serial::write_hex(core::ptr::addr_of!(L0) as u64);
+    crate::serial::write_str("[MMU] kernel at ");
+    crate::kptr::write(core::ptr::addr_of!(L0) as u64);
     crate::serial::write_str(" (TTBR1), user-only TTBR0 with "); crate::serial::write_dec(bits as u64);
     crate::serial::write_line("-bit ASIDs; user nG, TBI0 off");
 }

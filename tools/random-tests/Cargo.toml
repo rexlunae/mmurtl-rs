@@ -7,3 +7,7 @@ edition = "2021"
 spin = "0.9"
 chacha20 = { version = "0.10.2", default-features = false, features = ["cipher", "zeroize"] }
 blake2 = { version = "0.10.6", default-features = false }
+heapless = "0.8"
+
+[features]
+debug-addresses = []

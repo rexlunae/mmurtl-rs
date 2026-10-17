@@ -113,8 +113,8 @@ impl FrameAllocator {
             .filter(|&i| bitmap[i / 32] & (1 << (i % 32)) == 0)
             .count();
 
-        crate::serial::write_str("[FRAME] Bitmap at physical 0x");
-        crate::serial::write_hex(bitmap_addr);
+        crate::serial::write_str("[FRAME] Bitmap at physical ");
+        crate::kptr::write(bitmap_addr);
         crate::serial::write_str(", tracking ");
         crate::serial::write_dec(total_frames as u64);
         crate::serial::write_str(" frames, free=");

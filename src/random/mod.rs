@@ -40,12 +40,17 @@ pub fn healthy(bytes: &[u8]) -> bool {
     true
 }
 pub fn seed(source: &'static str, bytes: &mut [u8], bits: u16) {
-    let credit = if healthy(bytes) { bits.min(bytes.len().saturating_mul(8).min(256) as u16) } else { 0 };
-    mix(source.as_bytes(), bytes, credit);
-    crypto::erase(bytes);
+    let credit = seed_quiet(source, bytes, bits);
     crate::serial::write_str("[RNG] source "); crate::serial::write_str(source);
     crate::serial::write_str(": credited "); crate::serial::write_dec(credit as u64);
     crate::serial::write_line(" bits (conditional source trust)");
+}
+/// Allocation-free seeding before a console/virtual map exists.
+pub fn seed_quiet(source: &str, bytes: &mut [u8], bits: u16) -> u16 {
+    let credit = if healthy(bytes) { bits.min(bytes.len().saturating_mul(8).min(256) as u16) } else { 0 };
+    mix(source.as_bytes(), bytes, credit);
+    crypto::erase(bytes);
+    credit
 }
 fn derive(cpu: u64) -> [u8; 32] {
     let mut p = POOL.lock();

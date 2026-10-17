@@ -35,14 +35,14 @@ pub fn kill_faulting_task(what: &str, pc: u64, addr: Option<u64>) -> ! {
     let mut line: heapless::String<160> = heapless::String::new();
     let _ = write!(
         line,
-        "[USER] T{} \"{}\" killed: {} at pc=0x{:x}",
+        "[USER] T{} \"{}\" killed: {} at pc={}",
         scheduler::current_task_id(),
         scheduler::current_task_name(),
         what,
-        pc
+        crate::kptr::UserAddress(pc)
     );
     if let Some(a) = addr {
-        let _ = write!(line, ", addr=0x{:x}", a);
+        let _ = write!(line, ", addr={}", crate::kptr::UserAddress(a));
     }
     let _ = line.push('\n');
     crate::serial::write_str(&line);

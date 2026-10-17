@@ -31,8 +31,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Log physical memory offset
     match boot_info.physical_memory_offset {
         Optional::Some(offset) => {
-            serial::write_str("[INFO] Physical memory offset: 0x");
-            serial::write_hex(offset);
+            serial::write_str("[INFO] Physical memory offset: ");
+            crate::kptr::write(offset);
             serial::write_str("\n");
         }
         Optional::None => {
@@ -81,6 +81,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     super::microcode::init(module, boot_info.ramdisk_len);
     assert!(super::microcode::apply(0, || {}));
     crate::random::init();
+    if !crate::random::ready() { crate::serial::write_line("[KASLR] WARNING: kernel heap entropy below 128 bits; placement is not cryptographically assured"); }
+    crate::memory::heap::init_heap();
+    crate::kptr::init();
+    crate::kptr::report(kernel_main as *const () as u64, super::page_table::physical_memory_offset());
     super::protection::enumerate(0);
     super::memory::protect_image_aliases(boot_info.kernel_addr, boot_info.kernel_len, boot_info.kernel_image_offset);
     super::gdt::protect_bsp_stacks();
@@ -130,6 +134,10 @@ use bootloader_api::config::{BootloaderConfig, Mapping};
 
 const BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
+    config.mappings.aslr = true;
+    // Reserve the upper region for independently randomized heap mappings.
+    config.mappings.dynamic_range_start = Some(crate::security::kaslr::AMD_DYNAMIC_START);
+    config.mappings.dynamic_range_end = Some(crate::security::kaslr::AMD_DYNAMIC_END);
     config.mappings.physical_memory = Option::Some(Mapping::Dynamic);
     config
 };

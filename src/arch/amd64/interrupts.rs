@@ -214,7 +214,7 @@ extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     super::protection::clear_access();
     crate::serial::write_str("[BREAKPOINT] at ");
-    crate::serial::write_hex(stack_frame.instruction_pointer.as_u64());
+    crate::kptr::write(stack_frame.instruction_pointer.as_u64());
     crate::serial::write_str("\n");
 }
 
@@ -322,8 +322,8 @@ extern "x86-interrupt" fn page_fault_handler(
     }
 
     crate::serial::write_str("\n[PAGE FAULT]\n");
-    crate::serial::write_str("  Address: 0x");
-    crate::serial::write_hex(address.as_u64());
+    crate::serial::write_str("  Address: ");
+    crate::kptr::write(address.as_u64());
     crate::serial::write_str("\n");
     crate::serial::write_str("  Error code:");
     crate::serial::write_hex_byte(error_code.bits() as u8);
@@ -371,10 +371,32 @@ unsafe fn emergency_msr(index: u32) -> u64 {
     core::arch::asm!("rdmsr", in("ecx") index, out("eax") lo, out("edx") hi, options(nostack));
     (hi as u64) << 32 | lo as u64
 }
+/// Regression image only: seed one synthetic MCA bank, then enter the
+/// fatal handler through its real guarded IST gate. No production entry.
+#[cfg(feature = "test-machine-check")]
+pub fn test_machine_check() -> ! {
+    assert!(unsafe { core::arch::x86_64::__cpuid(1) }.edx & (1 << 14) != 0);
+    let cap = unsafe { emergency_msr(0x179) };
+    assert!(cap & 0xff != 0);
+    let pointer = test_machine_check as *const () as u64;
+    assert!(super::microcode_msr::write(0x402, pointer));
+    assert!(super::microcode_msr::write(0x403, pointer));
+    assert!(super::microcode_msr::write(0x401, (1 << 63) | (1 << 58) | (1 << 59)));
+    assert_eq!(unsafe { emergency_msr(0x402) }, pointer);
+    assert_eq!(unsafe { emergency_msr(0x403) }, pointer);
+    if crate::kptr::RAW_ADDRESSES {
+        emergency_text("[MCE TEST] injected="); emergency_hex(pointer); emergency_text("\n");
+    }
+    unsafe { core::arch::asm!("int 0x12", options(noreturn)); }
+}
+
 extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame) -> ! {
     super::protection::clear_access();
     emergency_text("\n[MCE] fatal machine check at ");
-    emergency_hex(stack_frame.instruction_pointer.as_u64());
+    // Machine checks cannot take formatting/RNG/serial locks. Redact with
+    // a constant string rather than invoking the normal pointer formatter.
+    if crate::kptr::RAW_ADDRESSES { emergency_hex(stack_frame.instruction_pointer.as_u64()); }
+    else { emergency_text("(ptr)"); }
     // These MSRs exist only when CPUID advertises MCA.
     if unsafe { core::arch::x86_64::__cpuid(1) }.edx & (1 << 14) != 0 {
         let cap = unsafe { emergency_msr(0x179) };
@@ -384,8 +406,16 @@ extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame
             if status & (1 << 63) == 0 { continue; }
             emergency_text("\n[MCE] bank="); emergency_hex(bank as u64);
             emergency_text(" status="); emergency_hex(status);
-            if status & (1 << 58) != 0 { emergency_text(" addr="); emergency_hex(unsafe { emergency_msr(0x402 + bank * 4) }); }
-            if status & (1 << 59) != 0 { emergency_text(" misc="); emergency_hex(unsafe { emergency_msr(0x403 + bank * 4) }); }
+            if status & (1 << 58) != 0 {
+                emergency_text(" addr=");
+                if crate::kptr::RAW_ADDRESSES { emergency_hex(unsafe { emergency_msr(0x402 + bank * 4) }); }
+                else { emergency_text("(ptr)"); }
+            }
+            if status & (1 << 59) != 0 {
+                emergency_text(" misc=");
+                if crate::kptr::RAW_ADDRESSES { emergency_hex(unsafe { emergency_msr(0x403 + bank * 4) }); }
+                else { emergency_text("(restricted)"); }
+            }
         }
     }
     emergency_text("\n[MCE] CPU halted\n");

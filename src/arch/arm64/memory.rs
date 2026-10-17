@@ -42,7 +42,7 @@ pub fn init(ram: &[(u64, u64)], memreserve: &[(u64, u64)], dtb: u64, kernel_star
 
 /// Kernel RAM/device window in TTBR1.
 pub fn phys_to_virt(phys: u64) -> *mut u8 {
-    (phys + PHYS_OFFSET) as *mut u8
+    (phys + physical_offset()) as *mut u8
 }
 
 /// Carve the initial heap from contiguous physical frames
@@ -50,7 +50,7 @@ pub fn heap_init(fa: &mut FrameAllocator) -> (u64, u64) {
     let pa = fa
         .allocate_zeroed_contiguous((HEAP_INITIAL / FRAME_SIZE) as usize)
         .expect("no contiguous RAM for the kernel heap");
-    (pa + PHYS_OFFSET, pa + PHYS_OFFSET + HEAP_INITIAL)
+    (pa + physical_offset(), pa + physical_offset() + HEAP_INITIAL)
 }
 
 /// Grow the heap in place by claiming the frames right after it. Called
@@ -65,13 +65,29 @@ pub fn user_access_begin() { super::pan::begin(); }
 pub fn user_access_end() { super::pan::end(); }
 
 /// 48-bit upper translation regime, independent of the physical image address.
-pub const PHYS_OFFSET: u64 = 0xffff_0000_0000_0000;
-pub fn virt_to_phys(va: u64) -> u64 {
-    if va >= PHYS_OFFSET { va - PHYS_OFFSET } else { va }
+const HIGH_START: u64 = 0xffff_0000_0000_0000;
+use core::sync::atomic::{AtomicU64, Ordering};
+static PHYSICAL_OFFSET: AtomicU64 = AtomicU64::new(HIGH_START);
+static KERNEL_OFFSET: AtomicU64 = AtomicU64::new(HIGH_START);
+pub fn physical_offset() -> u64 { PHYSICAL_OFFSET.load(Ordering::Relaxed) }
+pub fn kernel_offset() -> u64 { KERNEL_OFFSET.load(Ordering::Relaxed) }
+/// Once before translation or AP release. Separate L0 regions never overlap.
+pub fn choose_layout(load_addr: u64) {
+    let (linear, image) = crate::security::kaslr::arm_layout([
+        crate::random::early_u64(), crate::random::early_u64(), crate::random::early_u64()
+    ]);
+    PHYSICAL_OFFSET.store(linear, Ordering::Relaxed);
+    KERNEL_OFFSET.store(image - (load_addr & !((2 << 20) - 1)), Ordering::Relaxed);
 }
-/// Page-table setup runs before the high jump; runtime walks run after it.
+pub fn virt_to_phys(va: u64) -> u64 {
+    if va < HIGH_START { return va; }
+    let linear = physical_offset();
+    if (linear..linear + (1 << 39)).contains(&va) { va - linear }
+    else { va.checked_sub(kernel_offset()).expect("unknown kernel virtual address") }
+}
+/// Setup walks physical tables; runtime walks use their linear alias.
 pub fn boot_pointer(pa: u64) -> *mut u8 {
     let pc: u64;
     unsafe { core::arch::asm!("adr {}, .", out(reg) pc, options(nomem, nostack)); }
-    if pc >= PHYS_OFFSET { phys_to_virt(pa) } else { pa as *mut u8 }
+    if pc >= HIGH_START { phys_to_virt(pa) } else { pa as *mut u8 }
 }

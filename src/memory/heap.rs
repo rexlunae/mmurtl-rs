@@ -6,8 +6,8 @@
 //!
 //! Where the heap lives is the architecture's business
 //! (`crate::arch::heap_init` / `heap_extend`): amd64 maps fresh frames at a
-//! fixed higher-half address and can grow the heap page by page; arm64
-//! carves one physically contiguous, identity-mapped block.
+//! randomized higher-half address and can grow the heap page by page; arm64
+//! carves one physically contiguous block in its randomized linear map.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -91,8 +91,8 @@ impl BumpAllocator {
         }
         let (start, end) = crate::arch::heap_init(frame_alloc);
 
-        crate::serial::write_str("[HEAP] Bump allocator at 0x");
-        crate::serial::write_hex(start);
+        crate::serial::write_str("[HEAP] Bump allocator at ");
+        crate::kptr::write(start);
         crate::serial::write_str(" (");
         crate::serial::write_dec((end - start) / 1024);
         crate::serial::write_str(" KiB)\n");
@@ -176,9 +176,6 @@ unsafe impl GlobalAlloc for BumpAllocator {
 static GLOBAL_ALLOC: BumpAllocator = BumpAllocator::new();
 
 /// Initialize the kernel heap
-pub fn init_heap(frame_alloc: &mut frame_allocator::FrameAllocator) {
-    unsafe {
-        set_frame_allocator(frame_alloc as *mut _);
-    }
-    GLOBAL_ALLOC.init(frame_alloc);
+pub fn init_heap() {
+    with_frame_allocator(|fa| GLOBAL_ALLOC.init(fa)).expect("frame allocator before heap");
 }

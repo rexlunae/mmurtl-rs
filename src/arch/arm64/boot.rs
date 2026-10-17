@@ -196,7 +196,8 @@ arm64_enter_high:
     adr x10, _start
     movz x11, #(LINK_BASE >> 16), lsl #16
     sub x10, x10, x11
-    movz x12, #0xffff, lsl #48
+    ldr x12, [x0, #40]       // independent kernel image offset
+    ldr x13, [x0, #48]       // physical-map offset
     adrp x3, __rela_start
     add x3, x3, :lo12:__rela_start
     adrp x4, __rela_end
@@ -218,8 +219,8 @@ arm64_enter_high:
     adrp x9, arm64_high_main
     add x9, x9, :lo12:arm64_high_main
     add x9, x9, x12
-    add x0, x1, x12            // BootState's high alias
-    add x11, sp, x12
+    add x0, x1, x13            // BootState's linear alias
+    add x11, sp, x13
     mov sp, x11
     msr mair_el1, x2
     msr tcr_el1, x3
@@ -252,6 +253,7 @@ secondary_start:
     ldr x4, [x19, #32]          // ttbr0
     ldr x5, [x19, #40]          // ttbr1
     ldr x6, [x19, #48]          // sctlr
+    ldr x10, [x19, #56]         // kernel image offset, before translation
     msr mair_el1, x2
     msr tcr_el1, x3
     msr ttbr0_el1, x4
@@ -268,7 +270,6 @@ secondary_start:
     mov x0, x1
     adrp x9, arm64_secondary_main
     add x9, x9, :lo12:arm64_secondary_main
-    movz x10, #0xffff, lsl #48
     add x9, x9, x10
     br x9
     b park
@@ -312,7 +313,20 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
             core::hint::spin_loop(); // no device tree, no console: nothing to report on
         }
     };
-    let info = fdt::parse(dtb);
+    let mut info = fdt::parse(dtb);
+    super::cpu_features::set_conduit(info.psci);
+    // The parser has returned: no immutable DTB borrow survives erasure.
+    for (name, (address, len), bits) in [("DT rng-seed", info.rng_seed, 256), ("DT kaslr-seed", info.kaslr_seed, 64)] {
+        if len != 0 {
+            let seed = unsafe { core::slice::from_raw_parts_mut(address as *mut u8, len) };
+            crate::random::seed_quiet(name, seed, bits);
+        }
+    }
+    info.rng_seed = (0, 0); info.kaslr_seed = (0, 0);
+    super::entropy::early_collect();
+    crate::random::mix(b"early counter, uncredited", &super::entropy::counter().to_le_bytes(), 0);
+    let kaslr_seeded = crate::random::ready();
+    super::memory::choose_layout(load_addr);
 
     // Everything the kernel touches before memory management exists
     let mut devices: heapless::Vec<(u64, u64), 48> = heapless::Vec::new();
@@ -344,7 +358,7 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
     }
     let ram = unsafe { super::mmu::early_init(&info.ram[..info.ram_count], &devices) };
 
-    let state = BootState { info, ram, dtb, load_addr, relocs };
+    let state = BootState { info, ram, dtb, load_addr, relocs, kaslr_seeded };
     let regs = super::mmu::regs();
     unsafe { arm64_enter_high(&regs, &state) }
 }
@@ -355,13 +369,14 @@ struct BootState {
     dtb: u64,
     load_addr: u64,
     relocs: u64,
+    kaslr_seeded: bool,
 }
 extern "C" { fn arm64_enter_high(regs: *const super::mmu::MmuRegs, state: *const BootState) -> !; }
 
 #[no_mangle]
 extern "C" fn arm64_high_main(state: *const BootState) -> ! {
     super::mmu::retire_identity();
-    let BootState { info, ram, dtb, load_addr, relocs } = unsafe { state.read() };
+    let BootState { info, ram, dtb, load_addr, relocs, kaslr_seeded } = unsafe { state.read() };
     super::serial::set_base(info.uart);
     crate::serial::init();
     crate::serial::write_line("[FPU] user FP/SIMD/SVE/SME disabled on every CPU (no context switching yet)");
@@ -392,13 +407,13 @@ extern "C" fn arm64_high_main(state: *const BootState) -> ! {
         let mut line: heapless::String<200> = heapless::String::new();
         let _ = write!(
             line,
-            "[BOOT] Loaded at 0x{:x} (linked at 0x{:x}), {} relocations applied\n",
-            load_addr, LINK_BASE, relocs
+            "[BOOT] Loaded at {} (linked at 0x{:x}), {} relocations applied\n",
+            crate::kptr::KPtr(load_addr), LINK_BASE, relocs
         );
         let _ = write!(
             line,
-            "[DTB] Device tree at 0x{:x}: {} CPU(s), {} virtio-mmio slots, SMP via {}\n",
-            dtb,
+            "[DTB] Device tree at {}: {} CPU(s), {} virtio-mmio slots, SMP via {}\n",
+            crate::kptr::KPtr(dtb),
             info.cpu_count,
             info.virtio_count,
             if info.cpu_release[..info.cpu_count].iter().any(|&r| r != 0) {
@@ -428,6 +443,10 @@ extern "C" fn arm64_high_main(state: *const BootState) -> ! {
         panic!("the device tree describes no usable RAM");
     }
     super::memory::init(&ram, &info.reserved[..info.reserved_count], dtb, kernel_start, kernel_end);
+    crate::memory::heap::init_heap();
+    crate::kptr::init();
+    crate::kptr::report(arm64_high_main as *const () as u64, super::memory::physical_offset());
+    if !kaslr_seeded { crate::serial::write_line("[KASLR] WARNING: early entropy below 128 bits; placement is not cryptographically assured"); }
 
     // Interrupts: controller + this CPU, UART RX, the generic timer
     super::irq::init(&info);

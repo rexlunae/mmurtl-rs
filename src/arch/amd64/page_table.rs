@@ -48,8 +48,8 @@ pub fn physical_memory_offset() -> u64 {
 /// memory offset
 pub fn init(physical_memory_offset: Option<u64>) {
     if let Some(offset) = physical_memory_offset {
-        crate::serial::write_str("[PAGING] Physical memory offset: 0x");
-        crate::serial::write_hex(offset);
+        crate::serial::write_str("[PAGING] Physical memory offset: ");
+        crate::kptr::write(offset);
         crate::serial::write_str("\n");
 
         unsafe {
