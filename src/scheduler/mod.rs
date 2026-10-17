@@ -21,7 +21,6 @@
 mod task;
 mod rqb;
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -101,7 +100,7 @@ static SWITCH_LOCK_HELD: [AtomicBool; MAX_CPUS] = {
 /// The global scheduler
 pub struct Scheduler {
     /// All registered tasks (run queue)
-    tasks: Vec<Box<TaskControlBlock>>,
+    tasks: Vec<TaskBox>,
     /// Per-CPU scheduling state
     cpus: [PerCpu; MAX_CPUS],
     /// Global round-robin cursor — spreads tasks across CPUs
@@ -142,7 +141,7 @@ impl Scheduler {
 
     /// Add a prepared task to the run queue
     /// Add a task, reusing the slot of one the reaper has released
-    fn add_task(&mut self, task: Box<TaskControlBlock>) -> u32 {
+    fn add_task(&mut self, task: TaskBox) -> u32 {
         let tid = task.id;
         match self.tasks.iter().position(|t| t.state == TaskState::Exited && t.reaped) {
             Some(i) => self.tasks[i] = task,
@@ -713,6 +712,8 @@ pub fn start_reaper() {
 extern "C" fn reaper_task() -> ! {
     loop {
         sleep_ms(50);
+        #[cfg(feature="kfence")]
+        crate::memory::fence::reap();
         let mut batch: heapless::Vec<Reapable, 16> = heapless::Vec::new();
         with_scheduler(|s| s.collect_exited(&mut batch));
         for r in &batch {

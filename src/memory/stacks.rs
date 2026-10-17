@@ -28,6 +28,7 @@ fn with_mappings<R>(f: impl FnOnce() -> R) -> R {
 static TASKS: [core::sync::atomic::AtomicU32; crate::scheduler::MAX_CPUS] =
     [const { core::sync::atomic::AtomicU32::new(0) }; crate::scheduler::MAX_CPUS];
 pub fn set_current_task(cpu: usize, task: u32) { TASKS[cpu].store(task, Ordering::Relaxed); }
+pub fn current_task(cpu:usize)->u32 {TASKS[cpu].load(Ordering::Relaxed)}
 
 fn bottom(frame: u64) -> Option<u64> {
     super::stack_layout::bottom(frame, FIRST.load(Ordering::Acquire), NEXT.load(Ordering::Acquire))
@@ -94,6 +95,11 @@ pub fn init() {
     crate::arch::stacks::init_emergency();
 }
 pub fn allocate() -> crate::scheduler::KernelStack {
+    allocate_sized(SIZE)
+}
+#[cfg(feature="kfence")]
+pub fn allocate_sample_page()->crate::scheduler::KernelStack {allocate_sized(PAGE)}
+fn allocate_sized(size:u64)->crate::scheduler::KernelStack {
     assert!(!crate::scheduler::running() || crate::arch::stacks::interrupts_enabled(), "runtime stack allocation requires IRQs enabled");
     with_mappings(|| {
     let guard = NEXT.fetch_update(Ordering::AcqRel, Ordering::Acquire,
@@ -103,15 +109,15 @@ pub fn allocate() -> crate::scheduler::KernelStack {
     let phys = with_frame_allocator(|fa| {
         let mut first = None;
         assert!(!crate::arch::stacks::mapped(guard));
-        assert!(!crate::arch::stacks::mapped(virt + SIZE));
-        for offset in (0..SIZE).step_by(PAGE as usize) {
+        assert!(!crate::arch::stacks::mapped(virt + size));
+        for offset in (0..size).step_by(PAGE as usize) {
             let pa = fa.allocate_zeroed_frame().expect("stack frame");
             first.get_or_insert(pa);
             crate::arch::stacks::map(virt + offset, pa, fa);
         }
         first.unwrap()
     }).expect("stack allocator");
-    crate::scheduler::KernelStack { virt, phys, size: SIZE }
+    crate::scheduler::KernelStack { virt, phys, size }
     })
 }
 
@@ -137,12 +143,17 @@ pub extern "C" fn kernel_stack_fatal() -> ! {
     loop { crate::arch::halt(); }
 }
 pub fn release(virt: u64, phys: u64) -> u64 {
+    release_sized(virt,phys,SIZE)
+}
+#[cfg(feature="kfence")]
+pub fn release_sample_page(virt:u64,phys:u64)->u64 {release_sized(virt,phys,PAGE)}
+fn release_sized(virt:u64,phys:u64,size:u64)->u64 {
     assert!(!crate::scheduler::running() || crate::arch::stacks::interrupts_enabled(), "runtime stack reclamation requires IRQs enabled");
     with_mappings(|| {
-    assert!(virt >= BASE + 2 * PAGE && virt + SIZE < LIMIT);
+    assert!(virt >= BASE + 2 * PAGE && virt + size < LIMIT);
     let mut pages = [0; (SIZE / PAGE) as usize];
     let retired = with_frame_allocator(|_| {
-        for offset in (0..SIZE).step_by(PAGE as usize) {
+        for offset in (0..size).step_by(PAGE as usize) {
             pages[(offset / PAGE) as usize] = crate::arch::stacks::unmap(virt + offset);
         }
         assert_eq!(pages[0], phys);
@@ -150,10 +161,10 @@ pub fn release(virt: u64, phys: u64) -> u64 {
     }).expect("stack allocator");
     crate::arch::stacks::invalidate();
     with_frame_allocator(|fa| {
-        for pa in pages { fa.deallocate_frame(pa); }
+        for pa in pages.iter().take((size/PAGE) as usize) { fa.deallocate_frame(*pa); }
         for pa in retired { if pa != 0 { fa.deallocate_frame(pa); } }
     }).expect("stack allocator");
-    SIZE / PAGE + retired.iter().filter(|pa| **pa != 0).count() as u64
+    size / PAGE + retired.iter().filter(|pa| **pa != 0).count() as u64
     })
 }
 /// Abandon the bootstrap stack before ordinary kernel execution begins.

@@ -6,6 +6,9 @@
 
 pub mod frame_allocator;
 pub mod heap;
+mod slab;
+#[cfg(feature="kfence")]
+pub mod fence;
 pub mod stacks;
 mod stack_layout;
 mod user_layout;

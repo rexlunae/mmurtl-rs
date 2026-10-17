@@ -46,6 +46,16 @@ const HEAP_GROW_CHUNK: u64 = 512 * FRAME_SIZE;
 
 /// Map the initial heap; returns its [start, end)
 pub fn heap_init(fa: &mut FrameAllocator) -> (u64, u64) {
+    // Private user roots copy PML4 entries once. Establish every reserved
+    // heap root link now so later growth always updates shared lower tables.
+    for slot in 0..8 {
+        let va=VirtAddr::new(crate::security::kaslr::AMD_HEAP_BASE+(slot<<39));
+        unsafe {
+            let root=&mut *page_table::active_pml4();
+            assert!(root[va.p4_index()].is_unused());
+            root[va.p4_index()].set_addr(PhysAddr::new(fa.allocate_zeroed_frame().expect("heap root table")),Flags::PRESENT|Flags::WRITABLE|Flags::NO_EXECUTE);
+        }
+    }
     // 21 bits of 2-MiB placement within a bootloader-excluded 4-TiB range.
     let start = crate::security::kaslr::amd_heap(crate::random::early_u64());
     map_heap_pages(start, INITIAL_HEAP_SIZE, fa);
@@ -56,9 +66,11 @@ pub fn heap_init(fa: &mut FrameAllocator) -> (u64, u64) {
 /// added. Called under the frame-allocator lock.
 pub fn heap_extend(end: u64, needed: u64, fa: &mut FrameAllocator) -> Option<u64> {
     let grow = (needed + HEAP_GROW_CHUNK - 1) / HEAP_GROW_CHUNK * HEAP_GROW_CHUNK;
+    if end.checked_add(grow)?>heap_limit() {return None;}
     map_heap_pages(end, grow, fa);
     Some(grow)
 }
+pub fn heap_limit()->u64 {crate::security::kaslr::AMD_HEAP_BASE+(4<<40)}
 
 fn map_heap_pages(virt_start: u64, size: u64, fa: &mut FrameAllocator) {
     let num_pages = (size + FRAME_SIZE - 1) / FRAME_SIZE;

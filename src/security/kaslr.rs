@@ -3,8 +3,11 @@ pub const AMD_DYNAMIC_START: u64 = 0xffff_8000_0000_0000;
 pub const AMD_DYNAMIC_END: u64 = 0xffff_bfff_ffff_ffff;
 pub const AMD_HEAP_BASE: u64 = 0xffff_c000_0000_0000;
 pub const AMD_IST_BASE: u64 = 0xffff_c800_0000_0000;
+pub const ARM_HEAP_BASE:u64=0xffff_d000_0000_0000;
 pub fn amd_ist(word: u64) -> u64 { AMD_IST_BASE + ((word & ((1 << 21) - 1)) << 21) }
-pub fn amd_heap(word: u64) -> u64 { AMD_HEAP_BASE + ((word & ((1 << 21) - 1)) << 21) }
+// Reserve space for the entire initial backing even at the final slot.
+pub fn amd_heap(word: u64) -> u64 { AMD_HEAP_BASE + ((word % ((1 << 21) - 1)) << 21) }
+pub fn arm_heap(word:u64)->u64 {ARM_HEAP_BASE+((word%((1<<21)-7))<<21)}
 pub fn arm_layout(words: [u64; 3]) -> (u64, u64) {
     const HIGH: u64 = 0xffff_0000_0000_0000;
     let linear = HIGH | ((1 + (words[0] & 127)) << 39);

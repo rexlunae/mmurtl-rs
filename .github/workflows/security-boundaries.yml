@@ -37,6 +37,8 @@ jobs:
           /tmp/mmurtl-stack-layout-test
       - name: Verify frame scrubbing
         run: |
+          rustc --edition=2021 -O tools/tests/slab.rs -o /tmp/mmurtl-slab-test
+          /tmp/mmurtl-slab-test
           rustc --edition=2021 tools/tests/frame_allocator.rs -o /tmp/mmurtl-frame-test
           /tmp/mmurtl-frame-test
       - name: Verify CPU policy and heterogeneous capability intersection
@@ -82,3 +84,9 @@ jobs:
           rustc --edition=2021 tools/tests/arm_predictor.rs -o /tmp/mmurtl-arm-predictor-test
           /tmp/mmurtl-arm-predictor-test
           python3 tools/test-arm-predictor.py
+      - name: Build and audit optional sampled heap guards
+        run: |
+          make build arm64 KERNEL_FEATURES=kfence
+          python3 tools/test-kernel-cfi.py
+          python3 tools/test-kernel-return.py
+          python3 tools/test-stack-sizes.py

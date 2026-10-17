@@ -322,29 +322,41 @@ fn elf_loader_tests() -> (usize, usize) {
 /// leaked frames).
 fn churn_test() -> (usize, u64, i64) {
     use crate::memory::heap::{free_frames, grown_frames};
-    const WAVES: usize = if cfg!(feature = "test-stack-state") { 125 } else { 2 };
+    const WAVES: usize = if cfg!(feature = "test-stack-state") || cfg!(feature="test-heap-churn") { 125 } else { 2 };
     const PER_WAVE: usize = 8;
 
     wait_until(3000, || scheduler::unreaped_tasks() == 0);
-    let free_before = free_frames() as i64;
-    let heap_before = grown_frames() as i64;
-    let (_, reaped_before) = scheduler::reaper_stats();
+    let mut free_before = free_frames() as i64;
+    let mut heap_before = grown_frames() as i64;
+    let (_, mut reaped_before) = scheduler::reaper_stats();
+    let mut baseline=None;
 
     let mut ran = 0;
-    for _ in 0..WAVES {
+    for wave in 0..WAVES+usize::from(cfg!(feature="test-heap-churn")) {
         let mut tids = [const { AtomicU32::new(0) }; PER_WAVE];
         for t in tids.iter_mut() {
             *t.get_mut() = spawn("churn", crate::arch::user_programs::exit_only(), 0);
         }
         wait_until(5000, || tids.iter().all(exited));
-        ran += tids.iter().filter(|t| t.load(Ordering::Relaxed) != 0).count();
         // Extended runs must not outrun the bounded user-slot registry:
         // exit precedes reaping and ownership release.
         wait_until(3000, || scheduler::unreaped_tasks() == 0);
+        if cfg!(feature="test-heap-churn") && wave==0 {
+            baseline=Some(crate::memory::heap::stats());
+            free_before=free_frames() as i64;heap_before=grown_frames() as i64;
+            reaped_before=scheduler::reaper_stats().1;
+        } else {ran += tids.iter().filter(|t| t.load(Ordering::Relaxed) != 0).count();}
     }
     wait_until(3000, || scheduler::unreaped_tasks() == 0);
 
     let heap_grew = grown_frames() as i64 - heap_before;
+    if let Some(before)=baseline {
+        let after=crate::memory::heap::stats();
+        assert_eq!(after.1,before.1,"task churn grew slab backing after warmup");
+        assert!(after.0<=before.0&&after.2<=before.2,"task churn leaked heap objects");
+        assert_eq!(heap_grew,0,"task churn grew mapped heap backing");
+        crate::serial::write_line("[HEAP TEST] 1000 task lifetimes: live objects and cache/mapped backing stable after warmup");
+    }
     let leaked = free_before - (free_frames() as i64 + heap_grew);
     let (_, reaped_after) = scheduler::reaper_stats();
     (ran, reaped_after - reaped_before, leaked)
@@ -456,7 +468,7 @@ extern "C" fn user_check_task() -> ! {
     let (ran, frames, leaked) = churn_test();
     let mut what: heapless::String<64> = heapless::String::new();
     let _ = write!(what, "{} churn tasks reclaimed ({} frames)", ran, frames);
-    pass &= report(&what, ran == if cfg!(feature = "test-stack-state") { 1000 } else { 16 }
+    pass &= report(&what, ran == if cfg!(feature = "test-stack-state") || cfg!(feature="test-heap-churn") { 1000 } else { 16 }
         && frames > 0 && leaked <= 0);
     pass &= report("released frames contain no secrets",
         crate::memory::heap::with_frame_allocator(|fa| fa.released_frames_are_zero()).unwrap_or(false));

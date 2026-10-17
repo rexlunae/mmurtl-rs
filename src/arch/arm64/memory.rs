@@ -45,19 +45,25 @@ pub fn phys_to_virt(phys: u64) -> *mut u8 {
     (phys + physical_offset()) as *mut u8
 }
 
-/// Carve the initial heap from contiguous physical frames
+/// Separate randomized heap VA, backed by independent physical frames.
 pub fn heap_init(fa: &mut FrameAllocator) -> (u64, u64) {
-    let pa = fa
-        .allocate_zeroed_contiguous((HEAP_INITIAL / FRAME_SIZE) as usize)
-        .expect("no contiguous RAM for the kernel heap");
-    (pa + physical_offset(), pa + physical_offset() + HEAP_INITIAL)
+    let start=crate::security::kaslr::arm_heap(crate::random::early_u64());
+    map_heap(start,HEAP_INITIAL,fa);
+    (start,start+HEAP_INITIAL)
 }
 
-/// Grow the heap in place by claiming the frames right after it. Called
-/// under the frame-allocator lock; None if they're taken (heap exhausted).
+/// Grow in virtual space without requiring contiguous physical memory.
 pub fn heap_extend(end: u64, needed: u64, fa: &mut FrameAllocator) -> Option<u64> {
     let grow = (needed + HEAP_GROW_CHUNK - 1) / HEAP_GROW_CHUNK * HEAP_GROW_CHUNK;
-    fa.claim_range(virt_to_phys(end), (grow / FRAME_SIZE) as usize).then_some(grow)
+    if end.checked_add(grow)?>heap_limit() {return None;}
+    map_heap(end,grow,fa);Some(grow)
+}
+pub fn heap_limit()->u64 {0xffff_d400_0000_0000}
+fn map_heap(start:u64,size:u64,fa:&mut FrameAllocator) {
+    for va in (start..start+size).step_by(FRAME_SIZE as usize) {
+        let pa=fa.allocate_zeroed_frame().expect("heap backing frame");
+        super::mmu::map_heap_page(va,pa,fa);
+    }
 }
 
 /// IRQ-masked, non-nested user access windows (normally use uaccess wrappers).
@@ -81,6 +87,10 @@ pub fn choose_layout(load_addr: u64) {
 }
 pub fn virt_to_phys(va: u64) -> u64 {
     if va < HIGH_START { return va; }
+    if (0xffff_d000_0000_0000..heap_limit()).contains(&va)
+        ||(0xffff_e000_0000_0000..0xffff_e080_0000_0000).contains(&va) {
+        return super::mmu::dynamic_kernel_phys(va).expect("unmapped dynamic kernel address");
+    }
     let linear = physical_offset();
     if (linear..linear + (1 << 39)).contains(&va) { va - linear }
     else { va.checked_sub(kernel_offset()).expect("unknown kernel virtual address") }
