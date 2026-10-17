@@ -256,6 +256,40 @@ user_rogue_simd_start:
     .globl user_rogue_simd_end
 user_rogue_simd_end:
 
+    .globl user_rogue_debug_start
+user_rogue_debug_start:
+    pushfq
+    orq $0x100, (%rsp)
+    popfq
+    nop
+    ud2
+    .globl user_rogue_debug_end
+user_rogue_debug_end:
+
+    .globl user_rogue_debug_entry_start
+user_rogue_debug_entry_start:
+    movw %ss, %dx
+    movl $9, %eax // SYS_YIELD: exercises scheduler lock and context switch
+    pushfq
+    orq $0x100, (%rsp)
+    popfq
+    movw %dx, %ss
+    int $0x80
+    nop
+    ud2
+    .globl user_rogue_debug_entry_end
+user_rogue_debug_entry_end:
+
+    .globl user_rogue_align_start
+user_rogue_align_start:
+    pushfq
+    orq $0x40000, (%rsp)
+    popfq
+    movq -15(%rsp), %rax
+    ud2
+    .globl user_rogue_align_end
+user_rogue_align_end:
+
     .popsection
     "#,
     options(att_syntax)
@@ -278,6 +312,12 @@ extern "C" {
     static user_rogue_fp_end: u8;
     static user_rogue_simd_start: u8;
     static user_rogue_simd_end: u8;
+    static user_rogue_debug_start: u8;
+    static user_rogue_debug_end: u8;
+    static user_rogue_debug_entry_start: u8;
+    static user_rogue_debug_entry_end: u8;
+    static user_rogue_align_start: u8;
+    static user_rogue_align_end: u8;
     static user_exit_start: u8;
     static user_exit_end: u8;
 }
@@ -307,3 +347,7 @@ program!(exit_only, user_exit_start, user_exit_end);
 program!(rogue_fp, user_rogue_fp_start, user_rogue_fp_end);
 
 program!(rogue_simd, user_rogue_simd_start, user_rogue_simd_end);
+
+program!(rogue_debug, user_rogue_debug_start, user_rogue_debug_end);
+program!(rogue_debug_entry, user_rogue_debug_entry_start, user_rogue_debug_entry_end);
+program!(rogue_align, user_rogue_align_start, user_rogue_align_end);

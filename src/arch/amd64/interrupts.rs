@@ -146,12 +146,44 @@ extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame)
     panic!("DIVIDE ERROR\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn debug_handler(stack_frame: InterruptStackFrame) {
-    panic!("DEBUG\n{:#?}", stack_frame);
+static DEBUG_EVENTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static NMI_EVENTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+extern "x86-interrupt" fn debug_handler(mut stack_frame: InterruptStackFrame) {
+    // The saved CS describes where #DB was delivered, not who armed TF.
+    // A deferred user trap delivered ANYWHERE inside a kernel entry has
+    // CPL0 here. Keep that entire path independent of scheduler locks,
+    // including traps past the first instruction and during stack switches.
+    if !from_user(&stack_frame) {
+        let rip = stack_frame.instruction_pointer.as_u64();
+        if [super::syscall::entry_address(), timer_handler as *const () as u64,
+            yield_handler as *const () as u64].contains(&rip) { return; }
+        unsafe {
+            core::arch::asm!("mov dr6, {}", in(reg) 0xffff0ff0u64, options(nostack));
+            core::arch::asm!("mov dr7, {}", in(reg) 0u64, options(nostack));
+            stack_frame.as_mut().update(|frame| frame.cpu_flags &= !(1 << 8));
+        }
+        DEBUG_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    // Only a trap actually delivered at CPL3 may enter the scheduler.
+    unsafe { core::arch::asm!("mov dr6, {}", in(reg) 0xffff0ff0u64, options(nostack)); }
+    kill_user_task(&stack_frame, "#DB debug trap", None);
+}
+
+pub fn debug_self_test() {
+    // Deterministic alignment-check policy on the BSP; APs set it when
+    // loading their exception tables too.
+    enable_alignment_checks();
+    let before = DEBUG_EVENTS.load(core::sync::atomic::Ordering::Relaxed);
+    unsafe { core::arch::asm!("pushfq", "or qword ptr [rsp], 0x100", "popfq", "nop"); }
+    assert!(DEBUG_EVENTS.load(core::sync::atomic::Ordering::Relaxed) > before);
 }
 
 extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
-    crate::serial::write_line("[NMI] Non-maskable interrupt received");
+    // NMI can interrupt a serial writer or allocator while it holds a
+    // lock. Count it without printing, allocating, or entering the scheduler.
+    NMI_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
@@ -249,6 +281,7 @@ extern "x86-interrupt" fn page_fault_handler(
 }
 
 extern "x86-interrupt" fn x87_fpu_handler(stack_frame: InterruptStackFrame) {
+    if from_user(&stack_frame) { kill_user_task(&stack_frame, "#MF floating-point exception", None); }
     panic!("x87 FPU ERROR\n{:#?}", stack_frame);
 }
 
@@ -256,14 +289,56 @@ extern "x86-interrupt" fn alignment_check_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    if from_user(&stack_frame) { kill_user_task(&stack_frame, "#AC alignment check", None); }
     panic!("ALIGNMENT CHECK error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
 
+// A machine check can interrupt any lock holder. Emergency output must
+// not use the normal serial mutex, heap, scheduler, or formatting code.
+fn emergency_text(text: &str) {
+    for byte in text.bytes() {
+        unsafe {
+            let mut ready = false;
+            for _ in 0..10_000 {
+                if Port::<u8>::new(0x3fd).read() & 0x20 != 0 { ready = true; break; }
+            }
+            if !ready { return; }
+            Port::<u8>::new(0x3f8).write(byte);
+        }
+    }
+}
+fn emergency_hex(value: u64) {
+    let mut text = [0u8; 18]; text[..2].copy_from_slice(b"0x");
+    for i in 0..16 { text[2 + i] = b"0123456789abcdef"[((value >> (60 - i * 4)) & 15) as usize]; }
+    emergency_text(core::str::from_utf8(&text).unwrap());
+}
+unsafe fn emergency_msr(index: u32) -> u64 {
+    let (lo, hi): (u32, u32);
+    core::arch::asm!("rdmsr", in("ecx") index, out("eax") lo, out("edx") hi, options(nostack));
+    (hi as u64) << 32 | lo as u64
+}
 extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame) -> ! {
-    panic!("MACHINE CHECK (hardware error)\n{:#?}", stack_frame);
+    emergency_text("\n[MCE] fatal machine check at ");
+    emergency_hex(stack_frame.instruction_pointer.as_u64());
+    // These MSRs exist only when CPUID advertises MCA.
+    if unsafe { core::arch::x86_64::__cpuid(1) }.edx & (1 << 14) != 0 {
+        let cap = unsafe { emergency_msr(0x179) };
+        emergency_text(" MCG_STATUS="); emergency_hex(unsafe { emergency_msr(0x17a) });
+        for bank in 0..(cap as u32 & 0xff) {
+            let status = unsafe { emergency_msr(0x401 + bank * 4) };
+            if status & (1 << 63) == 0 { continue; }
+            emergency_text("\n[MCE] bank="); emergency_hex(bank as u64);
+            emergency_text(" status="); emergency_hex(status);
+            if status & (1 << 58) != 0 { emergency_text(" addr="); emergency_hex(unsafe { emergency_msr(0x402 + bank * 4) }); }
+            if status & (1 << 59) != 0 { emergency_text(" misc="); emergency_hex(unsafe { emergency_msr(0x403 + bank * 4) }); }
+        }
+    }
+    emergency_text("\n[MCE] CPU halted\n");
+    loop { unsafe { core::arch::asm!("cli", "hlt", options(nomem, nostack)); } }
 }
 
 extern "x86-interrupt" fn simd_fpu_handler(stack_frame: InterruptStackFrame) {
+    if from_user(&stack_frame) { kill_user_task(&stack_frame, "#XM SIMD exception", None); }
     panic!("SIMD FPU ERROR\n{:#?}", stack_frame);
 }
 
@@ -402,8 +477,11 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
 
     // CPU exceptions
     idt.divide_error.set_handler_fn(divide_error_handler);
-    idt.debug.set_handler_fn(debug_handler);
-    idt.non_maskable_interrupt.set_handler_fn(nmi_handler);
+    unsafe {
+        idt.debug.set_handler_fn(debug_handler).set_stack_index(super::gdt::DEBUG_IST_INDEX);
+        idt.non_maskable_interrupt.set_handler_fn(nmi_handler).set_stack_index(super::gdt::NMI_IST_INDEX);
+        idt.machine_check.set_handler_fn(machine_check_handler).set_stack_index(super::gdt::MACHINE_CHECK_IST_INDEX);
+    }
     idt.breakpoint.set_handler_fn(breakpoint_handler);
     idt.overflow.set_handler_fn(overflow_handler);
     idt.bound_range_exceeded.set_handler_fn(bound_range_handler);
@@ -416,7 +494,6 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt.page_fault.set_handler_fn(page_fault_handler);
     idt.x87_floating_point.set_handler_fn(x87_fpu_handler);
     idt.alignment_check.set_handler_fn(alignment_check_handler);
-    idt.machine_check.set_handler_fn(machine_check_handler);
     idt.simd_floating_point.set_handler_fn(simd_fpu_handler);
     idt.virtualization.set_handler_fn(virtualization_handler);
     idt.security_exception.set_handler_fn(security_exception_handler);
@@ -464,4 +541,13 @@ pub fn init() {
 /// Load the shared IDT on an application processor.
 pub fn init_ap() {
     IDT.load();
+    enable_alignment_checks();
+}
+
+fn enable_alignment_checks() {
+    unsafe {
+        let cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
+        core::arch::asm!("mov cr0, {}", in(reg) cr0 | (1 << 18), options(nostack));
+    }
 }

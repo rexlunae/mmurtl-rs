@@ -638,6 +638,17 @@ requires the entry point to be in an executable segment — all before
 mapping anything. Segments are mapped with exactly their permissions,
 zero-filled past their file data (`.bss`).
 
+On amd64, user debug, alignment, x87 and SIMD exceptions terminate the
+faulting task. Kernel single-step traps clear TF and debug status. Dedicated
+per-CPU supervisor RW/NX stacks with unmapped guards handle #DF, #NMI, #MC,
+and #DB. NMI handling takes no locks; fatal machine checks emit valid MCA
+bank diagnostics through bounded emergency serial writes and halt the CPU.
+The interrupt syscall gate remains in use; SYSCALL/SYSRET is disabled.
+Boot probes exercise user single-step and MOV-SS deferred debug delivery.
+The alignment probe uses mapped unaligned memory with AC set, followed by
+UD2 so QEMU TCG versions that omit alignment checking still terminate it.
+Actual #MF/#XM delivery remains unavailable while FP/SIMD is disabled.
+
 FP/SIMD instructions are deliberately disabled on every CPU until the
 scheduler implements eager per-task FP state save/restore. The policy is
 set explicitly on BIOS/UEFI amd64 and on arm64 entry/secondary paths,
@@ -806,7 +817,7 @@ MMURTL's original license is included in the [bproctor/MMURTL](https://github.co
 Security boot regression configurations (build images/kernels first):
 
 ```bash
-python3 tools/test-security.py --arch amd64 --cpus 4
+python3 tools/test-security.py --arch amd64 --cpus 4 --nmi
 python3 tools/test-security.py --arch amd64 --uefi --cpus 4  # needs OVMF
 python3 tools/test-security.py --arch arm64 --cpu max --el2 --cpus 4
 ```

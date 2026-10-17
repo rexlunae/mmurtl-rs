@@ -445,6 +445,14 @@ pub fn init() {
     crate::serial::write_str(" Hz per CPU\n");
 }
 
+/// Prove that a kernel #DB past an entry's first instruction can recover
+/// while the scheduler mutex is held, without trying to acquire it again.
+#[cfg(target_arch = "x86_64")]
+pub fn debug_lock_self_test() {
+    with_scheduler(|_| crate::arch::interrupts::debug_self_test());
+    crate::serial::write_line("[TEST] kernel #DB recovered, TF cleared (scheduler lock held)");
+}
+
 /// Register a secondary CPU with the scheduler and start its local timer
 /// tick. Called on that CPU, with interrupts disabled; its park loop
 /// becomes its idle task.
