@@ -231,25 +231,29 @@ pub fn boot_aps() {
     }
 
     let mut cpu_num = 1u64; // BSP is CPU 0
-    let bsp_topology = super::topology::probe();
-    let prioritize = crate::topology::isolating();
-    'startup: for preferred in [true, false] {
-    for (index, &apic_id) in madt.cpu_apic_ids.iter().enumerate() {
-        if apic_id == bsp_id {
-            continue;
-        }
-        let first = !prioritize || crate::topology::policy::preferred_candidate(apic_id as u64,
-            madt.cpu_apic_ids[..index].iter().map(|id| *id as u64), bsp_topology);
-        if first != preferred { continue; }
-        if cpu_num as usize >= crate::scheduler::MAX_CPUS { break 'startup; }
+    let mut deferred = alloc::vec::Vec::new();
+    let mut boot = |apic_id| {
+        if cpu_num as usize >= crate::scheduler::MAX_CPUS { return false; }
         if !boot_one_ap(apic_id, cpu_num) {
             POSSIBLE_LATE_AP.store(true, Ordering::Release);
             // The low-memory mailbox/stack fields are shared. Never reuse
             // them after a timeout while the old AP might still read them.
-            break 'startup;
+            return false;
         }
         cpu_num += 1;
+        true
+    };
+    let mut complete = true;
+    for &apic_id in &madt.cpu_apic_ids {
+        if apic_id == bsp_id { continue; }
+        if crate::topology::covered_candidate(apic_id as u64) {
+            deferred.push(apic_id);
+            continue;
+        }
+        if !boot(apic_id) { complete = false; break; }
     }
+    if complete {
+        for apic_id in deferred { if !boot(apic_id) { break; } }
     }
 
     crate::arch::microcode::seal();
