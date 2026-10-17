@@ -61,6 +61,22 @@ make arm64
 
 ## Running (requires QEMU)
 
+Build and launch the port matching your host architecture automatically:
+
+```bash
+./tools/run-qemu.sh
+./tools/run-qemu.sh --arch amd64   # override the detected architecture
+./tools/run-qemu.sh --arm64        # arm64 QEMU virt, even on an amd64 host
+./tools/run-qemu.sh -- -smp 4      # pass additional options to QEMU
+./tools/run-qemu.sh --help
+```
+
+`--arch` also accepts `x86_64` and `aarch64`. The launcher can run from any
+directory and requires `make`, the project's Rust toolchain, and the QEMU
+system emulator for the selected architecture. amd64 uses BIOS boot;
+arm64 uses the kernel ELF directly. Set `ARM64_SMP` and `ARM64_GIC` to
+customize the arm64 defaults (4 CPUs and GICv3).
+
 ### arm64
 
 ```bash
