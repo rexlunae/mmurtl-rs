@@ -28,6 +28,7 @@ pub use context::{kernel_context, on_switch_to_user, user_context, yield_now, Ta
 pub use memory::{
     free_address_space, heap_extend, heap_init, map_user_page, new_address_space, phys_to_virt,
     query_page, switch_address_space, user_access_begin, user_access_end,
+    relocate_private_data,
 };
 
 /// Architecture name for the boot log

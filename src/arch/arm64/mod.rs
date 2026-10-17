@@ -35,6 +35,7 @@ pub use memory::{heap_extend, heap_init, phys_to_virt, user_access_begin, user_a
 pub use mmu::{
     free_address_space, map_user_page, new_address_space, query_page, switch_address_space,
     sync_icache,
+    relocate_private_data,
 };
 
 /// Architecture name for the boot log

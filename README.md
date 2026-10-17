@@ -1356,10 +1356,14 @@ external dependencies, unsupported relocation formats/types/symbols,
 text relocations, overlapping pages, invalid alignment and out-of-image
 relocation targets. Only aligned R_X86_64_RELATIVE/R_AARCH64_RELATIVE
 writes to initially writable image data are supported. Relocations are
-applied through the physical backing before final user mappings become
-runnable. Whole-page PT_GNU_RELRO is mapped read-only immediately; no
+applied in one pass through physical backing in an exclusively owned offline
+root, independently of table order. Only after all relocations and startup
+data are ready can that root become runnable. Whole-page PT_GNU_RELRO is mapped read-only immediately; no
 writable+executable user mapping is created. Legacy ET_EXEC code keeps
 its linked address while its stack is randomized.
+The 64 MiB memory limit includes zero-filled segments and does not raise
+the CLI's existing 1 MiB file-read cap, which remains intentional until
+streaming reads and heap reclamation are implemented (#28).
 
 `make user user-arm64` builds the runtime with PIE and strong compiler
 stack protectors. ELF entry receives a private 32-byte startup block in

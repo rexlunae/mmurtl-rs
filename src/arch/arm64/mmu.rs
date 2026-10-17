@@ -502,6 +502,18 @@ pub fn map_user_page(root: u64, va: u64, pa: u64, writable: bool, executable: bo
     }
     Ok(())
 }
+/// Caller owns an offline, unpublished user root. This writes only NX data
+/// through its physical backing; final RELRO permissions remain intact.
+pub unsafe fn relocate_private_data(root:u64,va:u64,value:u64) -> Result<(), &'static str> {
+    if root==0 || va&7!=0 || va<crate::memory::user::USER_BASE || va>=crate::memory::user::USER_END {
+        return Err("invalid private relocation target");
+    }
+    let entry=walk(root,va,false).ok_or("missing private relocation table")?.read_volatile();
+    let required=VALID|TABLE|AP_EL0_BIT|UXN;
+    if entry&required!=required {return Err("relocation target is not NX user data");}
+    super::memory::phys_to_virt((entry&ADDR_MASK)+(va&4095)).cast::<u64>().write_volatile(value);
+    Ok(())
+}
 
 /// Whether `va` is mapped as a 4 KiB page in the *current* address space
 /// (this CPU's TTBR0): None if not, else (user-accessible, writable)
