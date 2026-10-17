@@ -40,6 +40,7 @@ pub const SYS_REGISTER_SERVICE: u64 = 8;
 pub const SYS_YIELD: u64 = 9;
 /// Millisecond uptime at the scheduler tick resolution, no capability needed.
 pub const SYS_CLOCK_MS: u64 = 10;
+pub const NR_SYSCALLS: usize = 11;
 
 /// Error return: bad pointer
 pub const EFAULT: u64 = u64::MAX;
@@ -66,7 +67,8 @@ fn rqb_decode(b: &[u8; RQB_USER_SIZE]) -> Rqb {
     let mut r = Rqb::new();
     r.service = u16::from_le_bytes([b[OFF_SERVICE], b[OFF_SERVICE + 1]]);
     r.status = u16::from_le_bytes([b[OFF_STATUS], b[OFF_STATUS + 1]]);
-    r.data_size = u16::from_le_bytes([b[OFF_DATA_SIZE], b[OFF_DATA_SIZE + 1]]).min(RQB_DATA_SIZE as u16);
+    let size = u16::from_le_bytes([b[OFF_DATA_SIZE], b[OFF_DATA_SIZE + 1]]).min(RQB_DATA_SIZE as u16);
+    r.data_size = crate::arch::nospec::array_index_nospec(size as usize, RQB_DATA_SIZE + 1) as u16;
     r.data.copy_from_slice(&b[OFF_DATA..OFF_DATA + RQB_DATA_SIZE]);
     // sender/receiver are kernel-assigned; user-supplied values are ignored
     r
@@ -94,7 +96,11 @@ fn read_user_rqb(ptr: u64) -> Option<Rqb> {
 
 /// Execute syscall `no` for the calling task. `privilege` names the
 /// caller's privilege level for the log prefix ("CPL3" / "EL0").
+#[inline(never)]
 pub fn dispatch(no: u64, args: [u64; 5], privilege: &str) -> u64 {
+    if no >= NR_SYSCALLS as u64 { return ENOSYS; }
+    let no = crate::arch::nospec::array_index_nospec(no as usize, NR_SYSCALLS) as u64;
+    crate::arch::nospec::barrier_nospec();
     let (a1, a2) = (args[0], args[1]);
     match no {
         SYS_EXIT => sys_exit(),
@@ -138,7 +144,8 @@ fn sys_log(ptr: u64, len: u64, privilege: &str) -> u64 {
         return EINVAL;
     }
     let mut buf = [0u8; MAX];
-    let text = &mut buf[..len as usize];
+    let safe_len = crate::arch::nospec::array_index_nospec(len as usize, MAX + 1);
+    let text = &mut buf[..safe_len];
     if !copy_from_user(text, ptr) {
         return EFAULT;
     }
@@ -204,11 +211,12 @@ fn user_name(ptr: u64, len: u64) -> Option<heapless::String<16>> {
     if len == 0 || len > 16 {
         return None;
     }
+    let len = crate::arch::nospec::array_index_nospec(len as usize, 17);
     let mut buf = [0u8; 16];
-    if !copy_from_user(&mut buf[..len as usize], ptr) {
+    if !copy_from_user(&mut buf[..len], ptr) {
         return None;
     }
-    let s = core::str::from_utf8(&buf[..len as usize]).ok()?;
+    let s = core::str::from_utf8(&buf[..len]).ok()?;
     let mut out = heapless::String::new();
     out.push_str(s).ok()?;
     Some(out)
