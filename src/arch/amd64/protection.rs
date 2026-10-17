@@ -38,9 +38,11 @@ pub fn finalize() {
     // Parked SMT siblings retain guarded NMI/MC gates. Shared entry CLAC
     // must also be legal on them, even though they never run user tasks.
     let initialized = INITIALIZED.load(Ordering::Acquire);
-    if (0..64).filter(|cpu| initialized & (1 << cpu) != 0)
-        .any(|cpu| CAPS[cpu].load(Ordering::Acquire) & SMAP == 0) {
-        common = crate::security::x86_access::common([common & !SMAP].into_iter());
+    let active = common;
+    common = crate::security::x86_access::shared_entries(common, (0..64)
+        .filter(|cpu| initialized & (1 << cpu) != 0).map(|cpu| CAPS[cpu].load(Ordering::Acquire)));
+    if active & SMAP != 0 && common & SMAP == 0 {
+        crate::serial::write_line("[CPU] SMAP/LASS unavailable: initialized parked CPU lacks SMAP");
     }
     COMMON.store(common, Ordering::Release);
     SMAP_ENTRY_ENABLED.store(u8::from(common & SMAP != 0), Ordering::Release);

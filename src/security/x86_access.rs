@@ -12,3 +12,10 @@ pub fn common(mut cpus: impl Iterator<Item = u64>) -> u64 {
     if result & SMAP == 0 { result &= !LASS; }
     result
 }
+
+/// Entry CLAC is shared with prepared offline CPUs; other CR4 features are
+/// needed only on the active scheduling set. LASS retains its SMAP dependency.
+pub fn shared_entries(active: u64, initialized: impl Iterator<Item=u64>) -> u64 {
+    let mask = if initialized.into_iter().any(|caps| caps & SMAP == 0) { active & !SMAP } else { active };
+    common([mask].into_iter())
+}

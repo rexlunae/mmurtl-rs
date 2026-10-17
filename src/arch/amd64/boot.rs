@@ -98,6 +98,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::write_str("[INIT] APIC...\n");
     if !super::apic::init() { super::interrupts::unmask_console(); }
     super::serial::enable_rx_irq();
+    crate::topology::bsp_ready();
 
     // Initialize the scheduler on the BSP (must precede AP boot: APs
     // register themselves and start their timers as they come up)

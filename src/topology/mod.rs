@@ -2,7 +2,7 @@
 pub mod policy;
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::security::{Policy, Mode};
-use policy::{Admission, Core, Reason, Source};
+use policy::{Admission, Reason, Source};
 static STATE: spin::Mutex<Admission<{crate::scheduler::MAX_CPUS}>> = spin::Mutex::new(Admission::new(true));
 static CONFIGURED: AtomicBool = AtomicBool::new(false);
 pub fn init(args: &str, policy: Policy) {
@@ -11,6 +11,12 @@ pub fn init(args: &str, policy: Policy) {
         crate::serial::write_line("[SMP] invalid nosmt option; isolating siblings"); true
     });
     let mut state = STATE.lock(); *state = Admission::new(disable);
+}
+/// Probe the BSP after its local interrupt controller is enabled: older AMD
+/// extended APIC IDs are reserved while IA32_APIC_BASE.APICEn is clear.
+pub fn bsp_ready() {
+    let mut state = STATE.lock();
+    assert_eq!(state.records[0].reason, Reason::Empty, "BSP topology initialized twice");
     state.bsp(crate::arch::topology::probe());
 }
 /// Called inside the security admission seal. On x86 the prepared CPU has
@@ -47,7 +53,7 @@ pub fn report() {
         crate::serial::write_str(&line);
     }
     let mut line: heapless::String<180> = heapless::String::new();
-    let _ = write!(line, "[SMP] topology: {} known cores, {} logical CPUs, up to {} discovered threads/core, {} unknown\n", known_cores, logical, max_threads, unknown);
+    let _ = write!(line, "[SMP] topology: {} known core groups, {} logical CPUs, up to {} discovered threads/core, {} unknown\n", known_cores, logical, max_threads, unknown);
     if state.disable_smt { let _ = write!(line, "[SMP] nosmt: {} sibling threads left offline; {} unknown CPUs parked\n", siblings, unknown_offline); }
     else { let _ = line.push_str("[SMP] SMT allowed by policy: simultaneous cross-thread isolation disabled\n"); }
     crate::serial::write_str(&line);

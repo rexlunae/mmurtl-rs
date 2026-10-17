@@ -22,6 +22,8 @@ def main():
     parser.add_argument('--arch', choices=['amd64', 'arm64'], required=True)
     parser.add_argument('--cpus', type=int, default=4)
     parser.add_argument('--cpu')
+    parser.add_argument('--threads',type=int,default=1,help='x86 hardware threads per physical core')
+    parser.add_argument('--sockets',type=int,default=1,help='x86 CPU packages')
     parser.add_argument('--bootargs', help='mitigation policy / kernel boot arguments')
     parser.add_argument('--uefi', action='store_true')
     parser.add_argument('--el2', action='store_true')
@@ -36,6 +38,9 @@ def main():
     parser.add_argument('--rng', action='store_true', help='attach a host-backed virtio entropy device')
     parser.add_argument('--require', action='append', default=[])
     args = parser.parse_args()
+    if args.threads < 1 or args.sockets < 1 or args.cpus % (args.threads*args.sockets):
+        parser.error('CPU count must be divisible by positive sockets * threads')
+    if args.arch != 'amd64' and (args.threads != 1 or args.sockets != 1): parser.error('explicit SMT/socket layout requires amd64')
     if args.raspi3_dtb or args.load_address is not None:
         if args.arch != 'arm64': parser.error('arm64 platform/loading options require --arch arm64')
         args.raw_image = True
@@ -78,7 +83,8 @@ def main():
             net_device = 'virtio-net-pci,disable-modern=on' if args.virtio_pci else 'virtio-net-pci' if args.arch == 'amd64' else 'virtio-net-device'
             command += ['-netdev', 'user,id=net0', '-device', net_device + ',netdev=net0']
         if args.rng: command += ['-device', 'virtio-rng-pci,disable-modern=on' if args.virtio_pci else 'virtio-rng-pci' if args.arch == 'amd64' else 'virtio-rng-device']
-        command += ['-m', '1024M' if args.raspi3_dtb else '256M', '-smp', str(args.cpus)]
+        smp = str(args.cpus) if args.arch != 'amd64' else f'{args.cpus},sockets={args.sockets},cores={args.cpus//(args.threads*args.sockets)},threads={args.threads}'
+        command += ['-m', '1024M' if args.raspi3_dtb else '256M', '-smp', smp]
         if args.load_address is not None:
             dtb_path = Path(temporary) / 'virt.dtb'
             dump = command.copy()

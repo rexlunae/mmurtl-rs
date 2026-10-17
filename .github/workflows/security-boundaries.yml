@@ -56,6 +56,10 @@ jobs:
         run: |
           rustc --edition=2021 tools/tests/x86_access.rs -o /tmp/mmurtl-x86-access-test
           /tmp/mmurtl-x86-access-test
+      - name: Verify topology and SMT admission
+        run: |
+          rustc --edition=2021 tools/tests/topology.rs -o /tmp/mmurtl-topology-test
+          /tmp/mmurtl-topology-test
       - name: Verify ARM predictor policy and vector layouts
         run: |
           rustc --edition=2021 tools/tests/arm_predictor.rs -o /tmp/mmurtl-arm-predictor-test

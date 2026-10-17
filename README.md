@@ -731,8 +731,15 @@ in the SPEC table (for example `spectre_v2=on ssb=off`). Malformed recognized
 settings fall back to auto. Baseline pointer validation, bounds masks,
 access protection, and timer restrictions remain enforced with off.
 `ssb=per-task` is also supported.
-`auto,nosmt` records the request; SMT topology enforcement is still pending
-in #42 and the boot log explicitly says so.
+The default admits one hardware thread per core. x86 uses CPUID topology
+and ARM uses MPIDR affinity/MT; unknown topology parks secondary CPUs
+conservatively. The boot log lists discovered topology and parked siblings.
+`nosmt=off` allows all threads, while `nosmt`, `nosmt=on`, and
+`mitigations=auto,nosmt` enforce isolation. The latter cannot be cancelled by
+`nosmt=off`. `mitigations=off` allows SMT unless explicitly disabled.
+Detection depends on the topology exposed by firmware or the hypervisor.
+Core scheduling is not implemented: allowing siblings disables simultaneous
+cross-thread isolation, even when other speculation mitigations are enabled.
 
 arm64 reads `/chosen/bootargs` (QEMU `-append`); amd64 QEMU reads the bounded
 read-only `opt/mmurtl/bootargs` fw_cfg file. Both use `MMURTL_BOOTARGS` at
