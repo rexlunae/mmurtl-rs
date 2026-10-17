@@ -178,7 +178,6 @@ pub fn debug_self_test() {
     let before = DEBUG_EVENTS.load(core::sync::atomic::Ordering::Relaxed);
     unsafe { core::arch::asm!("pushfq", "or qword ptr [rsp], 0x100", "popfq", "nop"); }
     assert!(DEBUG_EVENTS.load(core::sync::atomic::Ordering::Relaxed) > before);
-    crate::serial::write_line("[TEST] kernel #DB recovered, TF cleared (scheduler lock held)");
 }
 
 extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {

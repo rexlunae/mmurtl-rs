@@ -269,7 +269,7 @@ user_rogue_debug_end:
     .globl user_rogue_debug_entry_start
 user_rogue_debug_entry_start:
     movw %ss, %dx
-    movl $5, %eax
+    movl $9, %eax // SYS_YIELD: exercises scheduler lock and context switch
     pushfq
     orq $0x100, (%rsp)
     popfq

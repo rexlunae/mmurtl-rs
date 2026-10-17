@@ -450,6 +450,7 @@ pub fn init() {
 #[cfg(target_arch = "x86_64")]
 pub fn debug_lock_self_test() {
     with_scheduler(|_| crate::arch::interrupts::debug_self_test());
+    crate::serial::write_line("[TEST] kernel #DB recovered, TF cleared (scheduler lock held)");
 }
 
 /// Register a secondary CPU with the scheduler and start its local timer
