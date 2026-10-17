@@ -45,10 +45,20 @@ extern "C" {
     static user_copy_ex_table: [i64; 4];
 }
 pub unsafe fn copy_from_user(dst: *mut u8, src: u64, len: usize) -> usize {
-    user_copy_from(dst, src, len)
+    super::without_interrupts(|| {
+        super::user_access_begin();
+        let left = user_copy_from(dst, src, len);
+        super::user_access_end();
+        left
+    })
 }
 pub unsafe fn copy_to_user(dst: u64, src: *const u8, len: usize) -> usize {
-    user_copy_to(dst, src, len)
+    super::without_interrupts(|| {
+        super::user_access_begin();
+        let left = user_copy_to(dst, src, len);
+        super::user_access_end();
+        left
+    })
 }
 pub fn fixup(pc: u64) -> Option<u64> {
     unsafe {

@@ -100,3 +100,5 @@ pub fn report() {
         crate::serial::write_line("[SPEC] SMT isolation requested; topology enforcement pending (#42)");
     }
 }
+
+pub mod arm_pan;

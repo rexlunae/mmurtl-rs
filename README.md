@@ -1104,8 +1104,7 @@ A generation allocator reserves tags still loaded on other CPUs. Rollover
 broadcasts and completes TLBI before reusing retired tags; freeing/unmapping
 an image invalidates its ASID before its frames are recycled. Normal context
 switches change TTBR0/ASID without flushing the TLB. Kernel mappings are still
-present in TTBR1 at EL0 with supervisor-only permissions; PAN, KPTI/E0PD and
-independent virtual KASLR are separate follow-ups.
+present in TTBR1 at EL0 with supervisor-only permissions; KPTI/E0PD and independent virtual KASLR are separate follow-ups.
 
 Boot audits check TTBR1 permissions, the empty kernel TTBR0 and the private
 bootstrap map. A real translation test switches through 600 private images
@@ -1117,3 +1116,22 @@ Pi 3 spin tables. Disk/ELF shell tests and legacy PCI virtio DMA tests pass.
 Use `tools/test-security.py --gic 2`, `--load-address 0x41000000`,
 `--raspi3-dtb /path/to/bcm2710-rpi-3-b.dtb`, or `--virtio-pci --net --rng`
 for those paths. Raw/alternate-address/Pi tests require `make arm64-image`.
+
+### arm64 privileged user access
+
+Hardware PAN is enabled when all admitted CPUs support it, with SPAN cleared
+on each CPU and EPAN enabled where available. Otherwise software PAN keeps
+TTBR0 on the reserved empty ASID-0 root during kernel execution, including
+Cortex-A53/A72 and Raspberry Pi 3. Exception entry closes access before Rust;
+EL1 returns stay protected, while EL0 returns restore the saved task root.
+Page validation walks the logical task root even while TTBR0 is empty.
+
+User copies use fault-tolerant LDTRB/STTRB loops with UAO cleared. Explicit
+access windows mask interrupts and close access before restoring interrupt
+state. These windows must not nest or yield. Fault fixups leave access closed.
+PAN remains enabled with `mitigations=off`, as a baseline memory boundary.
+Boot probes check denied ordinary reads/writes, permitted guarded copies,
+rejected kernel pointers, inherited UAO, exception return and execute-only
+pages (EPAN or software PAN). Host tests check feature decoding and saved
+PSTATE preservation. Hardware PAN does not remove TTBR1 from EL0; KPTI is
+tracked separately.
