@@ -207,6 +207,7 @@ fn free_frame(pa: u64) {
 /// isn't loaded already. Kernel mappings are identical in every space, so
 /// this is safe from kernel code at any point.
 pub fn switch_address_space(cpu: usize, root: u64) {
+    super::protection::apply_current(cpu);
     use core::sync::atomic::Ordering;
     let target = if root == 0 { kernel_root() } else { root };
     if ACTIVE_ROOT[cpu].load(Ordering::Relaxed) == target {
@@ -233,22 +234,17 @@ pub fn query_page(va: u64) -> Option<(bool, bool)> {
 /// If the CPU enforces SMAP (CR4.SMAP), deliberate kernel accesses to user
 /// pages must be bracketed by STAC/CLAC. Without SMAP these instructions
 /// would #UD, so they are only issued when the feature is on.
-fn smap_enabled() -> bool {
-    use x86_64::registers::control::{Cr4, Cr4Flags};
-    Cr4::read().contains(Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION)
-}
-
 /// Open a window for the kernel to touch user memory
 pub fn user_access_begin() {
-    if smap_enabled() {
-        unsafe { core::arch::asm!("stac", options(nomem, nostack)) };
+    if super::protection::smap_enabled() {
+        unsafe { core::arch::asm!("stac", options(nostack)) };
     }
 }
 
 /// Close the user-memory window
 pub fn user_access_end() {
-    if smap_enabled() {
-        unsafe { core::arch::asm!("clac", options(nomem, nostack)) };
+    if super::protection::smap_enabled() {
+        unsafe { core::arch::asm!("clac", options(nostack)) };
     }
 }
 
