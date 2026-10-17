@@ -82,6 +82,20 @@ pub fn irq_eoi(irq: u8) {
     }
 }
 
+/// Legacy console IRQs when no Local/I/O APIC is available.
+pub fn unmask_console() {
+    unsafe {
+        let mut mask = Port::<u8>::new(PIC1_DATA);
+        let bits = mask.read();
+        mask.write(bits & !0x12); // IRQ1 keyboard and IRQ4 COM1
+    }
+}
+
+extern "x86-interrupt" fn com1_handler(_frame: InterruptStackFrame) {
+    crate::arch::serial::handle_rx_irq();
+    irq_eoi(4);
+}
+
 /// Hardware interrupt numbers
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -425,6 +439,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
     }
     idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_handler);
+    idt[InterruptIndex::Com1.as_usize()].set_handler_fn(com1_handler);
 
     // LAPIC vectors
     idt[crate::arch::apic::ERROR_VECTOR as usize].set_handler_fn(apic_error_handler);

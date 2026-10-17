@@ -23,6 +23,7 @@ mod keyboard;
 mod fs;
 mod syscall;
 mod userspace;
+mod shell;
 
 use core::panic::PanicInfo;
 
@@ -53,9 +54,9 @@ pub fn kernel_run() -> ! {
     serial::write_str("[TEST] Network ARP test...\n");
     virtio::net::arp_demo();
 
-    // Mount the exFAT filesystem and exercise read + create paths
-    serial::write_str("[TEST] exFAT filesystem...\n");
-    fs::exfat::demo();
+    // Discover a FAT volume or mount and exercise the exFAT filesystem
+    serial::write_str("[INIT] Filesystem discovery...\n");
+    fs::init();
 
     // Initialize IPC (blocking RQB message passing)
     serial::write_str("[INIT] IPC subsystem...\n");
@@ -113,8 +114,8 @@ pub fn kernel_run() -> ! {
     syscall::init();
     serial::write_str("[USER] Loading user-mode programs...\n");
     userspace::demo();
-    // Keyboard echo task — consumes the keyboard driver's char queue
-    scheduler::create_task(kbd_echo_task, scheduler::PRIORITY_DEFAULT, "kbd_echo");
+    // The CLI owns console input after the boot checks finish.
+    shell::start();
 
     // Print before sti: once the BSP joins the rotation, this boot context
     // is the BSP's idle task and only runs when the BSP has nothing to do
@@ -140,6 +141,9 @@ extern "C" fn worker_task() -> ! {
     let tid = scheduler::current_task_id();
     let mut count = 0u64;
     loop {
+        if shell::active() {
+            scheduler::exit_current();
+        }
         // Build the line first, emit with a single write_str so lines from
         // workers on different CPUs don't interleave mid-line
         let cpu = scheduler::current_cpu();
@@ -154,27 +158,6 @@ extern "C" fn worker_task() -> ! {
             core::hint::spin_loop();
         }
         scheduler::sleep_ms(1000);
-    }
-}
-
-/// Keyboard echo task — prints characters typed on the PS/2 keyboard,
-/// demonstrating IRQ → driver queue → task consumption across CPUs.
-extern "C" fn kbd_echo_task() -> ! {
-    use core::fmt::Write;
-
-    loop {
-        while let Some(c) = keyboard::pop_char() {
-            let cpu = scheduler::current_cpu();
-            let mut line: heapless::String<48> = heapless::String::new();
-            if c.is_ascii_graphic() || c == b' ' {
-                let _ = write!(line, "[KBD on CPU{}] '{}'\n", cpu, c as char);
-            } else {
-                let _ = write!(line, "[KBD on CPU{}] 0x{:02x}\n", cpu, c);
-            }
-            serial::write_str(&line);
-        }
-        // Nothing pending — block briefly instead of spinning
-        scheduler::sleep_ms(20);
     }
 }
 

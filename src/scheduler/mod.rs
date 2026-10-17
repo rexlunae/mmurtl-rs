@@ -571,6 +571,21 @@ pub fn create_user_task(
     tid
 }
 
+/// Copy task information for PS without printing or allocating under the
+/// scheduler lock.
+pub fn task_snapshot(out: &mut [(u32, &'static str, TaskState, bool)]) -> (usize, bool) {
+    with_scheduler(|sched| {
+        let mut count = 0;
+        let mut truncated = false;
+        for t in sched.tasks.iter().filter(|t| t.state != TaskState::Exited) {
+            if count == out.len() { truncated = true; break; }
+            out[count] = (t.id, t.name, t.state, t.user);
+            count += 1;
+        }
+        (count, truncated)
+    })
+}
+
 /// State of a task by ID (None if no such task)
 pub fn task_state(tid: u32) -> Option<TaskState> {
     with_scheduler(|s| s.tasks.iter().find(|t| t.id == tid).map(|t| t.state))

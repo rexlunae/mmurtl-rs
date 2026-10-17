@@ -682,6 +682,21 @@ pub fn list_dir(path: &str) {
     }
 }
 
+/// File/directory type and length, without reading the file contents.
+pub fn metadata(path: &str) -> Option<(bool, u64)> {
+    let guard = VOLUME.lock();
+    let vol = guard.as_ref()?;
+    let (_, file) = lookup(vol, path)?;
+    Some((file.is_dir(), file.data_length))
+}
+pub fn directory_id(path: &str) -> Option<u64> {
+    let guard = VOLUME.lock();
+    let vol = guard.as_ref()?;
+    if components(path).is_empty() { return Some(vol.root_cluster as u64); }
+    let (_, file) = lookup(vol, path)?;
+    file.is_dir().then_some(file.first_cluster as u64)
+}
+
 /// Read a whole file by path
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
     let guard = VOLUME.lock();

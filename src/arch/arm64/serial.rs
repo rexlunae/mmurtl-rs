@@ -1,7 +1,7 @@
 //! arm64 console UART: ARM PL011 (address from the device tree; QEMU
 //! `virt` puts it at 0x0900_0000). Transmit is polled; receive is
 //! interrupt-driven and feeds the console input queue (`crate::keyboard`),
-//! so the same echo task works on both ports.
+//! so the CLI can consume input on both ports.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,6 +23,9 @@ const CR_TXE: u32 = 1 << 8;
 const CR_RXE: u32 = 1 << 9;
 
 static BASE: AtomicU64 = AtomicU64::new(0x0900_0000);
+// Serialize UART reads and queue production between the IRQ and the CLI's
+// poll fallback (which can run on another CPU). IRQs never wait on a task.
+static RX_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
 fn rd(off: u64) -> u32 {
     unsafe { core::ptr::read_volatile((BASE.load(Ordering::Relaxed) + off) as *const u32) }
@@ -68,12 +71,27 @@ pub fn enable_rx_irq() {
 
 /// UART interrupt: drain the RX FIFO into the console input queue
 pub fn handle_rx_irq() {
+    let Some(_guard) = RX_LOCK.try_lock() else { return; };
     while rd(FR) & FR_RXFE == 0 {
-        let c = (rd(DR) & 0xFF) as u8;
-        crate::keyboard::push_char(if c == b'\r' { b'\n' } else { c });
+        let data = rd(DR);
+        if data & 0xf00 != 0 || rd(0x04) & 0xf != 0 {
+            // Drop older FIFO contents, then require a fresh boundary.
+            while rd(FR) & FR_RXFE == 0 { let _ = rd(DR); }
+            wr(0x04, 0); // clear receive errors
+            crate::keyboard::input_lost();
+            wr(ICR, 0x7ff);
+            return;
+        }
+        let c = (data & 0xff) as u8;
+        // Preserve CR/LF so the CLI can treat CRLF as a single Enter.
+        crate::keyboard::push_char(c);
     }
     wr(ICR, INT_RX | INT_RT);
 }
+
+/// Also drain pending bytes when the CLI runs, including receive data
+/// that arrives while an interrupt-clear operation is in flight.
+pub fn poll_input() { crate::arch::without_interrupts(handle_rx_irq); }
 
 /// Human-readable name for the boot log
 pub const NAME: &str = "PL011 UART";

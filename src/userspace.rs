@@ -99,9 +99,17 @@ fn spawn(name: &'static str, code: &'static [u8], arg: u64) -> u32 {
     spawn_at(name, code, arg).0
 }
 
-/// Start the kernel-side service and checker, then the user programs
+// The CLI waits until the checks (including frame reclamation) finish.
+static CHECKS_FINISHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn checks_finished() -> bool {
+    CHECKS_FINISHED.load(Ordering::Acquire)
+}
+
+/// Start the kernel-side service and checker, then the user programs.
 pub fn demo() {
     if !crate::memory::user::init() {
+        CHECKS_FINISHED.store(true, Ordering::Release);
         return;
     }
     // A kernel address for the rogue programs to aim at
@@ -124,10 +132,10 @@ pub fn demo() {
     spawn_elf_programs();
 }
 
-/// Load every `*.ELF` in /BIN on the exFAT disk and run it as a user task
+/// Load every `*.ELF` in /BIN on the mounted disk and run it as a user task
 fn spawn_elf_programs() {
     use alloc::string::String;
-    let entries = match crate::fs::exfat::read_dir("BIN") {
+    let entries = match crate::fs::read_dir("BIN") {
         Some(e) => e,
         None => {
             crate::serial::write_line("[USER] No /BIN directory on disk — no ELF programs to run");
@@ -142,7 +150,7 @@ fn spawn_elf_programs() {
         let mut path = String::from("BIN/");
         path.push_str(&name);
         let mut line: heapless::String<128> = heapless::String::new();
-        let tid = match crate::fs::exfat::read_file(&path)
+        let tid = match crate::fs::read_file(&path)
             .ok_or("read failed")
             .and_then(|img| crate::memory::user::load_elf(&img))
         {
@@ -378,5 +386,6 @@ extern "C" fn user_check_task() -> ! {
     } else {
         "[USER] ✗ Userspace checks FAILED\n"
     });
+    CHECKS_FINISHED.store(true, Ordering::Release);
     scheduler::exit_current();
 }
