@@ -256,6 +256,60 @@ user_rogue_simd_start:
     .globl user_rogue_simd_end
 user_rogue_simd_end:
 
+
+    .globl user_time_start
+user_time_start:
+    movl $8, %r12d
+1:
+    rdtsc
+    movl $6, %eax
+    movl $20, %edi
+    int $0x80
+    decl %r12d
+    jnz 1b
+    xorl %eax, %eax
+    int $0x80
+    ud2
+    .globl user_time_end
+user_time_end:
+    .globl user_pmu_start
+user_pmu_start:
+    xorl %ecx, %ecx
+    rdpmc
+    xorl %eax, %eax
+    int $0x80
+    ud2
+    .globl user_pmu_end
+user_pmu_end:
+    .globl user_coarse_start
+user_coarse_start:
+    movl $10, %eax
+    int $0x80
+    movq %rax, %r12
+    movl $6, %eax
+    movl $30, %edi
+    int $0x80
+    movl $10, %eax
+    int $0x80
+    cmpq %r12, %rax
+    jbe 2f
+    xorl %eax, %eax
+    int $0x80
+2:  ud2
+    .globl user_coarse_end
+user_coarse_end:
+
+    .globl user_time_denied_start
+user_time_denied_start:
+    movl $6, %eax
+    movl $30, %edi
+    int $0x80
+    rdtsc
+    xorl %eax, %eax
+    int $0x80
+    ud2
+    .globl user_time_denied_end
+user_time_denied_end:
     .globl user_rogue_debug_start
 user_rogue_debug_start:
     pushfq
@@ -296,6 +350,15 @@ user_rogue_align_end:
 );
 
 extern "C" {
+    static user_time_denied_start: u8;
+    static user_time_denied_end: u8;
+    static user_time_start: u8;
+    static user_time_end: u8;
+    static user_pmu_start: u8;
+    static user_pmu_end: u8;
+    static user_coarse_start: u8;
+    static user_coarse_end: u8;
+
     static user_hello_start: u8;
     static user_hello_end: u8;
     static user_echo_start: u8;
@@ -348,6 +411,13 @@ program!(rogue_fp, user_rogue_fp_start, user_rogue_fp_end);
 
 program!(rogue_simd, user_rogue_simd_start, user_rogue_simd_end);
 
+program!(time, user_time_start, user_time_end);
+
+program!(pmu, user_pmu_start, user_pmu_end);
+
+program!(coarse, user_coarse_start, user_coarse_end);
+
+program!(time_denied, user_time_denied_start, user_time_denied_end);
 program!(rogue_debug, user_rogue_debug_start, user_rogue_debug_end);
 program!(rogue_debug_entry, user_rogue_debug_entry_start, user_rogue_debug_entry_end);
 program!(rogue_align, user_rogue_align_start, user_rogue_align_end);

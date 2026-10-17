@@ -38,6 +38,8 @@ pub const SYS_LOOKUP_SERVICE: u64 = 7;
 pub const SYS_REGISTER_SERVICE: u64 = 8;
 /// yield()
 pub const SYS_YIELD: u64 = 9;
+/// Millisecond uptime at the scheduler tick resolution, no capability needed.
+pub const SYS_CLOCK_MS: u64 = 10;
 
 /// Error return: bad pointer
 pub const EFAULT: u64 = u64::MAX;
@@ -100,6 +102,7 @@ pub fn dispatch(no: u64, args: [u64; 5], privilege: &str) -> u64 {
         SYS_SEND_RQB => sys_send_rqb(a1, a2),
         SYS_RECEIVE_RQB => sys_receive_rqb(a1),
         SYS_REPLY_RQB => sys_reply_rqb(a1, a2),
+        SYS_CLOCK_MS => scheduler::jiffies() * 1000 / scheduler::SCHEDULER_FREQUENCY_HZ as u64,
         SYS_GET_TID => scheduler::current_task_id() as u64,
         SYS_SLEEP_MS => {
             scheduler::sleep_ms(a1.min(3_600_000));
@@ -233,7 +236,7 @@ pub fn init() {
     let mut line: heapless::String<96> = heapless::String::new();
     let _ = write!(
         line,
-        "[SYSCALL] {}: 10 syscalls, user pointers validated\n",
+        "[SYSCALL] {}: 11 syscalls, user pointers validated\n",
         crate::arch::SYSCALL_MECHANISM
     );
     crate::serial::write_str(&line);
