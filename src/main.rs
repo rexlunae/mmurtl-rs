@@ -25,6 +25,7 @@ mod syscall;
 mod userspace;
 mod shell;
 mod security;
+mod random;
 
 use core::panic::PanicInfo;
 
@@ -49,6 +50,7 @@ pub fn print_banner() {
 /// up the console, memory, interrupts, the scheduler, all CPUs, and the
 /// devices it found; this runs the self-tests and starts the tasks.
 pub fn kernel_run() -> ! {
+    random::report();
     // Driver proof-of-life: block device write/read/verify + ARP round trip
     serial::write_str("[TEST] Storage self-test...\n");
     virtio::blk::self_test();

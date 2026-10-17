@@ -1,0 +1,9 @@
+[package]
+name = "mmurtl-random-tests"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[dependencies]
+spin = "0.9"
+chacha20 = { version = "0.10.2", default-features = false, features = ["cipher", "zeroize"] }
+blake2 = { version = "0.10.6", default-features = false }

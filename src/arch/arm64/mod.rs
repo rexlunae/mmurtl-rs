@@ -157,3 +157,5 @@ pub mod cpu_features;
 pub mod nospec;
 
 pub mod store_bypass;
+
+pub mod entropy;

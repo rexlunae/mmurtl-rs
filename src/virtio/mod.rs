@@ -10,6 +10,7 @@
 pub mod blk;
 pub mod net;
 pub mod pci;
+pub mod rng;
 
 use alloc::boxed::Box;
 use core::sync::atomic::{fence, Ordering};
@@ -57,6 +58,7 @@ pub fn attach(device_id: u32, transport: Box<dyn Transport>) {
     match device_id {
         1 => net::init(transport),
         2 => blk::init(transport),
+        4 => rng::init(transport),
         other => {
             crate::serial::write_str("[VIRTIO] Unhandled virtio device type ");
             crate::serial::write_dec(other as u64);
@@ -236,6 +238,11 @@ impl Virtqueue {
     /// Reap one completion from the used ring, returning the chain head
     /// index and the number of bytes the device wrote.
     pub fn pop_used(&mut self, chain_len: u16) -> Option<(u16, u32)> {
+        self.pop_used_checked(chain_len, None)
+    }
+
+    /// Validate the completion head before touching descriptor memory.
+    pub fn pop_used_checked(&mut self, chain_len: u16, expected: Option<u16>) -> Option<(u16, u32)> {
         unsafe {
             if self.last_used == self.used_idx.read_volatile() {
                 return None;
@@ -245,11 +252,14 @@ impl Virtqueue {
             let [id, len] = self.used_ring.add(slot).read_volatile();
             self.last_used = self.last_used.wrapping_add(1);
 
+            if id >= self.size as u32 || chain_len == 0 || chain_len > self.size
+                || expected.is_some_and(|head| id != head as u32) { return None; }
             // Return the chain to the free list
             let head = id as u16;
             let mut tail = head;
             for _ in 1..chain_len {
                 tail = (*self.desc.add(tail as usize)).next;
+                if tail >= self.size { return None; }
             }
             (*self.desc.add(tail as usize)).next = self.free_head;
             self.free_head = head;

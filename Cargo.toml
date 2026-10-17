@@ -8,6 +8,8 @@ description = "MMURTL/RS - Message-passing multitasking real-time kernel in Rust
 spin = "0.9"
 volatile = "0.4"
 heapless = "0.8"
+chacha20 = { version = "0.10.2", default-features = false, features = ["cipher", "zeroize"] }
+blake2 = { version = "0.10.6", default-features = false }
 
 # amd64 port only
 [target.'cfg(target_arch = "x86_64")'.dependencies]

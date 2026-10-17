@@ -69,3 +69,33 @@ pub fn enumerate(cpu: usize) {
 pub fn applicable(family: V) -> bool {
     matches!(family, V::SpectreV1 | V::SpectreV2 | V::Meltdown | V::Ssb | V::Bhb)
 }
+
+/// Bounded SMCCC v1.1 TRNG_RND64 discovery and requests (DEN0098).
+pub fn trng_seed() -> Option<[u8; 48]> {
+    if smccc(0x8000_0000, 0) < 0x0001_0001 || smccc(0x8400_0050, 0) < 0
+        || smccc(0x8400_0051, 0xc400_0053) < 0 { return None; }
+    let mut bytes = [0u8; 48];
+    for chunk in bytes.chunks_mut(24) {
+        let mut success = false;
+        for _ in 0..16 {
+            let mut x0 = 0xc400_0053u64;
+            let mut x1 = 192u64; let x2: u64; let x3: u64;
+            unsafe {
+                match CONDUIT.load(Ordering::Acquire) {
+                    1 => asm!("hvc #0", inout("x0") x0, inout("x1") x1, lateout("x2") x2, lateout("x3") x3, clobber_abi("C")),
+                    2 => asm!("smc #0", inout("x0") x0, inout("x1") x1, lateout("x2") x2, lateout("x3") x3, clobber_abi("C")),
+                    _ => return None,
+                }
+            }
+            if x0 == 0 {
+                chunk[..8].copy_from_slice(&x3.to_le_bytes());
+                chunk[8..16].copy_from_slice(&x2.to_le_bytes());
+                chunk[16..24].copy_from_slice(&x1.to_le_bytes());
+                success = true; break;
+            }
+            if x0 as i64 != -3 { break; } // only NO_ENTROPY is retryable
+        }
+        if !success { crate::random::crypto::erase(&mut bytes); return None; }
+    }
+    Some(bytes)
+}

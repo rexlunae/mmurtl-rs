@@ -295,6 +295,19 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
     let args = core::str::from_utf8(&info.bootargs[..info.bootargs_len]).unwrap_or("");
     crate::security::init(if args.is_empty() { option_env!("MMURTL_BOOTARGS").unwrap_or("") } else { args });
     super::cpu_features::set_conduit(info.psci);
+    for (name, (address, len), bits) in [("DT rng-seed", info.rng_seed, 256), ("DT kaslr-seed", info.kaslr_seed, 64)] {
+        if len != 0 {
+            // parse() has returned, so no immutable DTB slices remain live.
+            let seed = unsafe { core::slice::from_raw_parts_mut(address as *mut u8, len) };
+            crate::random::seed(name, seed, bits);
+            assert!(seed.iter().all(|b| *b == 0), "DT seed erasure");
+        }
+    }
+    crate::random::init();
+    for &(base, size) in &info.ram[..info.ram_count] {
+        crate::random::mix(b"public DT RAM", &base.to_le_bytes(), 0);
+        crate::random::mix(b"public DT RAM size", &size.to_le_bytes(), 0);
+    }
     super::cpu_features::enumerate(0);
     crate::print_banner();
     crate::serial::write_line("[TIME] user high-resolution counters: per-task (default off)");
