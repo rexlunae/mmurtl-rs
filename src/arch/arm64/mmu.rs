@@ -263,8 +263,7 @@ fn kernel_root() -> u64 {
 }
 
 fn alloc_zeroed_frame() -> Option<u64> {
-    let pa = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_frame())??;
-    unsafe { core::ptr::write_bytes(pa as *mut u8, 0, 4096) };
+    let pa = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_zeroed_frame())??;
     Some(pa)
 }
 

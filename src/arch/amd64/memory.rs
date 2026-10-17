@@ -64,7 +64,7 @@ fn map_heap_pages(virt_start: u64, size: u64, fa: &mut FrameAllocator) {
     let start_page = Page::containing_address(VirtAddr::new(virt_start));
     let mut adapter = page_table::BumpFrameAllocator::new(fa);
     for i in 0..num_pages {
-        let pa = fa.allocate_frame().expect("OOM during heap page allocation");
+        let pa = fa.allocate_zeroed_frame().expect("OOM during heap page allocation");
         unsafe {
             page_table::map_page(
                 start_page + i,
@@ -114,8 +114,7 @@ fn table(phys: u64) -> *mut u64 {
 }
 
 fn alloc_zeroed_frame() -> Option<u64> {
-    let pa = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_frame())??;
-    unsafe { core::ptr::write_bytes(phys_to_virt(pa), 0, FRAME_SIZE as usize) };
+    let pa = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_zeroed_frame())??;
     Some(pa)
 }
 

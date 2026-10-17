@@ -111,12 +111,11 @@ pub fn map_fresh(
     writable: bool,
     executable: bool,
 ) -> Result<(), &'static str> {
-    let pa = heap::with_frame_allocator(|fa| fa.allocate_frame())
+    let pa = heap::with_frame_allocator(|fa| fa.allocate_zeroed_frame())
         .ok_or("frame allocator not initialized")?
         .ok_or("out of memory")?;
     let kva = crate::arch::phys_to_virt(pa);
     unsafe {
-        core::ptr::write_bytes(kva, 0, PAGE as usize);
         let n = data.len().min(PAGE as usize - offset.min(PAGE as usize));
         core::ptr::copy_nonoverlapping(data.as_ptr(), kva.add(offset), n);
     }

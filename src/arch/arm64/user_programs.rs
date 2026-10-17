@@ -227,6 +227,15 @@ user_rogue_ptr_end:
     .balign 16
     .globl user_exit_start
 user_exit_start:
+    sub x0, sp, #4, lsl #12
+    mov x1, #2048
+    mov x2, #0x5345
+    movk x2, #0x746c, lsl #16
+    movk x2, #0x7572, lsl #32
+    movk x2, #0x6d6d, lsl #48
+1:  str x2, [x0], #8
+    subs x1, x1, #1
+    b.ne 1b
     EXIT
     brk #0
     .globl user_exit_end

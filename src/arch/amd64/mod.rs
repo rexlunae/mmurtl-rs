@@ -223,3 +223,5 @@ pub fn set_user_counter_access(high_res_time: bool) {
         core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack));
     }
 }
+
+pub mod memory_encryption;

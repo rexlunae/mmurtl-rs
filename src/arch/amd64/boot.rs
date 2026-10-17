@@ -53,6 +53,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     serial::write_str("[INIT] IDT...\n");
     super::interrupts::init();
+    super::memory_encryption::report();
 
     // Initialize PIC (Programmable Interrupt Controller)
     serial::write_str("[INIT] PIC...\n");
