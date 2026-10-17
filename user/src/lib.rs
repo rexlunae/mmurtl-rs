@@ -20,6 +20,7 @@ pub const SYS_SLEEP_MS: u64 = 6;
 pub const SYS_LOOKUP_SERVICE: u64 = 7;
 pub const SYS_REGISTER_SERVICE: u64 = 8;
 pub const SYS_YIELD: u64 = 9;
+pub const SYS_CLOCK_MS: u64 = 10;
 
 /// Raw syscall: number + up to three arguments
 #[cfg(target_arch = "x86_64")]
@@ -56,6 +57,11 @@ pub fn log(s: &str) {
 
 pub fn tid() -> u32 {
     unsafe { syscall(SYS_GET_TID, 0, 0, 0) as u32 }
+}
+
+/// Millisecond uptime rounded to the kernel scheduler tick resolution.
+pub fn clock_ms() -> u64 {
+    unsafe { syscall(SYS_CLOCK_MS, 0, 0, 0) }
 }
 
 pub fn sleep_ms(ms: u64) {

@@ -276,6 +276,8 @@ user_time_end:
 user_pmu_start:
     xorl %ecx, %ecx
     rdpmc
+    xorl %eax, %eax
+    int $0x80
     ud2
     .globl user_pmu_end
 user_pmu_end:
@@ -303,6 +305,8 @@ user_time_denied_start:
     movl $30, %edi
     int $0x80
     rdtsc
+    xorl %eax, %eax
+    int $0x80
     ud2
     .globl user_time_denied_end
 user_time_denied_end:

@@ -266,6 +266,8 @@ user_time_end:
     .globl user_pmu_start
 user_pmu_start:
     mrs x0, pmccntr_el0
+    mov x8, #0
+    svc #0
     brk #0
     .globl user_pmu_end
 user_pmu_end:
@@ -293,6 +295,8 @@ user_time_denied_start:
     mov x0, #30
     svc #0
     mrs x0, cntvct_el0
+    mov x8, #0
+    svc #0
     brk #0
     .globl user_time_denied_end
 user_time_denied_end:
