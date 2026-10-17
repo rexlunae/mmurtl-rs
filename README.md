@@ -75,7 +75,8 @@ Build and launch the port matching your host architecture automatically:
 directory and requires `make`, the project's Rust toolchain, and the QEMU
 system emulator for the selected architecture. amd64 uses BIOS boot;
 arm64 uses the kernel ELF directly. Set `ARM64_SMP` and `ARM64_GIC` to
-customize the arm64 defaults (4 CPUs and GICv3).
+customize the arm64 defaults (4 CPUs and GICv3). Relative paths in extra
+QEMU arguments resolve from the directory where you invoke the launcher.
 
 ### arm64
 

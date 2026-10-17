@@ -51,19 +51,18 @@ esac
 command -v "$qemu" >/dev/null 2>&1 || fail "$qemu is required; install QEMU for $arch"
 command -v make >/dev/null 2>&1 || fail "make is required"
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-cd "$ROOT"
 
 echo "Building MMURTL/RS for $arch..."
-make "$target"
+make -C "$ROOT" "$target"
 echo "Launching MMURTL/RS with $qemu..."
 case "$arch" in
     amd64)
-        exec "$qemu" -drive format=raw,file=target/mmurtl-rs-bios.img \
+        exec "$qemu" -drive "format=raw,file=$ROOT/target/mmurtl-rs-bios.img" \
             -serial stdio -m 256M "$@"
         ;;
     arm64)
         exec "$qemu" -machine "virt,gic-version=${ARM64_GIC:-3}" \
             -cpu cortex-a72 -smp "${ARM64_SMP:-4}" -m 256M -nographic \
-            -kernel target/aarch64-unknown-none-softfloat/release/mmurtl-rs "$@"
+            -kernel "$ROOT/target/aarch64-unknown-none-softfloat/release/mmurtl-rs" "$@"
         ;;
 esac
