@@ -312,6 +312,14 @@ user_time_denied_end:
 
     .globl user_uaccess_start
 user_uaccess_start:
+    mov x8, #-1
+    svc #0
+    cmn x0, #2
+    b.ne 1f
+    mov x8, #11
+    svc #0
+    cmn x0, #2
+    b.ne 1f
     adr x0, user_uaccess_start
     add x0, x0, #1, lsl #12
     mov x1, #16

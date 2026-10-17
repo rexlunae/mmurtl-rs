@@ -105,7 +105,9 @@ impl Rqb {
 
     /// Get the data payload as a byte slice
     pub fn get_data(&self) -> &[u8] {
-        &self.data[..core::cmp::min(self.data_size as usize, RQB_DATA_SIZE)]
+        let size = core::cmp::min(self.data_size as usize, RQB_DATA_SIZE);
+        let size = crate::arch::nospec::array_index_nospec(size, RQB_DATA_SIZE + 1);
+        &self.data[..size]
     }
 
     /// Set the status code
