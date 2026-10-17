@@ -65,6 +65,7 @@ static TIMER_TICKS_PER_10MS: AtomicU32 = AtomicU32::new(0);
 pub fn enabled() -> bool {
     APIC_ENABLED.load(Ordering::Acquire)
 }
+pub fn entry_mmio_base()->u64 {if enabled() {LAPIC_VIRT.load(Ordering::Acquire)} else {0}}
 
 // ========================================================================
 // Register access

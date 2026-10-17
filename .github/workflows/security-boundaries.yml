@@ -84,6 +84,13 @@ jobs:
           rustc --edition=2021 tools/tests/arm_predictor.rs -o /tmp/mmurtl-arm-predictor-test
           /tmp/mmurtl-arm-predictor-test
           python3 tools/test-arm-predictor.py
+      - name: Verify x86 predictor controls and return gateways
+        run: |
+          rustc --edition=2021 tools/tests/x86_predictor.rs -o /tmp/mmurtl-x86-predictor-test
+          /tmp/mmurtl-x86-predictor-test
+          rustc --edition=2021 tools/tests/return_thunk.rs -o /tmp/mmurtl-return-thunk-test
+          /tmp/mmurtl-return-thunk-test
+          python3 tools/test-x86-predictor.py
       - name: Build and audit optional sampled heap guards
         run: |
           make build arm64 KERNEL_FEATURES=kfence,test-heap-oom
@@ -97,3 +104,5 @@ jobs:
           make bios arm64 KERNEL_FEATURES=test-heap-oom
           python3 tools/test-security.py --arch amd64 --cpus 4 --nmi --require '[HEAP TEST] exhaustion preserved frames/mappings'
           python3 tools/test-security.py --arch arm64 --cpu max --cpus 4 --el2 --require '[SMP] 4 CPU(s) online' --require '[HEAP TEST] exhaustion preserved frames/mappings'
+          python3 tools/test-security.py --arch amd64 --cpu EPYC-Rome --cpus 4 --require 'return backend: Zen1/2'
+          python3 tools/test-security.py --arch amd64 --cpu EPYC-Milan --cpus 4 --require 'return backend: Zen3/4'

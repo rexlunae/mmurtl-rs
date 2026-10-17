@@ -236,6 +236,8 @@ impl Scheduler {
         t.state = TaskState::Running;
         t.on_cpu = Some(cpu as u8);
         crate::memory::stacks::set_current_task(cpu, t.id);
+        #[cfg(target_arch="x86_64")]
+        if self.cpus[cpu].current!=Some(next) {crate::arch::predictor::context_switch(cpu,t.user,t.id);}
         // Each task runs in its own address space (kernel tasks in the
         // kernel's). Loading the incoming task's space on every switch also
         // guarantees an exited task's space is loaded nowhere once it has

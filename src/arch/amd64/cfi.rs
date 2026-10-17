@@ -1,4 +1,9 @@
-pub fn initialize()->bool {crate::security::common().features & crate::security::feature::IBT!=0}
+#[no_mangle]
+pub static X86_RETPOLINE_LANDING:core::sync::atomic::AtomicBool=core::sync::atomic::AtomicBool::new(false);
+pub fn initialize()->bool {
+    X86_RETPOLINE_LANDING.store(true,core::sync::atomic::Ordering::Release);
+    crate::security::common().features & crate::security::feature::IBT!=0
+}
 pub fn status(active:bool)->&'static str {if active {"[CFI] CET-IBT selected; strict supervisor control applied per CPU on entry"} else {"[CFI] CET-IBT unavailable on common CPU set; KCFI remains active"}}
 pub fn enable_current() {
     use crate::security::cfi_policy::{CR4_CET,SUPERVISOR_ENDBR};
@@ -46,6 +51,17 @@ pub fn is_kcfi_trap(pc:u64) -> bool {
     }
     false
 }
+pub fn is_retpoline_landing_failure(pc:u64)->bool {
+    unsafe extern "C" {static __x86_retpoline_reject:u8;}
+    pc==core::ptr::addr_of!(__x86_retpoline_reject) as u64
+}
+pub fn captured_register(frame:&x86_64::structures::idt::InterruptStackFrame,register:usize)->Option<u64> {
+    if register>=16 {return None;}
+    if register==4 {return Some(frame.stack_pointer.as_u64());}
+    let offsets=[14,13,12,11,0,10,9,8,7,6,5,4,3,2,1,0];
+    let saved=(frame as *const _ as *const u8).wrapping_sub(136).cast::<u64>();
+    Some(unsafe {saved.add(offsets[register]).read_unaligned()})
+}
 /// Decode only the compiler's bounded ADD/type-check sequence immediately
 /// before a whitelisted trap. Unknown encodings retain a fatal no-target log.
 pub fn kcfi_target(frame:&x86_64::structures::idt::InterruptStackFrame) -> Option<u64> {
@@ -63,10 +79,7 @@ pub fn kcfi_target(frame:&x86_64::structures::idt::InterruptStackFrame) -> Optio
         register=Some(base as usize);break;
     }
     let register=register?;
-    if register==4 {return Some(frame.stack_pointer.as_u64());}
-    let offsets=[14,13,12,11,0,10,9,8,7,6,5,4,3,2,1,0];
     // Normalized exception entry saves 15 GPRs and vector/error before the
     // borrowed five-word CPU frame. See x86_exception_common.
-    let saved=(frame as *const _ as *const u8).wrapping_sub(136).cast::<u64>();
-    Some(unsafe {saved.add(offsets[register]).read_unaligned()})
+    captured_register(frame,register)
 }

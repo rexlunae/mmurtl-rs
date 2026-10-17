@@ -42,6 +42,8 @@ extern "C" fn kernel_stack_erase_bottom(frame: u64, user: u64) -> u64 {
 }
 #[no_mangle]
 extern "C" fn kernel_stack_offset(frame: u64, user: u64) -> u64 {
+    #[cfg(target_arch="x86_64")]
+    crate::arch::predictor::apply_current();
     crate::cfi::apply_current();
     if user == 0 || bottom(frame).is_none() { return 0; }
     let offset = crate::random::u64().unwrap_or_else(|_| crate::random::early_u64()) & 0x3f0;
@@ -174,8 +176,8 @@ pub fn enter_main() -> ! {
     #[cfg(target_arch = "aarch64")]
     let shadow = allocate();
     #[cfg(target_arch = "x86_64")]
-    unsafe { core::arch::asm!("mov rsp, {top}", "sub rsp, 8", "mov qword ptr [rsp], 0", "jmp {entry}", "int3",
-        top = in(reg) top, entry = in(reg) crate::kernel_run as *const (), options(noreturn)); }
+    unsafe { core::arch::asm!("mov rsp, {top}", "sub rsp, 8", "mov qword ptr [rsp], 0", "jmp __x86_indirect_thunk_rax", "int3",
+        top = in(reg) top, in("rax") crate::kernel_run as *const (), options(noreturn)); }
     #[cfg(target_arch = "aarch64")]
     unsafe { core::arch::asm!("mov sp, {top}", "mov x18, {shadow}", "bl arm64_enable_boot_pac", "br x16", "dsb nsh", "isb",
         top = in(reg) top, shadow = in(reg) shadow.virt,

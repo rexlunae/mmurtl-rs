@@ -8,6 +8,10 @@ pub mod x86_access;
 pub mod store_bypass;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_decode;
+#[cfg(target_arch="x86_64")]
+pub mod x86_predictor;
+#[cfg(target_arch="x86_64")]
+pub mod return_thunk;
 pub use types::*;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 static POLICY: spin::Once<Policy> = spin::Once::new();

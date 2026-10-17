@@ -16,11 +16,13 @@ ROOT=Path(__file__).resolve().parent.parent
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--arch',choices=['amd64','arm64'],required=True)
-    parser.add_argument('--kind',choices=['kcfi','bti','ibt','canary','pac','kfence'],default='kcfi')
+    parser.add_argument('--kind',choices=['kcfi','bti','ibt','canary','pac','kfence','retpoline'],default='kcfi')
     parser.add_argument('--allow-unavailable',action='store_true')
     parser.add_argument('--cpu')
     args=parser.parse_args()
     if args.kind=='bti' and args.arch!='arm64' or args.kind=='ibt' and args.arch!='amd64':parser.error('landing test kind does not match architecture')
+    if args.kind=='retpoline' and args.arch!='amd64':parser.error('retpoline requires amd64')
+    if args.kind=='pac' and args.arch!='arm64':parser.error('PAC requires arm64')
     if args.arch=='amd64':
         command=['qemu-system-x86_64','-cpu',args.cpu or 'max','-drive',f'format=raw,file={ROOT/"target/mmurtl-rs-bios.img"}','-snapshot']
     else:
@@ -37,7 +39,7 @@ def main():
         if 'positive test skipped' in text:
             assert args.kind!='kcfi' and args.allow_unavailable,text[-4000:]
             print(args.arch+': '+args.kind+' unavailable; positive enforcement test explicitly skipped');return
-        kind={'kcfi':'KCFI','bti':'BTI','ibt':'CET-IBT/#CP','canary':'stack canary','pac':'PAC authentication','kfence':'KFENCE use-after-free'}[args.kind]
+        kind={'kcfi':'KCFI','bti':'BTI','ibt':'CET-IBT/#CP','canary':'stack canary','pac':'PAC authentication','kfence':'KFENCE use-after-free','retpoline':'retpoline landing'}[args.kind]
         target='(unknown)' if args.kind in ['canary','pac'] else '(ptr)'
         assert f'[CFI] fatal {kind} at (ptr) target {target}; CPU halted' in text,text[-4000:]
         if args.kind=='kfence':

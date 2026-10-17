@@ -116,7 +116,7 @@ protection_smap_probe:
     stac
     int 0x83
     clac
-    ret
+    jmp __x86_return_thunk
     int3
     .globl protection_test_gate
 protection_test_gate:
@@ -137,15 +137,27 @@ protection_test_gate:
     .globl protection_smep_probe
 protection_smep_probe:
     endbr64
-    call rdi
+    call .Lsmep_retpoline
     xor eax, eax
-    ret
+    jmp __x86_return_thunk
+    int3
+    // The negative SMEP probe deliberately targets user instructions. It
+    // cannot read an ENDBR pad through the normal SMAP-closed landing guard.
+.Lsmep_retpoline:
+    call .Lsmep_install
+.Lsmep_sink:
+    pause
+    lfence
+    jmp .Lsmep_sink
+.Lsmep_install:
+    mov [rsp], rdi
+    jmp __x86_return_thunk
     int3
     .globl protection_smep_denied
 protection_smep_denied:
     add rsp, 8
     mov eax, 1
-    ret
+    jmp __x86_return_thunk
     int3
     .pushsection .rodata.ex_table, "a"
     .balign 8

@@ -337,7 +337,7 @@ pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
         }) { return false; }
         crate::arch::protection::enumerate(cpu_num as usize);
         crate::arch::set_user_counter_access(false);
-        crate::topology::admit(cpu_num as usize)
+        crate::arch::returns::compatible(cpu_num as usize) && crate::topology::admit(cpu_num as usize)
     }, || {
         crate::scheduler::register_ap(cpu_num as usize);
         CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);

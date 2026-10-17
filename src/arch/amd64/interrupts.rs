@@ -234,6 +234,9 @@ fn invalid_opcode_handler(stack_frame: &mut InterruptStackFrame) {
     if from_user(&stack_frame) {
         kill_user_task(&stack_frame, "#UD invalid opcode", None);
     }
+    if super::cfi::is_retpoline_landing_failure(stack_frame.instruction_pointer.as_u64()) {
+        crate::cfi::fatal(b"retpoline landing",stack_frame.instruction_pointer.as_u64(),super::cfi::captured_register(stack_frame,11));
+    }
     if super::cfi::is_kcfi_trap(stack_frame.instruction_pointer.as_u64()) {
         crate::cfi::fatal(b"KCFI",stack_frame.instruction_pointer.as_u64(),super::cfi::kcfi_target(stack_frame));
     }
@@ -515,6 +518,7 @@ core::arch::global_asm!(
     "mov rbx, rsp",
     "mov rsi, [rsp + 128]",
     "and esi, 3",
+    "call x86_predictor_enter",
     "call kernel_stack_offset",
     "sub rsp, rax",
     "mov rdi, rbx",
@@ -538,6 +542,15 @@ core::arch::global_asm!(
     "xor eax, eax",
     "rep stosb",
     "3:",
+    "test byte ptr [rsp + 128], 3",
+    "jz 81f",
+    "cmp byte ptr [rip + X86_LEGACY_IBRS], 0",
+    "je 81f",
+    "mov ecx, 0x48",
+    "rdmsr",
+    "and eax, -2",
+    "wrmsr",
+    "81:",
     // Restore registers
     "pop r15",
     "pop r14",
@@ -599,6 +612,7 @@ core::arch::global_asm!(
     "xor r14d, r14d",
     "xor r15d, r15d",
     "cld",
+    "call x86_predictor_enter",
     "call yield_and_switch",
     "jmp context_switch_tail"
 );
@@ -720,6 +734,7 @@ x86_exception_common:
     mov rdi, rsp
     mov rsi, [rsp + 144]
     and esi, 3
+    call x86_predictor_enter
     call kernel_stack_offset
     sub rsp, rax
     mov rdi, r12
@@ -739,6 +754,15 @@ x86_exception_common:
     xor eax, eax
     rep stosb
 3:
+    test byte ptr [rsp + 144], 3
+    jz 81f
+    cmp byte ptr [rip + X86_LEGACY_IBRS], 0
+    je 81f
+    mov ecx, 0x48
+    rdmsr
+    and eax, -2
+    wrmsr
+    81:
     pop r15
     pop r14
     pop r13

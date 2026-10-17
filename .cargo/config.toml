@@ -8,4 +8,4 @@ rustflags = ["-Z", "stack-protector=strong", "-Z", "sanitizer=kcfi,shadow-call-s
 
 # Kernel FP/SIMD state is disabled; cryptography must use scalar code.
 [target.x86_64-unknown-none]
-rustflags = ["-Z", "stack-protector=strong", "-Z", "sanitizer=kcfi", "-Z", "cf-protection=branch", "-C", "jump-tables=no", "-Z", "emit-stack-sizes", "--cfg", 'chacha20_backend="soft"', "-C", "target-feature=+harden-sls-ret,+harden-sls-ijmp"]
+rustflags = ["-Z", "stack-protector=strong", "-Z", "sanitizer=kcfi", "-Z", "cf-protection=branch", "-Z", "retpoline-external-thunk=yes", "-Z", "function-return=thunk-extern", "-C", "jump-tables=no", "-Z", "emit-stack-sizes", "--cfg", 'chacha20_backend="soft"', "-C", "target-feature=+harden-sls-ret,+harden-sls-ijmp"]

@@ -17,6 +17,8 @@ pub mod page_table;
 pub mod serial;
 pub mod smp;
 pub mod cfi;
+pub mod predictor;
+pub mod returns;
 pub mod stacks;
 pub mod syscall;
 pub mod usb;
@@ -120,6 +122,7 @@ pub fn halt() {
 
 /// APIC ID → CPU index, written at CPU registration, read lock-free on
 /// every timer tick. Index by APIC ID (xAPIC IDs are < 256).
+#[no_mangle]
 static APIC_TO_CPU: [AtomicU32; 256] = {
     const ZERO: AtomicU32 = AtomicU32::new(0);
     [ZERO; 256]
