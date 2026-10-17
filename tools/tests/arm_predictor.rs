@@ -41,6 +41,23 @@ fn main() {
         assert!(k.is_none() || matches!(k,Some(8|24|32|38|132)));
         assert_eq!(predictor::loop_count((0x42<<24)|(part<<4)),None);
     }
+    // Review regressions: BHB immunity/off must not suppress a WA3-only
+    // Spectre-v2 backend; return barriers are independent of root caching.
+    let mut wa3_only=SpecCaps::default(); wa3_only.features=F::WA3;
+    wa3_only.not_affected=V::Bhb.bit();
+    for args in ["", "bhb=on", "bhb=off"] {
+        let selected=select(wa3_only,Policy::parse(args).unwrap(),true);
+        assert_eq!(selected.v2,V2::Firmware3);
+        assert_eq!(selected.return_function(true),Some(0x80003fff));
+        assert_eq!(selected.return_function(false),None);
+    }
+    let partial=select(wa3_only,Policy::parse("mitigations=off bhb=on").unwrap(),true);
+    assert_eq!(partial.v2,V2::Off); assert_eq!(partial.bhb,Bhb::Firmware3);
+    assert!(!partial.bhb_safe());
+    let selected=select(fw,p,true);
+    let callbacks: Vec<_> = [true,true,false,true].into_iter().filter_map(|user| selected.return_function(user)).collect();
+    assert_eq!(callbacks,vec![0x80008000;3]); // adjacent same-root user resumes + one kernel return
+    assert_eq!(select(fw,off,true).return_function(true),None);
     // Independent plans on heterogeneous CPUs; no global maximum/overwrite.
     assert_ne!(select(core(0xd08),p,true).bhb,select(core(0xd4e),p,true).bhb);
     println!("ARM predictor: per-core loops, firmware/conduit gates, unknown cores, immunity, overrides and partial protection passed");
