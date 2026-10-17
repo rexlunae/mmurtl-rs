@@ -73,6 +73,12 @@ static TID_SPIN: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_READ: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PRIV: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PTR: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "x86_64")]
+static TID_ROGUE_DEBUG: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "x86_64")]
+static TID_ROGUE_DEBUG_ENTRY: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "x86_64")]
+static TID_ROGUE_ALIGN: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_SIMD: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_FP: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PEEK: AtomicU32 = AtomicU32::new(0);
@@ -133,6 +139,12 @@ pub fn demo() {
 
     TID_ROGUE_SIMD.store(spawn("rogue_simd", prog::rogue_simd(), 0), Ordering::SeqCst);
     TID_ROGUE_FP.store(spawn("rogue_fp", prog::rogue_fp(), 0), Ordering::SeqCst);
+    #[cfg(target_arch = "x86_64")]
+    {
+        TID_ROGUE_DEBUG.store(spawn("rogue_debug", prog::rogue_debug(), 0), Ordering::SeqCst);
+        TID_ROGUE_DEBUG_ENTRY.store(spawn("rogue_db_entry", prog::rogue_debug_entry(), 0), Ordering::SeqCst);
+        TID_ROGUE_ALIGN.store(spawn("rogue_align", prog::rogue_align(), 0), Ordering::SeqCst);
+    }
     spawn_elf_programs();
 }
 
@@ -353,6 +365,13 @@ extern "C" fn user_check_task() -> ! {
     pass &= report("rogue_peek can't see uecho's pages", killed(&TID_ROGUE_PEEK));
     pass &= report("rogue_fp killed, kernel alive", killed(&TID_ROGUE_FP));
     pass &= report("rogue_simd killed, kernel alive", killed(&TID_ROGUE_SIMD));
+    #[cfg(target_arch = "x86_64")]
+    {
+        wait_until(5000, || exited(&TID_ROGUE_DEBUG) && exited(&TID_ROGUE_DEBUG_ENTRY) && exited(&TID_ROGUE_ALIGN));
+        pass &= report("rogue_debug killed, kernel alive", killed(&TID_ROGUE_DEBUG));
+        pass &= report("delayed #DB entry survived", killed(&TID_ROGUE_DEBUG_ENTRY));
+        pass &= report("rogue_align killed, kernel alive", killed(&TID_ROGUE_ALIGN));
+    }
     pass &= all_done;
 
     // A user-mode service exiting mid-request fails it with Aborted

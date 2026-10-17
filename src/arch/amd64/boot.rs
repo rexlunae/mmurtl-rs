@@ -69,6 +69,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         Optional::None => None,
     };
     super::memory::init(&boot_info.memory_regions, phys_offset);
+    super::gdt::protect_bsp_stacks();
+    super::interrupts::debug_self_test();
 
     // Parse ACPI tables (MADT: CPUs, Local APIC, I/O APIC)
     serial::write_str("[INIT] ACPI...\n");

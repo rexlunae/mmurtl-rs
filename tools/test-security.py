@@ -5,6 +5,8 @@ Build first with make bios (amd64) or make arm64. No writable disks required.
 """
 import argparse
 import os
+import json
+import socket
 from pathlib import Path
 import select
 import shutil
@@ -22,10 +24,12 @@ def main():
     parser.add_argument('--cpu')
     parser.add_argument('--uefi', action='store_true')
     parser.add_argument('--el2', action='store_true')
+    parser.add_argument('--nmi', action='store_true', help='inject an amd64 NMI and verify the shell remains responsive')
     parser.add_argument('--require', action='append', default=[])
     args = parser.parse_args()
     if args.uefi and args.arch != 'amd64': parser.error('--uefi requires amd64')
     if args.el2 and args.arch != 'arm64': parser.error('--el2 requires arm64')
+    if args.nmi and args.arch != 'amd64': parser.error('--nmi requires amd64')
     with tempfile.TemporaryDirectory(prefix='mmurtl-security-') as temporary:
         if args.arch == 'amd64':
             image = ROOT / 'target' / ('mmurtl-rs-uefi.img' if args.uefi else 'mmurtl-rs-bios.img')
@@ -40,8 +44,10 @@ def main():
                        '-cpu', args.cpu or 'cortex-a72', '-nographic', '-monitor', 'none',
                        '-kernel', str(ROOT / 'target/aarch64-unknown-none-softfloat/release/mmurtl-rs')]
         if args.cpu and args.arch == 'amd64': command += ['-cpu', args.cpu]
+        qmp_path = str(Path(temporary) / 'qmp.sock')
+        if args.nmi: command += ['-qmp', f'unix:{qmp_path},server=on,wait=off']
         command += ['-m', '256M', '-smp', str(args.cpus)]
-        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         output = bytearray()
         try:
             deadline = time.monotonic() + 60
@@ -51,6 +57,24 @@ def main():
                     if not data: break
                     output.extend(data)
                     if b'/> ' in output: break
+            if args.nmi and b'/> ' in output:
+                with socket.socket(socket.AF_UNIX) as qmp:
+                    qmp.connect(qmp_path)
+                    stream = qmp.makefile('rwb', buffering=0)
+                    json.loads(stream.readline())
+                    for execute in ['qmp_capabilities', 'inject-nmi']:
+                        stream.write((json.dumps({'execute': execute}) + '\n').encode())
+                        while True:
+                            response = json.loads(stream.readline())
+                            assert 'error' not in response, response
+                            if 'return' in response: break
+                proc.stdin.write(b'ECHO NMI-SURVIVED\n'); proc.stdin.flush()
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if select.select([proc.stdout], [], [], 0.1)[0]:
+                        output.extend(os.read(proc.stdout.fileno(), 65536))
+                        if b'NMI-SURVIVED\r\n/>' in output or b'NMI-SURVIVED\n/>' in output: break
+                assert output.count(b'NMI-SURVIVED') >= 2, 'shell did not respond after NMI'
             text = output.decode(errors='replace')
             required = ['/> ', 'All userspace checks passed', 'All IPC checks passed', *args.require]
             for marker in required:
