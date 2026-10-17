@@ -108,7 +108,7 @@ pub struct Selectors {
 /// loading the same descriptor would fault.
 pub fn init_ap(cpu: usize) {
     use alloc::boxed::Box;
-    use x86_64::instructions::segmentation::{CS, DS, ES, SS, Segment};
+    use x86_64::instructions::segmentation::{DS, ES, SS, Segment};
     use x86_64::instructions::tables::load_tss;
 
     let tss: *mut TaskStateSegment = Box::into_raw(Box::new(TaskStateSegment::new()));
@@ -123,7 +123,7 @@ pub fn init_ap(cpu: usize) {
 
     gdt.load();
     unsafe {
-        CS::set_reg(kernel_code);
+        load_cs(kernel_code);
         SS::set_reg(kernel_data);
         DS::set_reg(kernel_data);
         ES::set_reg(kernel_data);
@@ -134,14 +134,13 @@ pub fn init_ap(cpu: usize) {
 
 /// Initialize the GDT — call once at boot
 pub fn init() {
-    use x86_64::instructions::segmentation::{CS, Segment};
     use x86_64::instructions::tables::load_tss;
 
     GDT.gdt.load();
 
     // Reload CS with kernel code segment
     unsafe {
-        CS::set_reg(GDT.selectors.kernel_code);
+        load_cs(GDT.selectors.kernel_code);
         load_tss(GDT.selectors.tss_entry);
     }
     TSS_BY_CPU[0].store(core::ptr::addr_of_mut!(BSP_TSS), Ordering::Release);
@@ -192,4 +191,15 @@ fn install_guarded_stacks(cpu: usize, tss: *mut TaskStateSegment) {
 /// before starting APs or user tasks.
 pub fn protect_bsp_stacks() {
     install_guarded_stacks(0, core::ptr::addr_of_mut!(BSP_TSS));
+}
+
+/// Far return must skip its SLS barrier at the architectural target.
+/// The dependency's inline CS::set_reg has no fall-through separator.
+unsafe fn load_cs(selector: SegmentSelector) {
+    core::arch::asm!(
+        "push {selector}", "lea {temporary}, [rip + 55f]", "push {temporary}",
+        "retfq", "int3", "55:",
+        selector = in(reg) u64::from(selector.0), temporary = lateout(reg) _,
+        options(preserves_flags),
+    );
 }

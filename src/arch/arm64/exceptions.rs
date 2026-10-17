@@ -119,6 +119,35 @@ exception_common:
     .inst 0xd500419f             // PSTATE.PAN=1 (feature-gated)
     isb
 .Lpan_closed:
+    mov x2, xzr
+    mov x3, xzr
+    mov x4, xzr
+    mov x5, xzr
+    mov x6, xzr
+    mov x7, xzr
+    mov x8, xzr
+    mov x9, xzr
+    mov x10, xzr
+    mov x11, xzr
+    mov x12, xzr
+    mov x13, xzr
+    mov x14, xzr
+    mov x15, xzr
+    mov x16, xzr
+    mov x17, xzr
+    mov x18, xzr
+    mov x19, xzr
+    mov x20, xzr
+    mov x21, xzr
+    mov x22, xzr
+    mov x23, xzr
+    mov x24, xzr
+    mov x25, xzr
+    mov x26, xzr
+    mov x27, xzr
+    mov x28, xzr
+    mov x29, xzr
+    mov x30, xzr
     mov x1, sp
     bl arm64_exception          // x0 = kind, x1 = frame -> x0 = frame to resume
     mov sp, x0
@@ -148,6 +177,8 @@ exception_common:
     ldp x28, x29, [sp, #224]
     add sp, sp, #272
     eret
+    dsb nsh
+    isb
 
     .text
     "#

@@ -184,10 +184,16 @@ drop_to_el1:
     msr spsr_el2, x13
     msr elr_el2, x30
     eret
+    dsb nsh
+    isb
 10: msr spsr_el3, x13
     msr elr_el3, x30
     eret
+    dsb nsh
+    isb
 9:  ret
+    dsb nsh
+    isb
 
     // Primary handoff: tables and BootState pointers are physical. After
     // rebasing RELATIVE relocations, use only registers until branching high.
@@ -236,6 +242,8 @@ arm64_enter_high:
     dsb nsh
     isb
     br x9
+    dsb nsh
+    isb
 
     // Secondary CPU entry (PSCI CPU_ON): x0 = &ApBoot, MMU off
     .globl secondary_start
@@ -272,6 +280,8 @@ secondary_start:
     add x9, x9, :lo12:arm64_secondary_main
     add x9, x9, x10
     br x9
+    dsb nsh
+    isb
     b park
 
     // Secondary CPU entry (spin-table release): the firmware's holding

@@ -16,6 +16,8 @@ jobs:
         run: make build arm64
       - name: Verify bounds and optimized speculation sequences
         run: python3 tools/test-nospec.py
+      - name: Verify entry register clearing and SLS barriers
+        run: python3 tools/test-entry-sls.py
       - name: Verify frame scrubbing
         run: |
           rustc --edition=2021 tools/tests/frame_allocator.rs -o /tmp/mmurtl-frame-test

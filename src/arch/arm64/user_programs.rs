@@ -282,6 +282,108 @@ user_pmu_start:
 user_pmu_end:
     .globl user_coarse_start
 user_coarse_start:
+    // Seed NZCV and every non-return GPR (x8 is the syscall number).
+    mov x0, #0xa0000000
+    msr nzcv, x0
+    mov x1, #257
+    mov x2, #258
+    mov x3, #259
+    mov x4, #260
+    mov x5, #261
+    mov x6, #262
+    mov x7, #263
+    mov x8, #10
+    mov x9, #265
+    mov x10, #266
+    mov x11, #267
+    mov x12, #268
+    mov x13, #269
+    mov x14, #270
+    mov x15, #271
+    mov x16, #272
+    mov x17, #273
+    mov x18, #274
+    mov x19, #275
+    mov x20, #276
+    mov x21, #277
+    mov x22, #278
+    mov x23, #279
+    mov x24, #280
+    mov x25, #281
+    mov x26, #282
+    mov x27, #283
+    mov x28, #284
+    mov x29, #285
+    mov x30, #286
+    svc #0
+    mrs x0, nzcv
+    lsr x0, x0, #28
+    cmp x0, #10
+    b.ne .Lentryregs_fail
+    cmp x1, #257
+    b.ne .Lentryregs_fail
+    cmp x2, #258
+    b.ne .Lentryregs_fail
+    cmp x3, #259
+    b.ne .Lentryregs_fail
+    cmp x4, #260
+    b.ne .Lentryregs_fail
+    cmp x5, #261
+    b.ne .Lentryregs_fail
+    cmp x6, #262
+    b.ne .Lentryregs_fail
+    cmp x7, #263
+    b.ne .Lentryregs_fail
+    cmp x8, #10
+    b.ne .Lentryregs_fail
+    cmp x9, #265
+    b.ne .Lentryregs_fail
+    cmp x10, #266
+    b.ne .Lentryregs_fail
+    cmp x11, #267
+    b.ne .Lentryregs_fail
+    cmp x12, #268
+    b.ne .Lentryregs_fail
+    cmp x13, #269
+    b.ne .Lentryregs_fail
+    cmp x14, #270
+    b.ne .Lentryregs_fail
+    cmp x15, #271
+    b.ne .Lentryregs_fail
+    cmp x16, #272
+    b.ne .Lentryregs_fail
+    cmp x17, #273
+    b.ne .Lentryregs_fail
+    cmp x18, #274
+    b.ne .Lentryregs_fail
+    cmp x19, #275
+    b.ne .Lentryregs_fail
+    cmp x20, #276
+    b.ne .Lentryregs_fail
+    cmp x21, #277
+    b.ne .Lentryregs_fail
+    cmp x22, #278
+    b.ne .Lentryregs_fail
+    cmp x23, #279
+    b.ne .Lentryregs_fail
+    cmp x24, #280
+    b.ne .Lentryregs_fail
+    cmp x25, #281
+    b.ne .Lentryregs_fail
+    cmp x26, #282
+    b.ne .Lentryregs_fail
+    cmp x27, #283
+    b.ne .Lentryregs_fail
+    cmp x28, #284
+    b.ne .Lentryregs_fail
+    cmp x29, #285
+    b.ne .Lentryregs_fail
+    cmp x30, #286
+    b.ne .Lentryregs_fail
+    adr x0, .Lentryregs_message
+    mov x1, #(.Lentryregs_message_end - .Lentryregs_message)
+    mov x8, #1
+    svc #0
     mov x8, #10
     svc #0
     mov x19, x0
@@ -295,6 +397,11 @@ user_coarse_start:
     mov x8, #0
     svc #0
 2:  brk #0
+.Lentryregs_fail:
+    brk #0
+.Lentryregs_message:
+    .ascii "[USER] entry register/flags round trip passed\n"
+.Lentryregs_message_end:
     .globl user_coarse_end
 user_coarse_end:
 
