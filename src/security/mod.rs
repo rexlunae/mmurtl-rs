@@ -1,6 +1,8 @@
 //! Boot policy, admitted-CPU capability intersection, and truthful status.
 pub mod types;
 pub mod kaslr;
+#[cfg(target_arch = "x86_64")]
+pub mod x86_access;
 pub mod store_bypass;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_decode;

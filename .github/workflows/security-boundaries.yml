@@ -50,3 +50,7 @@ jobs:
         run: |
           rustc --edition=2021 tools/tests/kaslr.rs -o /tmp/mmurtl-kaslr-test
           /tmp/mmurtl-kaslr-test
+      - name: Verify x86 access-protection intersection
+        run: |
+          rustc --edition=2021 tools/tests/x86_access.rs -o /tmp/mmurtl-x86-access-test
+          /tmp/mmurtl-x86-access-test
