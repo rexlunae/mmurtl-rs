@@ -382,6 +382,11 @@ pub fn test_machine_check() -> ! {
     assert!(super::microcode_msr::write(0x402, pointer));
     assert!(super::microcode_msr::write(0x403, pointer));
     assert!(super::microcode_msr::write(0x401, (1 << 63) | (1 << 58) | (1 << 59)));
+    assert_eq!(unsafe { emergency_msr(0x402) }, pointer);
+    assert_eq!(unsafe { emergency_msr(0x403) }, pointer);
+    if crate::kptr::RAW_ADDRESSES {
+        emergency_text("[MCE TEST] injected="); emergency_hex(pointer); emergency_text("\n");
+    }
     unsafe { core::arch::asm!("int 0x12", options(noreturn)); }
 }
 
