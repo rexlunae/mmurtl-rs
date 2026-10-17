@@ -14,7 +14,7 @@ impl Vulnerability { pub const fn bit(self) -> u64 { 1 << self as usize } }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode { Off, Auto, AutoNoSmt }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Override { Auto, On, Off }
+pub enum Override { Auto, On, Off, PerTask }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Policy { pub mode: Mode, pub overrides: [Override; 17] }
 impl Policy {
@@ -33,14 +33,15 @@ impl Policy {
                     "auto,nosmt" => Mode::AutoNoSmt, _ => return Err("invalid mitigations mode") };
             } else if let Some((family, _)) = FAMILIES.iter().find(|(_, name)| *name == key) {
                 policy.overrides[*family as usize] = match value { "auto" => Override::Auto,
-                    "on" => Override::On, "off" => Override::Off, _ => return Err("invalid mitigation override") };
+                    "on" => Override::On, "off" => Override::Off,
+                    "per-task" if *family == Vulnerability::Ssb => Override::PerTask, _ => return Err("invalid mitigation override") };
             }
         }
         Ok(policy)
     }
     pub fn enabled(self, family: Vulnerability) -> bool {
         match self.overrides[family as usize] { Override::On => true, Override::Off => false,
-            Override::Auto => self.mode != Mode::Off }
+            Override::PerTask => true, Override::Auto => self.mode != Mode::Off }
     }
 }
 pub mod feature {
@@ -57,6 +58,7 @@ pub mod feature {
     pub const SMEP: u64 = 1 << 21; pub const SMAP: u64 = 1 << 22; pub const UMIP: u64 = 1 << 23;
     pub const LASS: u64 = 1 << 24; pub const IBPB: u64 = 1 << 25;
     pub const DOITM: u64 = 1 << 26; pub const DIT: u64 = 1 << 27;
+    pub const SSBS2: u64 = 1 << 30;
     pub const RFDS_CLEAR: u64 = 1 << 28; pub const GDS_CTRL: u64 = 1 << 29;
 }
 #[derive(Clone, Copy, Default)]

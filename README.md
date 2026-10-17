@@ -678,6 +678,35 @@ validation remains outstanding. An uncontended host CAS-lock benchmark
 (`tools/tests/nospec_lock_bench.rs`) measured median 3.7 ns without the
 barrier and 24.1 ns with CPUID here; these are host measurements, not kernel
 or contested-lock latency guarantees.
+Store-bypass protection is an own-task setting. User tasks (including
+ELFs from disk) request it by default; kernel tasks default off. Boot
+`ssb=per-task` (also the auto default), `ssb=on`, or `ssb=off` selects the
+policy. Forced modes reject contradictory task requests with EPERM.
+Syscall 11 accepts 0=relax, 1=disable bypass, 2=query the effective requested
+policy. Unsupported affected CPUs return EOPNOTSUPP when protection is
+requested, rather than claiming success. The user runtime exports
+`set_store_bypass_disabled()` and `store_bypass_disabled()`.
+
+amd64 uses CPUID-gated SSBD and PSFD through one cached SPEC_CTRL owner,
+preserving IBRS/STIBP and unrelated fields. AMD VIRT_SPEC_CTRL is used when
+advertised instead; model-specific LS_CFG programming is not guessed.
+Changed controls are read back, with IRQs masked across each update.
+arm64 uses saved SPSR.SSBS, sets the kernel exception-entry DSSBS default,
+and reapplies policy on every EL0 return after releasing the scheduler
+lock. Where SSBS is absent, a supported firmware WA2 backend is selected.
+No running task's stale saved-context pointer is modified by the setter.
+SSBS is task architectural state; the kernel reestablishes its requested
+value at each return, without claiming isolation between code sharing one
+user task. Firmware availability and feature gates are required on every
+admitted CPU.
+
+A user regression checks invalid operations, forced-mode permissions,
+unsupported requests, and policy persistence across sleeps. On SSBS2 it
+also reads the actual SSBS register in EL0 after both toggles and switches.
+Host tests verify backend gates and preservation of other SPEC_CTRL bits.
+TCG does not expose the x86 SSBD controls or a WA2-capable firmware here;
+positive x86 MSR and firmware backends still need hardware/KVM validation.
+
 CPU vulnerability reporting records capabilities on every admitted CPU.
 amd64 captures gated CPUID leaves 7.0/7.1/7.2, AMD 80000008/80000021, and
 IA32_ARCH_CAPABILITIES only when its CPUID gate is present. arm64 records
@@ -701,6 +730,7 @@ Default policy is `mitigations=auto`. Overrides are `mitigations=off`,
 in the SPEC table (for example `spectre_v2=on ssb=off`). Malformed recognized
 settings fall back to auto. Baseline pointer validation, bounds masks,
 access protection, and timer restrictions remain enforced with off.
+`ssb=per-task` is also supported.
 `auto,nosmt` records the request; SMT topology enforcement is still pending
 in #42 and the boot log explicitly says so.
 

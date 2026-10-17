@@ -100,6 +100,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::write_str("[INIT] SMP...\n");
     super::smp::boot_aps();
     super::protection::finalize();
+    crate::security::finalize();
+    super::store_bypass::init();
     crate::security::report();
 
     // Initialize PCI and USB

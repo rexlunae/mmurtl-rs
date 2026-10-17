@@ -39,6 +39,7 @@ pub fn enumerate(cpu: usize) {
     if csv3 == 1 { caps.not_affected |= V::Meltdown.bit(); }
     if (caps.raw[0] >> 48) & 15 == 1 { caps.features |= F::DIT; }
     if matches!((caps.raw[1] >> 4) & 15, 1 | 2) { caps.features |= F::SSBS; }
+    if (caps.raw[1] >> 4) & 15 == 2 { caps.features |= F::SSBS2; }
     if (caps.raw[2] >> 60) & 15 == 1 { caps.features |= F::ECBHB; }
     if (caps.raw[3] >> 28) & 15 == 1 { caps.features |= F::CLRBHB; }
     // Core tables are deliberately small and conservative. Unknown cores
@@ -57,7 +58,10 @@ pub fn enumerate(cpu: usize) {
     for (index, function, feature) in [(4,0x8000_8000,F::WA1),(5,0x8000_7fff,F::WA2),(6,0x8000_3fff,F::WA3)] {
         let status = if version >= 0x10001 { smccc(0x8000_0001, function) } else { -1 };
         caps.raw[index] = status as u64;
-        if matches!(status, 0 | 1) { caps.features |= feature; }
+        if status == 0 { caps.features |= feature; }
+        if status == 1 || index == 5 && status == -2 {
+            caps.not_affected |= match index { 4 => V::SpectreV2, 5 => V::Ssb, _ => V::Bhb }.bit();
+        }
     }
     crate::security::record(cpu, caps);
 }

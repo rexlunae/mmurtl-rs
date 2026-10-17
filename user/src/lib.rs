@@ -21,6 +21,7 @@ pub const SYS_LOOKUP_SERVICE: u64 = 7;
 pub const SYS_REGISTER_SERVICE: u64 = 8;
 pub const SYS_YIELD: u64 = 9;
 pub const SYS_CLOCK_MS: u64 = 10;
+pub const SYS_SPEC_STORE_BYPASS: u64 = 11;
 
 /// Raw syscall: number + up to three arguments
 #[cfg(target_arch = "x86_64")]
@@ -162,4 +163,16 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let _ = write!(line, "user panic: {}", info.message());
     log(line.as_str());
     exit()
+}
+
+/// Request/relax this task's store-bypass mitigation. Boot policy can forbid
+/// relaxation; unsupported affected CPUs return an error rather than success.
+pub fn set_store_bypass_disabled(disabled: bool) -> Result<(), u64> {
+    let result = unsafe { syscall(SYS_SPEC_STORE_BYPASS, u64::from(disabled), 0, 0) };
+    if result == 0 { Ok(()) } else { Err(result) }
+}
+/// Query effective requested policy, not raw hardware register contents.
+pub fn store_bypass_disabled() -> Result<bool, u64> {
+    let result = unsafe { syscall(SYS_SPEC_STORE_BYPASS, 2, 0, 0) };
+    if result <= 1 { Ok(result != 0) } else { Err(result) }
 }

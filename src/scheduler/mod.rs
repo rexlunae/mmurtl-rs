@@ -237,6 +237,8 @@ impl Scheduler {
         // been switched out, so the reaper can free it.
         crate::arch::switch_address_space(cpu, t.address_space);
         crate::arch::set_user_counter_access(t.user && t.high_res_time);
+        unsafe { crate::arch::store_bypass::prepare_task(t.spec_store_bypass_disable,
+            &mut *(t.context_ptr as *mut TaskContext)); }
         if t.user {
             // Traps from user mode must land on this task's own kernel stack
             crate::arch::on_switch_to_user(cpu, t.kernel_stack_top);
@@ -567,10 +569,19 @@ pub fn create_user_task_with_time(
     entry: u64, user_rsp: u64, arg: u64, space: u64, slot: u64,
     name: &'static str, high_res_time: bool,
 ) -> u32 {
+    create_user_task_with_speculation(entry, user_rsp, arg, space, slot, name, high_res_time, true)
+}
+
+/// Trusted creation-time settings; ELF metadata cannot grant timer access.
+pub fn create_user_task_with_speculation(
+    entry: u64, user_rsp: u64, arg: u64, space: u64, slot: u64,
+    name: &'static str, high_res_time: bool, disable_store_bypass: bool,
+) -> u32 {
     let stack = alloc_stack();
     let mut task =
         TaskControlBlock::new_user(entry, user_rsp, arg, space, slot, stack, PRIORITY_DEFAULT, name);
     task.high_res_time = high_res_time;
+    task.spec_store_bypass_disable = disable_store_bypass;
     let (tid, ipi_target) = with_scheduler(|sched| {
         let tid = sched.add_task(task);
         (tid, sched.find_idle_cpu(current_cpu()))
@@ -589,6 +600,26 @@ pub fn create_user_task_with_time(
 
     kick(ipi_target);
     tid
+}
+
+/// Change only this task's mitigation request. Keep IRQs and scheduling
+/// disabled through the hardware update so migration cannot apply it to
+/// another task/CPU. Never touch a running task's stale saved context.
+pub fn set_store_bypass_disable(requested: bool) -> Result<(), u64> {
+    with_scheduler(|sched| {
+        crate::arch::store_bypass::plan().change(requested)?;
+        let cpu = current_cpu();
+        let index = sched.cpus[cpu].current.expect("no current task");
+        sched.tasks[index].spec_store_bypass_disable = requested;
+        crate::arch::store_bypass::apply_current(requested);
+        Ok(())
+    })
+}
+pub fn current_store_bypass_flag() -> bool {
+    with_scheduler(|sched| {
+        let cpu = current_cpu();
+        sched.cpus[cpu].current.map(|index| sched.tasks[index].spec_store_bypass_disable).unwrap_or(false)
+    })
 }
 
 /// Copy task information for PS without printing or allocating under the

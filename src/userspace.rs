@@ -77,6 +77,7 @@ static TID_UACCESS: AtomicU32 = AtomicU32::new(0);
 static TID_SIDT: AtomicU32 = AtomicU32::new(0);
 #[cfg(target_arch = "x86_64")]
 static TID_AC: AtomicU32 = AtomicU32::new(0);
+static TID_SSB: AtomicU32 = AtomicU32::new(0);
 static TID_HELLO: AtomicU32 = AtomicU32::new(0);
 static TID_SPIN: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_READ: AtomicU32 = AtomicU32::new(0);
@@ -169,6 +170,12 @@ pub fn demo() {
         }
         TID_AC.store(spawn("rogue_ac", prog::ac(), 0), Ordering::SeqCst);
     }
+    let ssb = crate::arch::store_bypass::plan();
+    let mode = match ssb.mode { crate::security::store_bypass::Mode::Off => 0,
+        crate::security::store_bypass::Mode::On => 1, _ => 2 };
+    let flags = mode | (u64::from(ssb.supported()) << 2)
+        | (u64::from(crate::arch::store_bypass::testable_ssbs()) << 3);
+    TID_SSB.store(spawn("ssb_control", prog::ssb(), flags), Ordering::SeqCst);
     spawn_elf_programs();
 }
 
@@ -413,6 +420,8 @@ extern "C" fn user_check_task() -> ! {
         pass &= wait_until(5000, || exited(&TID_AC));
         pass &= report("user AC cleared on syscall entry", exited(&TID_AC) && !killed(&TID_AC));
     }
+    pass &= wait_until(5000, || exited(&TID_SSB));
+    pass &= report("store-bypass policy and readback", exited(&TID_SSB) && !killed(&TID_SSB));
     pass &= all_done;
 
     // A user-mode service exiting mid-request fails it with Aborted
