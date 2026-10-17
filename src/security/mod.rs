@@ -13,7 +13,9 @@ static CAPS: spin::Mutex<[Option<SpecCaps>; 64]> = spin::Mutex::new([None; 64]);
 static ADMISSION: spin::Mutex<()> = spin::Mutex::new(());
 static ADMITTED: AtomicU64 = AtomicU64::new(1);
 static SEALED: AtomicBool = AtomicBool::new(false);
-static INSTALLED: spin::Mutex<[Option<&'static str>; 17]> = spin::Mutex::new([None; 17]);
+#[derive(Clone, Copy)]
+enum Status { Pending, Installed(&'static str), Unavailable(&'static str) }
+static STATUS: spin::Mutex<[Status; 17]> = spin::Mutex::new([Status::Pending; 17]);
 static COMMON: spin::Once<CommonCaps> = spin::Once::new();
 pub fn init(args: &str) {
     let policy = Policy::parse(args).unwrap_or_else(|error| {
@@ -47,7 +49,8 @@ pub fn freeze() -> u64 {
 }
 pub fn common() -> CommonCaps { COMMON.get().copied().unwrap_or_default() }
 /// Record actual installed behavior, never just advertised capability.
-pub fn installed(family: Vulnerability, description: &'static str) { INSTALLED.lock()[family as usize] = Some(description); }
+pub fn installed(family: Vulnerability, description: &'static str) { STATUS.lock()[family as usize] = Status::Installed(description); }
+pub fn unavailable(family: Vulnerability, reason: &'static str) { STATUS.lock()[family as usize] = Status::Unavailable(reason); }
 pub fn finalize() -> CommonCaps {
     let admitted = freeze();
     let common = {
@@ -83,7 +86,7 @@ pub fn report() {
     crate::serial::write_str("[SPEC] policy: ");
     crate::serial::write_line(match policy().mode { Mode::Off => "off", Mode::Auto => "auto", Mode::AutoNoSmt => "auto,nosmt" });
     for (family, name) in FAMILIES {
-        let installed = INSTALLED.lock()[family as usize];
+        let status = STATUS.lock()[family as usize];
         crate::serial::write_str("[SPEC] "); crate::serial::write_str(name); crate::serial::write_str(": ");
         if !crate::arch::cpu_features::applicable(family) {
             crate::serial::write_line("Not applicable (architecture-specific family)");
@@ -93,8 +96,10 @@ pub fn report() {
             crate::serial::write_line("Mitigation: always-on syscall bounds hardening");
         } else if !policy().enabled(family) {
             crate::serial::write_line("Vulnerable: disabled by policy");
-        } else if let Some(description) = installed {
+        } else if let Status::Installed(description) = status {
             crate::serial::write_str("Mitigation: "); crate::serial::write_line(description);
+        } else if let Status::Unavailable(reason) = status {
+            crate::serial::write_str("Vulnerable: "); crate::serial::write_line(reason);
         } else {
             crate::serial::write_line("Vulnerable/unknown: mitigation not yet configured");
         }
@@ -105,3 +110,4 @@ pub fn report() {
 }
 
 pub mod arm_pan;
+pub mod arm_predictor;

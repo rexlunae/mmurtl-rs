@@ -80,6 +80,7 @@ exception_vectors:
     VENTRY 14
     VENTRY 15
 
+    .global exception_common
 exception_common:
     stp x2, x3, [sp, #16]
     stp x4, x5, [sp, #32]
@@ -194,8 +195,10 @@ pub fn init() {
         asm!(
             "msr vbar_el1, {v}",
             "isb",
-            v = in(reg) core::ptr::addr_of!(exception_vectors) as u64,
+            v = in(reg) super::predictor::vector(),
         );
+        let actual: u64; asm!("mrs {}, vbar_el1", out(reg) actual, options(nomem, nostack));
+        super::predictor::note_vector(actual);
     }
 }
 

@@ -1228,3 +1228,37 @@ every non-return GPR and flags, invokes a syscall and verifies restoration;
 it does not add a task or expose a debug syscall. The x86 probe includes DF=1.
 These checks establish emitted instructions and architectural behavior in
 QEMU, rather than a hardware side-channel proof.
+
+### ARM predictor hardening
+
+Each CPU selects its own VBAR table from its local capabilities and boot
+policy before admission. Architectural CSV2/CSV2.3 immunity, ECBHB, CLRBHB,
+known per-core loops and firmware availability are considered separately.
+Cortex-A53 keeps plain vectors; Cortex-A57/A72 use k=8. Supported newer ARM
+cores use k=24/32/38/132; an unknown core never receives a guessed loop.
+CLRBHB is followed by ISB. Loop vectors end with DSB NSH; ISB before entering
+common code. Every table is 2-KiB aligned with bounded 128-byte slots, and
+all admitted CPUs' VBAR writes are read back and checked.
+
+Firmware vectors preserve x0–x3 before calls, supply zero auxiliary arguments
+and restore original user registers before common entry. WA1 combines with
+plain, loop or CLRBHB vectors as needed. Firmware also runs on every EL0
+return, including same-root syscall/IRQ resumes, before PAN restores user
+access and before user GPRs are reloaded. WA1 additionally runs before each
+different nonzero root activation, including root reuse. WA3 remains available
+for Spectre v2 independently of BHB immunity or its policy, and supersedes
+WA1 when selected. No root-cache hit can skip the return barrier.
+These choices follow the [Linux ARM predictor backend guidance](https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/proton-pack.c)
+and [architectural workaround register preservation](https://github.com/torvalds/linux/blob/master/arch/arm64/include/asm/assembler.h).
+
+Logs report each CPU's selected backend. A missing firmware workaround stays
+explicitly vulnerable. A BHB loop alone does not produce a global mitigated
+status while prerequisite Spectre-v2 protection is unavailable.
+`mitigations=off`, `spectre_v2=off` and `bhb=off` disable their optional
+backends; baseline PAN, register clearing and SLS code generation remain.
+Host tests cover mixed CPU plans, all supported loop lengths, unknown cores,
+feature/conduit gates, immunity and overrides. `tools/test-arm-predictor.py`
+audits all vector slots, including firmware argument sanitization and saved
+registers. QEMU validates the available plain/loop paths and architectural
+behavior; positive firmware and CLRBHB/ECBHB hardware paths remain untested
+on this host.
