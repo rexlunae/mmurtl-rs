@@ -24,7 +24,7 @@ ucode_wrmsr:
     retq
 .global ucode_gp_probe
 ucode_gp_probe:
-    movw $0xffff, %ax
+    movw $0xfff8, %ax
 5:  movw %ax, %ds
     xorl %eax, %eax
     retq

@@ -34,7 +34,7 @@ fn revision(intel: bool) -> Option<u32> {
 fn trusted_amd(patch: Patch<'_>) -> bool {
     use sha2::{Digest, Sha256};
     let digest: [u8; 32] = Sha256::digest(patch.bytes).into();
-    format::amd_digests::AMD_DIGESTS.iter().any(|(rev, len, hash)| *rev == patch.revision && *len == patch.bytes.len() && *hash == digest)
+    format::amd_digest_known(patch.revision, patch.bytes.len(), &digest)
 }
 
 /// Returns false for a late AP: it must park, without updating any CPU.
@@ -57,6 +57,10 @@ fn apply_locked(cpu: usize, state: &State) -> bool {
         crate::serial::write_line(" unsupported vendor/family; firmware microcode retained"); return true;
     }
     let Some(before) = revision(intel) else { crate::serial::write_line("[UCODE] revision MSR unavailable; update skipped"); return true; };
+    if amd && fam >= 0x17 && before == 0 {
+        crate::serial::write_line("[UCODE] Unknown AMD signing baseline; update BIOS before OS microcode");
+        return true;
+    }
     let patch = state.module.map(|blob| {
         if intel {
             let platform = match msr::read(0x17) { Some(v) => 1u32 << ((v >> 50) & 7), None => return Ok(None) };
@@ -65,8 +69,8 @@ fn apply_locked(cpu: usize, state: &State) -> bool {
     });
     let selected = match patch {
         Some(Ok(Some(p))) if !amd || (trusted_amd(p) && format::amd_policy::transition_allowed(before, p.revision)) => Some(p),
-        Some(Ok(Some(_))) => { crate::serial::write_line(" AMD digest/signing transition is not trusted; update refused"); None },
-        Some(Err(_)) => { crate::serial::write_line(" malformed vendor container; update refused"); None },
+        Some(Ok(Some(_))) => { crate::serial::write_line("[UCODE] AMD digest/signing transition is not trusted; update refused"); None },
+        Some(Err(_)) => { crate::serial::write_line("[UCODE] Malformed vendor container; update refused"); None },
         _ => None,
     };
     if let Some(patch) = selected {
@@ -84,16 +88,17 @@ fn apply_locked(cpu: usize, state: &State) -> bool {
                 }
                 core::arch::x86_64::__cpuid(1);
                 if amd && fam == 0x17 {
-                    x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(address));
-                    x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(pointer.add(patch.bytes.len() - 1) as u64));
+                    for offset in (0..patch.bytes.len()).step_by(4096) {
+                        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(pointer.add(offset) as u64));
+                    }
                 }
             }
             let after = revision(intel).unwrap_or(before);
-            if after != patch.revision { crate::serial::write_line(" update revision verification failed; firmware revision retained"); }
+            if after != patch.revision { crate::serial::write_line("[UCODE] Update revision differs from selected patch; reporting actual CPU revision"); }
             crate::memory::heap::with_frame_allocator(|fa| {
                 for i in 0..pages { fa.deallocate_frame(pa + (i * 4096) as u64); }
             });
-        } else { crate::serial::write_line(" no update buffer; firmware revision retained"); }
+        } else { crate::serial::write_line("[UCODE] No update buffer; firmware revision retained"); }
     }
     let after = revision(intel).unwrap_or(before);
     crate::serial::write_str("[UCODE] CPU"); crate::serial::write_dec(cpu as u64);

@@ -105,3 +105,8 @@ pub fn amd(mut blob: &[u8], cpu: u32, current: u32) -> Result<Option<Patch<'_>>,
 pub mod amd_digests;
 
 pub mod amd_policy;
+
+/// Pinned vendor-published bytes, in addition to the CPU's signature checks.
+pub fn amd_digest_known(revision: u32, size: usize, digest: &[u8; 32]) -> bool {
+    amd_digests::AMD_DIGESTS.iter().any(|(rev, len, hash)| *rev == revision && *len == size && hash == digest)
+}

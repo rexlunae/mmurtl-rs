@@ -35,9 +35,21 @@ fn main() {
             let pf=get(&blob,24);let minimum=get(&blob,40);let cpu=get(&blob,12);let platform=pf & pf.wrapping_neg();
             assert!(intel(&blob,cpu,platform,minimum).unwrap().is_some(),"vendor Intel sample {file}");
         } else {
-            let cpu=get(&blob,12);let result=amd(&blob,cpu,0).unwrap();assert!(result.is_some(),"vendor AMD sample {file}");
+            let cpu=get(&blob,12);let result=amd(&blob,cpu,0).unwrap().expect("vendor AMD sample");
+            let digest=sha256(result.bytes);assert!(microcode::amd_digest_known(result.revision,result.bytes.len(),&digest));
+            let mut forged=result.bytes.to_vec();forged[40]^=1;let digest=sha256(&forged);
+            assert!(!microcode::amd_digest_known(result.revision,forged.len(),&digest));
         }
         println!("vendor sample validated: {file}");
     }
     println!("microcode: legacy/extended Intel, AMD/Zen matching, prerequisites, corrupt/truncated input and signing boundaries passed");
+}
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child=Command::new("sha256sum").arg("-").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(data).unwrap();
+    let output=child.wait_with_output().unwrap();assert!(output.status.success());
+    let hex=String::from_utf8(output.stdout).unwrap();core::array::from_fn(|i|u8::from_str_radix(&hex[i*2..i*2+2],16).unwrap())
 }

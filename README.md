@@ -1041,3 +1041,44 @@ Run `python3 tools/test-random.py` after building both kernels for cryptographic
 known-answer, failure-policy, per-CPU/reseed and scalar-code regressions.
 `tools/test-security.py --rng` attaches host entropy; on arm64,
 `--no-firmware-seed` disables QEMU's DT seeds for failure-path tests.
+
+### Early amd64 microcode
+
+Supply a vendor container as the bootloader ramdisk with
+`MMURTL_MICROCODE=/absolute/path/to/container.bin make bios uefi`.
+Use Intel's concatenated binary updates or AMD's `microcode_amd*.bin`
+containers, obtained from the processor vendor/linux-firmware. This module
+currently occupies the single bootloader ramdisk slot. No firmware payload
+is embedded or downloaded automatically.
+
+The BSP loads before vulnerability enumeration and CPU entropy collection;
+each AP loads before its feature snapshot or scheduler admission. Previously
+started APs spin with interrupts masked until the update phase closes. A
+serialized boot seal rejects late AP update attempts before userspace starts.
+Virtual machines skip all microcode MSRs and retain host-managed revisions.
+On hardware, matching includes Intel signature/platform flags, extended
+signature checksums and minimum prerequisite revisions; AMD uses legacy
+equivalence tables or exact Zen family/model/stepping encoded in patch IDs.
+Updates must be newer. AMD patches additionally require a pinned SHA-256 hash
+of vendor-published bytes, and cannot cross a known firmware signing boundary.
+Aligned WB update buffers are erased and freed after revision verification.
+Recoverable RDMSR/WRMSR #GP fixups handle unavailable or firmware-locked MSRs.
+
+The AMD digest reference is linux-firmware commit
+`12dfe670ce7c5987a60fab36d974c4a7d2a6eeeb`, containing 46 patch hashes. The
+allowlist is an explicit source-controlled trust root: update it only after
+reviewing vendor provenance with `tools/make-microcode-digests.py`. Vendor
+CPU authentication remains enabled. BIOS updates remain necessary for signing
+format changes and CPUs without OS-distributed patches. The initial advisory
+minimum check covers AMD EPYC Rome Zenbleed (AMD-SB-7008, `0x0830107b`);
+it is not a complete revision database or a claim that all vulnerabilities
+are fixed. The mitigation table still reports the actual post-update CPUID
+capabilities. Keep firmware current even when OS microcode is supplied.
+
+Parser checks run in CI via `tools/tests/microcode.rs`; optional arguments
+accept local Intel/AMD sample files and additionally test AMD pinned hashes
+against modified payloads. Public fixtures were checked from Intel commit
+`bdc92abe5c499c3fd7988b76a128d05c9120a520` (`06-3a-09`, `06-55-04`) and the
+five AMD family containers in the pinned linux-firmware release. QEMU verifies
+all CPU boot/fixup/skip paths; successful real microcode installation requires
+bare-metal validation and is not exercised by the VM tests.
