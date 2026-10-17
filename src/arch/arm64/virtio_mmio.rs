@@ -51,11 +51,11 @@ pub struct VirtioMmio {
 
 impl VirtioMmio {
     fn rd(&self, off: u64) -> u32 {
-        unsafe { core::ptr::read_volatile((self.base + off) as *const u32) }
+        unsafe { core::ptr::read_volatile(super::memory::phys_to_virt(self.base + off).cast::<u32>()) }
     }
 
     fn wr(&self, off: u64, v: u32) {
-        unsafe { core::ptr::write_volatile((self.base + off) as *mut u32, v) }
+        unsafe { core::ptr::write_volatile(super::memory::phys_to_virt(self.base + off).cast::<u32>(), v) }
     }
 
     /// Claim the device at `base`: reset + ACKNOWLEDGE + DRIVER
@@ -130,7 +130,7 @@ impl Transport for VirtioMmio {
     }
 
     fn config_read8(&self, offset: u16) -> u8 {
-        unsafe { core::ptr::read_volatile((self.base + REG_CONFIG + offset as u64) as *const u8) }
+        unsafe { core::ptr::read_volatile(super::memory::phys_to_virt(self.base + REG_CONFIG + offset as u64).cast::<u8>()) }
     }
 
     fn config_read32(&self, offset: u16) -> u32 {

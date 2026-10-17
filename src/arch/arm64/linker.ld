@@ -4,7 +4,8 @@
  * RAM + 2 MiB, leaving the start of RAM for the device tree QEMU places
  * there when booting an ELF). It can be loaded anywhere 4 KiB-aligned:
  * `_start` applies the R_AARCH64_RELATIVE relocations in .rela.dyn for
- * wherever it landed, then runs identity-mapped (VA == PA).
+ * wherever it landed, then the MMU handoff rebases references to the high
+ * TTBR1 window. Physical text is mapped only during the bootstrap.
  */
 ENTRY(_start)
 

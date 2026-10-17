@@ -7,8 +7,7 @@
 //! kernel image, firmware tables, etc. are never handed out.
 //!
 //! Physical addresses are plain `u64`s; the CPU reaches a frame through
-//! `crate::arch::phys_to_virt` (an offset window on amd64, identity on
-//! arm64).
+//! `crate::arch::phys_to_virt` (a high kernel window on both architectures).
 
 /// Size of one physical frame
 pub const FRAME_SIZE: u64 = 4096; // 4 KiB

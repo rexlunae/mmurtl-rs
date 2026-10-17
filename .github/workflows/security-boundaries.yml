@@ -38,3 +38,7 @@ jobs:
         run: |
           rustc --edition=2021 tools/tests/microcode.rs -o /tmp/mmurtl-ucode-test
           /tmp/mmurtl-ucode-test
+      - name: Verify ASID generations and live CPU reservations
+        run: |
+          rustc --edition=2021 tools/tests/asids.rs -o /tmp/mmurtl-asid-test
+          /tmp/mmurtl-asid-test

@@ -36,10 +36,10 @@ const PENDING1: u64 = 0x04;
 const ENABLE1: u64 = 0x10;
 
 fn rd32(addr: u64) -> u32 {
-    unsafe { core::ptr::read_volatile(addr as *const u32) }
+    unsafe { core::ptr::read_volatile(super::memory::phys_to_virt(addr).cast::<u32>()) }
 }
 fn wr32(addr: u64, v: u32) {
-    unsafe { core::ptr::write_volatile(addr as *mut u32, v) }
+    unsafe { core::ptr::write_volatile(super::memory::phys_to_virt(addr).cast::<u32>(), v) }
 }
 
 fn core_id() -> u64 {

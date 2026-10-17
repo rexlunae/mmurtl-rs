@@ -3,7 +3,7 @@
 //!
 //! A self-relocating kernel (ELF or `Image`, loaded anywhere) entered at
 //! EL3, EL2, or EL1; PL011 serial; the device tree for RAM, CPUs, and
-//! devices; an identity-mapped MMU with EL0/EL1 permission bits; an EL1
+//! devices; a high TTBR1 kernel and ASID-tagged user TTBR0; an EL1
 //! vector table; GICv2/GICv3 or the BCM2836 controller + the generic
 //! timer; PSCI or spin-table multi-core boot; virtio-mmio and PCIe (ECAM)
 //! devices; EL0 userspace via `svc #0`.
@@ -160,3 +160,5 @@ pub mod store_bypass;
 
 pub mod entropy;
 pub mod wx;
+
+mod asid_pool;

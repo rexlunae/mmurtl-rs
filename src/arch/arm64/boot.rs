@@ -5,15 +5,17 @@
 //! QEMU `virt` loads it at its link address, a Raspberry Pi's firmware
 //! near the start of RAM at 0. `_start` applies its own
 //! R_AARCH64_RELATIVE relocations before any code can read an absolute
-//! address, then everything runs identity-mapped at the load address.
+//! address. A second relative-relocation pass rebases absolute references into
+//! the high TTBR1 window just before enabling translation and branching high.
 //!
 //! CPU 0 enters `_start` with the MMU off, at EL3, EL2, or EL1 (we drop to
 //! EL1). Secondary CPUs are started later, by PSCI `CPU_ON` at
 //! `secondary_start` or by a spin-table release at `secondary_spin_entry`
 //! (see `smp.rs`).
 //!
-//! Boot CPU sequence: relocate → device tree (MMU still off) → identity
-//! map + MMU on → console → vectors → memory → interrupt controller +
+//! Boot CPU sequence: relocate → device tree (MMU off) → tables → high
+//! relocation/MMU handoff → retire bootstrap TTBR0 → console → vectors →
+//! memory → interrupt controller +
 //! timer → scheduler → secondary CPUs → devices → `crate::kernel_run()`.
 
 use core::arch::global_asm;
@@ -187,6 +189,53 @@ drop_to_el1:
     eret
 9:  ret
 
+    // Primary handoff: tables and BootState pointers are physical. After
+    // rebasing RELATIVE relocations, use only registers until branching high.
+    .globl arm64_enter_high
+arm64_enter_high:
+    adr x10, _start
+    movz x11, #(LINK_BASE >> 16), lsl #16
+    sub x10, x10, x11
+    movz x12, #0xffff, lsl #48
+    adrp x3, __rela_start
+    add x3, x3, :lo12:__rela_start
+    adrp x4, __rela_end
+    add x4, x4, :lo12:__rela_end
+11: cmp x3, x4
+    b.hs 12f
+    ldp x5, x6, [x3], #16
+    ldr x7, [x3], #8
+    cmp w6, #R_AARCH64_RELATIVE
+    b.ne 11b
+    add x5, x5, x10
+    add x7, x7, x10
+    add x7, x7, x12
+    str x7, [x5]
+    b 11b
+12: ldp x2, x3, [x0, #0]       // MAIR, TCR
+    ldp x4, x5, [x0, #16]      // bootstrap TTBR0, kernel TTBR1
+    ldr x6, [x0, #32]          // SCTLR
+    adrp x9, arm64_high_main
+    add x9, x9, :lo12:arm64_high_main
+    add x9, x9, x12
+    add x0, x1, x12            // BootState's high alias
+    add x11, sp, x12
+    mov sp, x11
+    msr mair_el1, x2
+    msr tcr_el1, x3
+    msr ttbr0_el1, x4
+    msr ttbr1_el1, x5
+    isb
+    tlbi vmalle1
+    dsb ish
+    isb
+    msr sctlr_el1, x6
+    isb
+    ic iallu
+    dsb nsh
+    isb
+    br x9
+
     // Secondary CPU entry (PSCI CPU_ON): x0 = &ApBoot, MMU off
     .globl secondary_start
 secondary_start:
@@ -201,21 +250,27 @@ secondary_start:
     ldr x2, [x19, #16]          // mair
     ldr x3, [x19, #24]          // tcr
     ldr x4, [x19, #32]          // ttbr0
-    ldr x5, [x19, #40]          // sctlr
+    ldr x5, [x19, #40]          // ttbr1
+    ldr x6, [x19, #48]          // sctlr
     msr mair_el1, x2
     msr tcr_el1, x3
     msr ttbr0_el1, x4
+    msr ttbr1_el1, x5
     isb
     tlbi vmalle1
     dsb ish
     isb
-    msr sctlr_el1, x5
+    msr sctlr_el1, x6
     isb
     ic iallu                    // drop any stale instructions
     dsb nsh
     isb
     mov x0, x1
-    bl arm64_secondary_main
+    adrp x9, arm64_secondary_main
+    add x9, x9, :lo12:arm64_secondary_main
+    movz x10, #0xffff, lsl #48
+    add x9, x9, x10
+    br x9
     b park
 
     // Secondary CPU entry (spin-table release): the firmware's holding
@@ -289,6 +344,24 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
     }
     let ram = unsafe { super::mmu::early_init(&info.ram[..info.ram_count], &devices) };
 
+    let state = BootState { info, ram, dtb, load_addr, relocs };
+    let regs = super::mmu::regs();
+    unsafe { arm64_enter_high(&regs, &state) }
+}
+
+struct BootState {
+    info: fdt::MachineInfo,
+    ram: heapless::Vec<(u64, u64), 8>,
+    dtb: u64,
+    load_addr: u64,
+    relocs: u64,
+}
+extern "C" { fn arm64_enter_high(regs: *const super::mmu::MmuRegs, state: *const BootState) -> !; }
+
+#[no_mangle]
+extern "C" fn arm64_high_main(state: *const BootState) -> ! {
+    super::mmu::retire_identity();
+    let BootState { info, ram, dtb, load_addr, relocs } = unsafe { state.read() };
     super::serial::set_base(info.uart);
     crate::serial::init();
     crate::serial::write_line("[FPU] user FP/SIMD/SVE/SME disabled on every CPU (no context switching yet)");
@@ -298,7 +371,7 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
     for (name, (address, len), bits) in [("DT rng-seed", info.rng_seed, 256), ("DT kaslr-seed", info.kaslr_seed, 64)] {
         if len != 0 {
             // parse() has returned, so no immutable DTB slices remain live.
-            let seed = unsafe { core::slice::from_raw_parts_mut(address as *mut u8, len) };
+            let seed = unsafe { core::slice::from_raw_parts_mut(super::memory::phys_to_virt(address), len) };
             crate::random::seed(name, seed, bits);
             assert!(seed.iter().all(|b| *b == 0), "DT seed erasure");
         }
@@ -342,8 +415,8 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
     }
 
     // RAM
-    let kernel_start = core::ptr::addr_of!(__kernel_start) as u64;
-    let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
+    let kernel_start = super::memory::virt_to_phys(core::ptr::addr_of!(__kernel_start) as u64);
+    let kernel_end = super::memory::virt_to_phys(core::ptr::addr_of!(__kernel_end) as u64);
     for &(base, size) in &ram {
         crate::serial::write_str("[MEM] RAM 0x");
         crate::serial::write_hex(base);
@@ -366,6 +439,7 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
     crate::serial::write_str("[INIT] SMP...\n");
     super::smp::boot_secondaries(&info);
     crate::security::finalize();
+    super::mmu::finalize_asids();
     super::store_bypass::init();
     crate::security::report();
 

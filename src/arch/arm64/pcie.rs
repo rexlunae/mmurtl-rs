@@ -67,14 +67,14 @@ fn cfg_addr(bus: u8, device: u8, function: u8, register: u8) -> Option<u64> {
 /// PCI config read (all ones when there is no host bridge / no device)
 pub fn pci_config_read(bus: u8, device: u8, function: u8, register: u8) -> u32 {
     match cfg_addr(bus, device, function, register) {
-        Some(a) => unsafe { core::ptr::read_volatile(a as *const u32) },
+        Some(a) => unsafe { core::ptr::read_volatile(super::memory::phys_to_virt(a).cast::<u32>()) },
         None => 0xFFFF_FFFF,
     }
 }
 
 pub fn pci_config_write(bus: u8, device: u8, function: u8, register: u8, value: u32) {
     if let Some(a) = cfg_addr(bus, device, function, register) {
-        unsafe { core::ptr::write_volatile(a as *mut u32, value) }
+        unsafe { core::ptr::write_volatile(super::memory::phys_to_virt(a).cast::<u32>(), value) }
     }
 }
 
@@ -83,20 +83,20 @@ fn io_addr(port: u16) -> u64 {
 }
 
 pub fn io_read8(port: u16) -> u8 {
-    unsafe { core::ptr::read_volatile(io_addr(port) as *const u8) }
+    unsafe { core::ptr::read_volatile(super::memory::phys_to_virt(io_addr(port)).cast::<u8>()) }
 }
 pub fn io_read16(port: u16) -> u16 {
-    unsafe { core::ptr::read_volatile(io_addr(port) as *const u16) }
+    unsafe { core::ptr::read_volatile(super::memory::phys_to_virt(io_addr(port)).cast::<u16>()) }
 }
 pub fn io_read32(port: u16) -> u32 {
-    unsafe { core::ptr::read_volatile(io_addr(port) as *const u32) }
+    unsafe { core::ptr::read_volatile(super::memory::phys_to_virt(io_addr(port)).cast::<u32>()) }
 }
 pub fn io_write8(port: u16, v: u8) {
-    unsafe { core::ptr::write_volatile(io_addr(port) as *mut u8, v) }
+    unsafe { core::ptr::write_volatile(super::memory::phys_to_virt(io_addr(port)).cast::<u8>(), v) }
 }
 pub fn io_write16(port: u16, v: u16) {
-    unsafe { core::ptr::write_volatile(io_addr(port) as *mut u16, v) }
+    unsafe { core::ptr::write_volatile(super::memory::phys_to_virt(io_addr(port)).cast::<u16>(), v) }
 }
 pub fn io_write32(port: u16, v: u32) {
-    unsafe { core::ptr::write_volatile(io_addr(port) as *mut u32, v) }
+    unsafe { core::ptr::write_volatile(super::memory::phys_to_virt(io_addr(port)).cast::<u32>(), v) }
 }

@@ -32,7 +32,7 @@ is common to both unless marked.
 - ✅ **(arm64)** Relocatable kernel (self-relocating PIE) — boots on QEMU
   `virt` and the Raspberry Pi 3 (`raspi3b`) from an ELF or `Image`, at EL1,
   EL2, or EL3; PL011 console; RAM, CPUs, and devices from the device tree
-- ✅ **(arm64)** Identity-mapped MMU, EL1 vector table, GICv2/GICv3 or the
+- ✅ **(arm64)** High-half TTBR1 kernel, ASID-tagged user TTBR0, EL1 vector table, GICv2/GICv3 or the
   Pi's BCM2836 interrupt controller + generic timer tick, PSCI or
   spin-table multi-core boot, virtio-mmio (legacy + modern)
 - ✅ **(amd64)** Input: PS/2 keyboard driver — scancode set 1 → ASCII with shift, char queue
@@ -586,10 +586,10 @@ concurrent runs.
 ### Per-task address spaces and reclamation
 
 Every user task gets **its own address space**: a page-table root that
-shares all of the kernel's mappings but whose user window holds only that
-task's pages. The scheduler loads the incoming task's space on every
-switch (CR3 on amd64, TTBR0 + a local TLB flush on arm64; kernel tasks
-run in the kernel's own tables). A program that reaches for another
+holds only that task's user pages. amd64 roots share kernel mappings; arm64
+uses a separate shared kernel TTBR1. The scheduler loads CR3 on amd64 or
+TTBR0 with an ASID on arm64. Normal arm64 switches retain cached translations;
+kernel tasks use a reserved empty TTBR0. A program that reaches for another
 program's memory now finds nothing mapped there:
 ```
 [USER] T23 "rogue_peek" killed: #PF not-present page at pc=0x640000601016          (amd64)
@@ -808,8 +808,7 @@ including inherited firmware settings. User FP/SIMD attempts are killed
 and checked at boot as `rogue_fp` and `rogue_simd`; kernel FP use is a bug.
 
 Limitations: the kernel heap is a bump allocator, so small kernel-side
-task metadata is not recycled; no ASIDs on arm64 (each address-space
-switch flushes the local TLB); ELF programs are static executables (no
+task metadata is not recycled; ELF programs are static executables (no
 dynamic linking or relocation).
 
 ## Architecture ports (amd64 + arm64)
@@ -828,7 +827,7 @@ own boot path.
 | Boot | `bootloader` crate (BIOS/UEFI), long mode | ELF or `Image`, loaded anywhere (self-relocating); EL1 (drops from EL2/EL3) |
 | Discovery | ACPI MADT, PCI | Device tree (RAM, reserved memory, CPUs, PSCI/spin tables, interrupt controller, UART, virtio, PCIe host bridge) |
 | Console | 16550 COM1 | PL011 (RX interrupt feeds console input) |
-| Paging | bootloader tables + offset window | own identity map; EL0/EL1 AP bits, PXN/UXN |
+| Paging | bootloader tables + offset window | high TTBR1 kernel + user-only TTBR0/ASIDs; AP, PXN/UXN |
 | Interrupts | IDT; PIC → Local/I/O APIC | EL1 vector table; GICv2 or GICv3 (redistributors, ICC system registers), or BCM2836 local + BCM2835 armctrl (Pi 2/3) |
 | Tick | LAPIC timer (PIT fallback) | generic virtual timer (PPI 27) |
 | Reschedule IPI | vector 0x30 | SGI 1 (GICv3: routed by MPIDR affinity); BCM2836 mailbox 0 |
@@ -903,9 +902,11 @@ does not model caches, so the cache fixes are unverified on silicon):
   (linked at 0x4020_0000, all absolute addresses as
   `R_AARCH64_RELATIVE` relocations). `_start` applies them for wherever
   it was loaded, before anything reads an absolute address; the device
-  tree is then parsed with the MMU still off and the identity map built
-  from its RAM and device ranges. Verified at the link address, at
-  0x4700_0000 on `virt` (loaded with `-device loader`), and at 0x20_0000
+  tree is then parsed with the MMU still off and the TTBR1 map built
+  from its RAM and device ranges. A second relocation pass rebases references
+  into the high kernel window immediately before translation is enabled.
+  Verified at the link address, at 0x4100_0000 on `virt`
+  (loaded with `-device loader`), and at 0x20_0000
   on the Pi 3:
   ```
   [BOOT] Loaded at 0x200000 (linked at 0x40200000), 269 relocations applied
@@ -935,7 +936,7 @@ does not model caches, so the cache fixes are unverified on silicon):
 Not verified on physical hardware; the Pi 4 (RAM above 4 GiB behind a
 different peripheral window, GIC-400) has not been run.
 
-arm64 limitations: the kernel identity-maps RAM and devices below 512 GiB
+arm64 limitations: the high physical window covers RAM/devices below 512 GiB
 with 2 MiB blocks (up to 24 distinct GiB of them); RAM not covering a whole
 2 MiB block is unused;
 GICv3 support covers the first redistributor region (no ITS/LPIs); PCI
@@ -984,7 +985,7 @@ rustc --edition=2021 tools/tests/frame_allocator.rs -o /tmp/mmurtl-frame-test
 
 arm64 maps kernel text as EL1 read-only/executable, constants and relocated
 GOT/data as read-only/non-executable, and all other RAM (including user-frame
-identity aliases, heap, stacks and page tables) as writable/non-executable.
+high physical aliases, heap, stacks and page tables) as writable/non-executable.
 The image uses 4 KiB pages; ordinary RAM remains in 2 MiB blocks. Relocations
 finish before enabling these permissions. Every CPU enables SCTLR_EL1.WXN.
 
@@ -1085,3 +1086,34 @@ against modified payloads. Public fixtures were checked from Intel commit
 five AMD family containers in the pinned linux-firmware release. QEMU verifies
 all CPU boot/fixup/skip paths; successful real microcode installation requires
 bare-metal validation and is not exercised by the VM tests.
+
+### arm64 TTBR1 and ASIDs
+
+The kernel executes at `0xffff000000000000 + physical_address`, with RAM,
+devices, heap and stacks in TTBR1. The primary stub rebases absolute references
+before enabling translation, then branches high. Secondary entry/context and
+spin-table release values remain physical for firmware; their stacks and Rust
+entry points are high virtual addresses. The temporary TTBR0 maps only physical
+text as RX, EL1-only, non-global pages under reserved bootstrap ASID 255.
+Every CPU replaces it with the empty ASID-0 TTBR0 immediately after branching
+high. Neither reserved tag is allocated to a user process.
+
+Each user root contains only its user window; every user leaf is non-global.
+The common admitted-CPU capability selects 8- or 16-bit ASIDs, with TBI0 off.
+A generation allocator reserves tags still loaded on other CPUs. Rollover
+broadcasts and completes TLBI before reusing retired tags; freeing/unmapping
+an image invalidates its ASID before its frames are recycled. Normal context
+switches change TTBR0/ASID without flushing the TLB. Kernel mappings are still
+present in TTBR1 at EL0 with supervisor-only permissions; PAN, KPTI/E0PD and
+independent virtual KASLR are separate follow-ups.
+
+Boot audits check TTBR1 permissions, the empty kernel TTBR0 and the private
+bootstrap map. A real translation test switches through 600 private images
+with a forced 8-bit tag limit, checks absent mappings in the other image and
+empty TTBR0, and exercises generation rollover. Host tests also stress live
+CPU reservations, migration, exhaustion and 16-bit wrap. Validated on QEMU
+virt GICv2/v3, EL1/EL2, 1/4/32 CPUs, alternate physical loading, and Raspberry
+Pi 3 spin tables. Disk/ELF shell tests and legacy PCI virtio DMA tests pass.
+Use `tools/test-security.py --gic 2`, `--load-address 0x41000000`,
+`--raspi3-dtb /path/to/bcm2710-rpi-3-b.dtb`, or `--virtio-pci --net --rng`
+for those paths. Raw/alternate-address/Pi tests require `make arm64-image`.
