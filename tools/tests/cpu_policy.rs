@@ -16,6 +16,8 @@ fn main() {
     assert_eq!(Policy::parse("mitigations=auto,nosmt").unwrap().mode, Mode::AutoNoSmt);
     assert!(Policy::parse("mitigations=typo").is_err());
     assert!(Policy::parse("ssb=typo").is_err());
+    assert!(Policy::parse("mitigations=off mitigations").is_err());
+    assert!(Policy::parse("mitigations=off ssb").is_err());
     let a = SpecCaps { features: feature::IBRS | feature::SSBD | feature::SMAP,
         not_affected: Vulnerability::Meltdown.bit() | Vulnerability::Mds.bit(), ..SpecCaps::default() };
     let b = SpecCaps { features: feature::SSBD, not_affected: Vulnerability::Meltdown.bit(), ..SpecCaps::default() };
@@ -31,10 +33,11 @@ fn main() {
     assert_eq!(unknown.features, 0);
     let mut raw = SpecCaps::default();
     raw.raw[0] = 1 << 29;
-    let intel = x86_decode::decode(raw, || (1 << 0) | (1 << 5) | (1 << 1));
+    let intel = x86_decode::decode(raw, || (1 << 0) | (1 << 5) | (1 << 1) | (1 << 62));
     assert_ne!(intel.features & feature::EIBRS, 0);
     assert_ne!(intel.not_affected & Vulnerability::Meltdown.bit(), 0);
     assert_ne!(intel.not_affected & Vulnerability::Mds.bit(), 0);
+    assert_ne!(intel.not_affected & Vulnerability::Its.bit(), 0);
     raw.vendor = *b"AuthenticAMD"; raw.raw[0] = 0;
     raw.raw[3] = (1 << 8) | (1 << 29);
     let amd = x86_decode::decode(raw, || panic!("AMD without ARCH_CAPS read Intel MSR"));

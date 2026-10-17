@@ -14,7 +14,7 @@ pub fn decode(mut caps: SpecCaps, read_arch_caps: impl FnOnce() -> u64) -> SpecC
     if caps.features & F::ARCH_CAPS != 0 {
         caps.raw[4] = read_arch_caps();
         for (bit, family) in [(0,V::Meltdown),(4,V::Ssb),(5,V::Mds),(8,V::Taa),
-            (20,V::Bhi),(26,V::Gds),(27,V::Rfds)] {
+            (20,V::Bhi),(26,V::Gds),(27,V::Rfds),(62,V::Its)] {
             if caps.raw[4] & (1 << bit) != 0 { caps.not_affected |= family.bit(); }
         }
         if caps.raw[4] & ((1 << 13)|(1 << 14)|(1 << 15)) == ((1 << 13)|(1 << 14)|(1 << 15)) {

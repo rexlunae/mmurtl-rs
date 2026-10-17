@@ -22,7 +22,12 @@ impl Policy {
     pub fn parse(args: &str) -> Result<Self, &'static str> {
         let mut policy = Self::automatic();
         for arg in args.split_ascii_whitespace() {
-            let Some((key, value)) = arg.split_once('=') else { continue; };
+            let Some((key, value)) = arg.split_once('=') else {
+                if arg == "mitigations" || FAMILIES.iter().any(|(_, name)| *name == arg) {
+                    return Err("missing mitigation policy value");
+                }
+                continue;
+            };
             if key == "mitigations" {
                 policy.mode = match value { "off" => Mode::Off, "auto" => Mode::Auto,
                     "auto,nosmt" => Mode::AutoNoSmt, _ => return Err("invalid mitigations mode") };

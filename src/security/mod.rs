@@ -57,6 +57,13 @@ pub fn report() {
             let _ = write!(line, "[SPEC] CPU{} vendor={} id={:#x} features={:#x} immunity={:#x} raw={:x?}\n",
                 cpu, core::str::from_utf8(&caps.vendor).unwrap_or("unknown").trim(), caps.identity, caps.features, caps.not_affected, &caps.raw[..8]);
             crate::serial::write_str(&line);
+            #[cfg(target_arch = "aarch64")]
+            {
+                let mut firmware: heapless::String<128> = heapless::String::new();
+                let _ = write!(firmware, "[SPEC] CPU{} SMCCC_VERSION={:#x} WA1={} WA2={} WA3={}\n",
+                    cpu, caps.raw[8], caps.raw[4] as i64, caps.raw[5] as i64, caps.raw[6] as i64);
+                crate::serial::write_str(&firmware);
+            }
         }
     }
     crate::serial::write_str("[SPEC] policy: ");
