@@ -74,7 +74,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // Switch from PIC/PIT to Local APIC + I/O APIC
     serial::write_str("[INIT] APIC...\n");
-    super::apic::init();
+    if !super::apic::init() { super::interrupts::unmask_console(); }
+    super::serial::enable_rx_irq();
 
     // Initialize the scheduler on the BSP (must precede AP boot: APs
     // register themselves and start their timers as they come up)

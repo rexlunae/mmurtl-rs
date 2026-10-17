@@ -94,7 +94,8 @@ user-arm64:
 	cd user && RUSTFLAGS="-C relocation-model=static" \
 		cargo build -Z build-std=core --target aarch64-unknown-none-softfloat --release
 
-# exFAT disk images with the programs in /BIN (needs root for the loop device)
+# New exFAT images with programs in /BIN (Python 3 + exfatprogs, no root).
+# Existing images are preserved; remove one explicitly to recreate it.
 disk: user
 	./tools/make-disk.sh disk-amd64.img x86_64-unknown-none
 

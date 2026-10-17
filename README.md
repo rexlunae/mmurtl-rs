@@ -36,7 +36,7 @@ is common to both unless marked.
   Pi's BCM2836 interrupt controller + generic timer tick, PSCI or
   spin-table multi-core boot, virtio-mmio (legacy + modern)
 - ✅ **(amd64)** Input: PS/2 keyboard driver — scancode set 1 → ASCII with shift, char queue
-- ✅ Filesystem: exFAT — full API: subdirectories, mkdir, create, read,
+- ✅ Filesystems: FAT12/16/32 with VFAT long filenames, plus exFAT — full API: subdirectories, mkdir, create, read,
   overwrite, append, delete; interoperable with Linux in both directions,
   `fsck.exfat`-clean after kernel writes
 - ✅ IPC: blocking RQB message passing — `send_rqb` / `receive_rqb` /
@@ -73,10 +73,22 @@ Build and launch the port matching your host architecture automatically:
 
 `--arch` also accepts `x86_64` and `aarch64`. The launcher can run from any
 directory and requires `make`, the project's Rust toolchain, and the QEMU
-system emulator for the selected architecture. amd64 uses BIOS boot;
+system emulator for the selected architecture. First launch also needs Python 3
+and exfatprogs (`mkfs.exfat`, `fsck.exfat`) to create the data disk;
+no root privileges or filesystem mounts are needed. amd64 uses BIOS boot;
 arm64 uses the kernel ELF directly. Set `ARM64_SMP` and `ARM64_GIC` to
 customize the arm64 defaults (4 CPUs and GICv3). Relative paths in extra
 QEMU arguments resolve from the directory where you invoke the launcher.
+
+The launcher creates `disk-amd64.img` or `disk-arm64.img` in the repository
+on first use, with `/BIN/HELLO.ELF` and `/BIN/SIEVE.ELF`, and attaches it as a
+virtio disk. Subsequent launches preserve and reuse it, including files
+created in the shell. `--disk path/to/image.img` selects an existing FAT or
+exFAT image instead; relative paths use your current directory. Use
+`--no-disk` to boot without a data disk or attach one manually through
+extra QEMU arguments. `make disk` and `make disk-arm64` also create images,
+but refuse to overwrite existing ones. To refresh a disk, keep a backup
+and explicitly remove or move the old image before recreating it.
 
 ### Interactive shell
 
@@ -92,6 +104,9 @@ The CLI is a Rust adaptation of the original
 currently running as a kernel task. Commands are case insensitive and
 paths may use `/` or `\`; quote arguments containing spaces. Backspace
 edits the input, and Ctrl-C/Ctrl-U in the serial terminal cancel the line.
+UART receive interrupts keep collecting input during foreground commands;
+if bytes are lost, queued input is discarded through a new Enter boundary.
+`PS` uses a fixed snapshot buffer, with no per-command heap allocation.
 
 ```text
 /> HELP
@@ -110,15 +125,12 @@ edits the input, and Ctrl-C/Ctrl-U in the serial terminal cancel the line.
 /> RUN hello
 ```
 
-File commands require an attached exFAT disk. To run the Rust programs,
-build a disk with `make disk` (amd64) or `make disk-arm64`, then attach it:
+The default launcher supplies the exFAT disk and user programs automatically.
+To select another existing disk:
 
 ```bash
-./tools/run-qemu.sh --amd64 -- \
-    -drive format=raw,file=disk-amd64.img,if=virtio
-./tools/run-qemu.sh --arm64 -- \
-    -drive if=none,format=raw,file=disk-arm64.img,id=hd0 \
-    -device virtio-blk-device,drive=hd0
+./tools/run-qemu.sh --amd64 --disk my-amd64-disk.img
+./tools/run-qemu.sh --arm64 --disk my-arm64-disk.img
 ```
 
 `RUN` loads a native ELF program, waits for it to exit, and returns to the
@@ -146,6 +158,56 @@ make bios user
 python3 tools/test-shell.py --arch amd64 --cpus 4
 make arm64 user-arm64
 python3 tools/test-shell.py --arch arm64 --cpus 4
+```
+
+### FAT and EFI volumes
+
+The filesystem layer supports **FAT12, FAT16, FAT32, and exFAT** on the
+current virtio block device. FAT discovery recognizes whole-volume images,
+primary MBR partitions, and GPT partitions, including EFI system partitions.
+There is one mounted filesystem at `/`; drive letters and multiple mounts
+are not implemented. EFI system partitions use FAT; the kernel accesses
+that format directly rather than relying on the firmware's boot-time file
+protocol. See the [UEFI media-access specification](https://uefi.org/specs/UEFI/2.10/13_Protocols_Media_Access.html).
+
+FAT operations include listing, reading, creating, overwriting, appending,
+deleting files and empty directories, and creating/growing directories.
+VFAT long names support up to 255 UTF-16 code units, including Unicode
+and spaces, with checksum/sequence validation and unique 8.3 aliases.
+The serial shell accepts UTF-8 names (quote names containing spaces);
+its input line and resolved paths remain limited to 256 UTF-8 bytes.
+Short-name lookup supports DOS case flags and the default CP437 code page.
+exFAT currently supports ASCII names only.
+
+To try an empty FAT32 disk (requires dosfstools):
+
+```bash
+truncate -s 64M fat32.img
+mkfs.fat -F 32 fat32.img
+./tools/run-qemu.sh --disk fat32.img
+# At the prompt: WRITE "Long filename.txt" "hello", then TYPE "Long filename.txt"
+```
+
+FAT currently requires 512-byte sectors, limits the cached FAT and loaded
+directories to 8 MiB each, and limits individual file operations to 16 MiB
+(the shell has a stricter 1 MiB read limit). FAT12/16 fixed root directories
+cannot grow. Extended MBR partitions, other OEM code pages, rename, and
+journaling are not implemented. New entries use a fixed valid timestamp
+until an RTC service exists. Read-only file attributes are honored; disk
+write failures stop further operations on that volume until remounting.
+The block layer still supports virtio only; FAT support does not add IDE,
+AHCI, or NVMe hardware drivers.
+
+Additional validation:
+
+```bash
+python3 tools/test-launcher.py       # disk creation/selection and preservation
+python3 tools/test-fat.py            # host FAT tests; requires dosfstools
+rustc --edition=2021 --test tools/tests/console_input.rs -o /tmp/mmurtl-input-tests
+/tmp/mmurtl-input-tests
+python3 tools/test-shell.py --arch amd64 --filesystem fat12
+python3 tools/test-shell.py --arch arm64 --filesystem fat16
+python3 tools/test-shell.py --arch arm64 --filesystem fat32
 ```
 
 ### arm64

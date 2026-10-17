@@ -43,14 +43,13 @@ impl Command {
                     quote = Some(c);
                     continue;
                 }
-                if !c.is_ascii() {
-                    return Err("only ASCII input is supported");
-                }
-                if end == MAX_LINE {
+                let mut bytes = [0u8; 4];
+                let encoded = c.encode_utf8(&mut bytes).as_bytes();
+                if end + encoded.len() > MAX_LINE {
                     return Err("command too long");
                 }
-                cmd.bytes[end] = c as u8;
-                end += 1;
+                cmd.bytes[end..end + encoded.len()].copy_from_slice(encoded);
+                end += encoded.len();
             }
             if quote.is_some() {
                 return Err("unclosed quote");
@@ -89,8 +88,8 @@ impl Path {
         core::str::from_utf8(&self.bytes[..self.len]).unwrap()
     }
     pub fn resolve(&self, name: &str) -> Result<Self, &'static str> {
-        if !name.is_ascii() || name.contains(':') {
-            return Err("use an ASCII path without a drive letter");
+        if name.contains(':') || name.chars().any(char::is_control) {
+            return Err("use a path without a drive letter or control characters");
         }
         let mut path = if name.starts_with(['/', '\\']) {
             Self::root()
@@ -144,7 +143,10 @@ mod tests {
     fn limits() {
         assert!(Command::parse(&"x".repeat(MAX_LINE + 1)).is_err());
         assert!(Command::parse(&"x ".repeat(MAX_ARGS + 1)).is_err());
-        assert!(Command::parse("é").is_err());
+        assert_eq!(
+            Command::parse("type \"café 😀.txt\"").unwrap().arg(1),
+            "café 😀.txt"
+        );
     }
     #[test]
     fn paths() {

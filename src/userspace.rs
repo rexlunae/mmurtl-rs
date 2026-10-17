@@ -132,10 +132,10 @@ pub fn demo() {
     spawn_elf_programs();
 }
 
-/// Load every `*.ELF` in /BIN on the exFAT disk and run it as a user task
+/// Load every `*.ELF` in /BIN on the mounted disk and run it as a user task
 fn spawn_elf_programs() {
     use alloc::string::String;
-    let entries = match crate::fs::exfat::read_dir("BIN") {
+    let entries = match crate::fs::read_dir("BIN") {
         Some(e) => e,
         None => {
             crate::serial::write_line("[USER] No /BIN directory on disk — no ELF programs to run");
@@ -150,7 +150,7 @@ fn spawn_elf_programs() {
         let mut path = String::from("BIN/");
         path.push_str(&name);
         let mut line: heapless::String<128> = heapless::String::new();
-        let tid = match crate::fs::exfat::read_file(&path)
+        let tid = match crate::fs::read_file(&path)
             .ok_or("read failed")
             .and_then(|img| crate::memory::user::load_elf(&img))
         {

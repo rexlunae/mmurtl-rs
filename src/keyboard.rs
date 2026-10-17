@@ -1,64 +1,134 @@
-//! Console input — a lock-free character queue, plus the amd64 PS/2
+//! Console input — a bounded character/event queue, plus the amd64 PS/2
 //! keyboard driver (scancode set 1 → characters) that feeds it.
 //!
 //! On amd64 the IRQ1 handler feeds raw scancodes in; this module tracks
 //! modifier state (shift) and translates make codes to ASCII. On arm64 the
 //! PL011 UART's RX interrupt pushes characters directly. Either way, tasks
-//! consume them with `pop_char`.
+//! consume them with `pop_input`.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 
-// ========================================================================
-// Character ring buffer (single producer: IRQ handler on the BSP;
-// consumers pop with a CAS loop)
-// ========================================================================
+const QUEUE_SIZE: usize = 1024;
 
-// Hold several complete shell lines when the UART delivers a pasted
-// command in a single interrupt, before the CLI next gets scheduled.
-const QUEUE_SIZE: usize = 1024; // power of two
-static OVERFLOW: AtomicBool = AtomicBool::new(false);
+#[derive(Debug, PartialEq, Eq)]
+pub enum InputEvent {
+    Byte(u8),
+    Lost,
+}
 
-static QUEUE: [AtomicU8; QUEUE_SIZE] = {
-    const ZERO: AtomicU8 = AtomicU8::new(0);
-    [ZERO; QUEUE_SIZE]
-};
-static HEAD: AtomicUsize = AtomicUsize::new(0); // next write
-static TAIL: AtomicUsize = AtomicUsize::new(0); // next read
-
-/// Queue one character of console input (keyboard IRQ on amd64, UART RX
-/// on arm64)
-pub fn push_char(c: u8) {
-    let head = HEAD.load(Ordering::Relaxed);
-    let tail = TAIL.load(Ordering::Acquire);
-    if head.wrapping_sub(tail) >= QUEUE_SIZE {
-        OVERFLOW.store(true, Ordering::Release);
-        return; // full — drop
+struct InputQueue {
+    bytes: [u8; QUEUE_SIZE],
+    head: usize,
+    tail: usize,
+    len: usize,
+    lost: bool,
+    discarding: bool,
+}
+impl InputQueue {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; QUEUE_SIZE],
+            head: 0,
+            tail: 0,
+            len: 0,
+            lost: false,
+            discarding: false,
+        }
     }
-    QUEUE[head % QUEUE_SIZE].store(c, Ordering::Relaxed);
-    HEAD.store(head.wrapping_add(1), Ordering::Release);
-}
-
-/// Lost input must invalidate a shell line, never execute a truncated
-/// command (which could otherwise name a different file).
-pub fn take_overflow() -> bool {
-    OVERFLOW.swap(false, Ordering::AcqRel)
-}
-
-/// Pop one character from the keyboard queue (any task, any CPU)
-pub fn pop_char() -> Option<u8> {
-    loop {
-        let tail = TAIL.load(Ordering::Relaxed);
-        let head = HEAD.load(Ordering::Acquire);
-        if tail == head {
+    fn invalidate(&mut self) {
+        // Forget *all* buffered lines. Older newlines can never clear
+        // recovery for a later truncated line.
+        self.head = 0;
+        self.tail = 0;
+        self.len = 0;
+        self.lost = true;
+        self.discarding = true;
+    }
+    fn push(&mut self, byte: u8) {
+        if self.discarding {
+            if matches!(byte, b'\n' | b'\r') {
+                self.discarding = false;
+            }
+            return;
+        }
+        if self.len == QUEUE_SIZE {
+            self.invalidate();
+            if matches!(byte, b'\n' | b'\r') {
+                self.discarding = false;
+            }
+            return;
+        }
+        self.bytes[self.head] = byte;
+        self.head = (self.head + 1) % QUEUE_SIZE;
+        self.len += 1;
+    }
+    fn pop(&mut self) -> Option<InputEvent> {
+        if self.lost {
+            self.lost = false;
+            return Some(InputEvent::Lost);
+        }
+        if self.len == 0 {
             return None;
         }
-        let c = QUEUE[tail % QUEUE_SIZE].load(Ordering::Relaxed);
-        if TAIL
-            .compare_exchange(tail, tail.wrapping_add(1), Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            return Some(c);
+        let byte = self.bytes[self.tail];
+        self.tail = (self.tail + 1) % QUEUE_SIZE;
+        self.len -= 1;
+        Some(InputEvent::Byte(byte))
+    }
+}
+// Keyboard and UART IRQs plus the UART poll fallback can all produce.
+// Disable local interrupts while locking, so an IRQ never waits on a
+// preempted task on its own CPU. Each critical section is constant-time.
+static INPUT: spin::Mutex<InputQueue> = spin::Mutex::new(InputQueue::new());
+
+pub fn push_char(c: u8) {
+    crate::arch::without_interrupts(|| INPUT.lock().push(c));
+}
+
+/// Hardware RX errors must flush the UART first; then call this before
+/// accepting new bytes. Recovery ends at a new input line boundary.
+pub fn input_lost() {
+    crate::arch::without_interrupts(|| INPUT.lock().invalidate());
+}
+
+pub fn pop_input() -> Option<InputEvent> {
+    crate::arch::without_interrupts(|| INPUT.lock().pop())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn overflow_cannot_execute_a_later_truncated_command() {
+        let mut queue = InputQueue::new();
+        for _ in 0..QUEUE_SIZE - 10 {
+            queue.push(b'\n');
         }
+        for &c in b"DEL backup.txt" {
+            queue.push(c);
+        }
+        assert_eq!(queue.pop(), Some(InputEvent::Lost));
+        assert_eq!(queue.pop(), None);
+        queue.push(b'\n'); // a later Enter must not execute DEL backup
+        assert_eq!(queue.pop(), None);
+        for &c in b"ECHO safe\n" {
+            queue.push(c);
+        }
+        for &expected in b"ECHO safe\n" {
+            assert_eq!(queue.pop(), Some(InputEvent::Byte(expected)));
+        }
+        assert_eq!(queue.pop(), None);
+    }
+    #[test]
+    fn loss_event_precedes_recovered_bytes() {
+        let mut queue = InputQueue::new();
+        queue.push(b'x');
+        queue.invalidate();
+        for &c in b"truncated\rECHO safe\n" {
+            queue.push(c);
+        }
+        assert_eq!(queue.pop(), Some(InputEvent::Lost));
+        assert_eq!(queue.pop(), Some(InputEvent::Byte(b'E')));
     }
 }
 

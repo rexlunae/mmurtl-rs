@@ -4,7 +4,7 @@
 
 mod parse;
 
-use crate::fs::exfat;
+use crate::fs;
 use crate::{scheduler, serial};
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -40,21 +40,56 @@ extern "C" fn shell_task() -> ! {
     let mut line: heapless::String<MAX_LINE> = heapless::String::new();
     let mut overflow = false;
     let mut was_cr = false;
+    let mut utf8 = [0u8; 4];
+    let mut pending = 0usize;
+    let mut invalid = false;
     prompt(&cwd);
     loop {
-        if crate::keyboard::take_overflow() {
-            overflow = true;
-            serial::write_str("\nConsole input overflow; press Enter to discard the line.\n");
-        }
-        // COM1 RX is polled on amd64; arm64 RX interrupts feed the queue.
-        #[cfg(target_arch = "x86_64")]
-        let c = crate::arch::serial::try_read().or_else(crate::keyboard::pop_char);
-        #[cfg(target_arch = "aarch64")]
-        let c = crate::keyboard::pop_char();
-        let Some(c) = c else {
-            scheduler::sleep_ms(10);
-            continue;
+        crate::arch::serial::poll_input();
+        let c = match crate::keyboard::pop_input() {
+            Some(crate::keyboard::InputEvent::Byte(c)) => c,
+            Some(crate::keyboard::InputEvent::Lost) => {
+                line.clear();
+                overflow = false;
+                invalid = false;
+                pending = 0;
+                was_cr = false;
+                serial::write_str(
+                    "\nConsole input lost; queued input discarded through the next Enter.\n",
+                );
+                prompt(&cwd);
+                continue;
+            }
+            None => {
+                scheduler::sleep_ms(10);
+                continue;
+            }
         };
+        if c >= 0x80 && !overflow {
+            was_cr = false;
+            utf8[pending] = c;
+            pending += 1;
+            match core::str::from_utf8(&utf8[..pending]) {
+                Ok(text) => {
+                    if line.push_str(text).is_err() {
+                        overflow = true;
+                    } else {
+                        serial::write_str(text);
+                    }
+                    pending = 0;
+                }
+                Err(e) if e.error_len().is_none() && pending < 4 => {}
+                Err(_) => {
+                    invalid = true;
+                    pending = 0;
+                }
+            }
+            continue;
+        }
+        if pending != 0 {
+            invalid = true;
+            pending = 0;
+        }
         if c == b'\n' && was_cr {
             was_cr = false;
             continue;
@@ -63,19 +98,23 @@ extern "C" fn shell_task() -> ! {
         match c {
             b'\r' | b'\n' => {
                 serial::write_str("\n");
-                if overflow {
+                if invalid {
+                    serial::write_line("Error: invalid UTF-8 input; discarded");
+                } else if overflow {
                     serial::write_line("Error: command too long; discarded");
                 } else if let Err(e) = execute(&line, &mut cwd) {
                     out!("Error: {}\n", e);
                 }
                 line.clear();
                 overflow = false;
+                invalid = false;
                 prompt(&cwd);
             }
             3 | 21 => {
                 // Ctrl-C / Ctrl-U: cancel input, not a running program
                 line.clear();
                 overflow = false;
+                invalid = false;
                 serial::write_str("^C\n");
                 prompt(&cwd);
             }
@@ -142,13 +181,13 @@ fn execute(line: &str, cwd: &mut Path) -> Result<(), &'static str> {
              VER / MEM / PS       Version, free memory, tasks\n\
              UPTIME / ECHO text    Uptime, print text\n\
              Backspace edits; Ctrl-U or Ctrl-C cancels the input line.\n\
-             One exFAT volume at /; RUN searches current directory then /BIN.\n",
+             One FAT or exFAT volume at /; RUN searches current directory then /BIN.\n",
         ),
         "CLS" if count == 0 => serial::write_str("\x1b[2J\x1b[H"),
         "DIR" | "LS" if count <= 1 => {
             let path = cwd.resolve(if count == 0 { "." } else { cmd.arg(1) })?;
-            let entries = exfat::read_dir(path.as_str())
-                .ok_or("directory unavailable (attach an exFAT disk)")?;
+            let entries = fs::read_dir(path.as_str())
+                .ok_or("directory unavailable (attach a FAT or exFAT disk)")?;
             out!("Directory {}\n", path.as_str());
             for (name, dir, size) in entries {
                 if dir {
@@ -163,7 +202,7 @@ fn execute(line: &str, cwd: &mut Path) -> Result<(), &'static str> {
                 out!("{}\n", cwd.as_str());
             } else {
                 let path = cwd.resolve(cmd.arg(1))?;
-                if path.as_str() != "/" && exfat::read_dir(path.as_str()).is_none() {
+                if path.as_str() != "/" && fs::read_dir(path.as_str()).is_none() {
                     return Err("no such directory");
                 }
                 *cwd = path;
@@ -213,18 +252,20 @@ fn execute(line: &str, cwd: &mut Path) -> Result<(), &'static str> {
         "COPY" => {
             let (from, to) = two()?;
             let bytes = read_file(&cwd.resolve(from)?)?;
-            exfat::create_file(cwd.resolve(to)?.as_str(), &bytes)?;
+            fs::create_file(cwd.resolve(to)?.as_str(), &bytes)?;
         }
         "WRITE" => {
             let (path, text) = two()?;
-            exfat::write_file(cwd.resolve(path)?.as_str(), text.as_bytes())?;
+            fs::write_file(cwd.resolve(path)?.as_str(), text.as_bytes())?;
         }
-        "MD" | "MKDIR" => exfat::mkdir(cwd.resolve(one()?)?.as_str())?,
+        "MD" | "MKDIR" => fs::mkdir(cwd.resolve(one()?)?.as_str())?,
         "DEL" | "RM" | "RD" | "RMDIR" => {
             let path = cwd.resolve(one()?)?;
-            let is_dir = exfat::read_dir(path.as_str()).is_some();
+            let is_dir = fs::read_dir(path.as_str()).is_some();
             let want_dir = matches!(upper.as_str(), "RD" | "RMDIR");
-            if want_dir && (path.as_str() == cwd.as_str() || path.as_str() == "/") {
+            let same_dir = matches!((fs::directory_id(path.as_str()), fs::directory_id(cwd.as_str())),
+                (Some(a), Some(b)) if a == b);
+            if want_dir && (same_dir || path.as_str() == "/") {
                 return Err("cannot remove the current or root directory");
             }
             if is_dir != want_dir {
@@ -234,7 +275,7 @@ fn execute(line: &str, cwd: &mut Path) -> Result<(), &'static str> {
                     "use DEL to remove a file"
                 });
             }
-            exfat::delete(path.as_str())?;
+            fs::delete(path.as_str())?;
         }
         "RUN" => run(cwd, one()?)?,
         "VER" if count == 0 => out!(
@@ -252,7 +293,10 @@ fn execute(line: &str, cwd: &mut Path) -> Result<(), &'static str> {
             scheduler::jiffies() * 1000 / scheduler::SCHEDULER_FREQUENCY_HZ as u64
         ),
         "PS" if count == 0 => {
-            for (id, name, state, user) in scheduler::task_snapshot() {
+            let mut tasks = [(0, "", scheduler::TaskState::Exited, false);
+                scheduler::MAX_TASKS + scheduler::MAX_CPUS];
+            let (count, truncated) = scheduler::task_snapshot(&mut tasks);
+            for &(id, name, state, user) in &tasks[..count] {
                 out!(
                     "{:>4} {:<16} {:?} {}\n",
                     id,
@@ -260,6 +304,9 @@ fn execute(line: &str, cwd: &mut Path) -> Result<(), &'static str> {
                     state,
                     if user { "user" } else { "kernel" }
                 );
+            }
+            if truncated {
+                serial::write_line("(more tasks than fit in this snapshot)");
             }
         }
         "ECHO" => {
@@ -287,25 +334,14 @@ fn execute(line: &str, cwd: &mut Path) -> Result<(), &'static str> {
 // file reads until streaming file APIs and a reclaiming allocator exist.
 fn read_file(path: &Path) -> Result<alloc::vec::Vec<u8>, &'static str> {
     const LIMIT: u64 = 1024 * 1024;
-    let name = path
-        .as_str()
-        .rsplit('/')
-        .next()
-        .ok_or("missing file name")?;
-    let parent = path.resolve("..")?;
-    let entries =
-        exfat::read_dir(parent.as_str()).ok_or("directory unavailable (attach an exFAT disk)")?;
-    let (_, dir, size) = entries
-        .iter()
-        .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
-        .ok_or("file not found")?;
-    if *dir {
+    let (dir, size) = fs::metadata(path.as_str()).ok_or("file not found")?;
+    if dir {
         return Err("is a directory");
     }
-    if *size > LIMIT {
+    if size > LIMIT {
         return Err("file exceeds the shell's 1 MiB read limit");
     }
-    exfat::read_file(path.as_str()).ok_or("file read failed")
+    fs::read_file(path.as_str()).ok_or("file read failed")
 }
 
 fn run(cwd: &Path, name: &str) -> Result<(), &'static str> {

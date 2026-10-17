@@ -2,7 +2,8 @@
 """Boot-test the CLI with a disposable exFAT disk; never touches user disks.
 
 Build first: make bios user (amd64), or make arm64 user-arm64 (arm64).
-Requires QEMU, mkfs.exfat, and fsck.exfat. Uses software emulation.
+Requires QEMU and exfatprogs, or dosfstools + rustc for FAT images.
+Uses software emulation.
 """
 import argparse
 import json
@@ -11,102 +12,17 @@ from pathlib import Path
 import select
 import shutil
 import socket
-import struct
 import subprocess
 import tempfile
 import time
 
+from make_disk import create_image
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def rotate16(value):
-    return ((value >> 1) | (value << 15)) & 0xffff
 
-
-def entry(name, cluster, size, directory=False):
-    """A minimal exFAT entry set for a deterministic test fixture."""
-    encoded = name.encode('utf-16le')
-    entries = bytearray(64 + 32 * ((len(name) + 14) // 15))
-    entries[0:2] = bytes([0x85, len(entries) // 32 - 1])
-    struct.pack_into('<H', entries, 4, 0x10 if directory else 0x20)
-    entries[32:34] = bytes([0xc0, 1 if directory else 3])
-    entries[35] = len(name)
-    hashed = 0
-    for byte in name.upper().encode('utf-16le'):
-        hashed = (rotate16(hashed) + byte) & 0xffff
-    struct.pack_into('<H', entries, 36, hashed)
-    struct.pack_into('<Q', entries, 40, size)
-    struct.pack_into('<I', entries, 52, cluster)
-    struct.pack_into('<Q', entries, 56, size)
-    for index in range((len(name) + 14) // 15):
-        offset = 64 + index * 32
-        entries[offset] = 0xc1
-        chunk = encoded[index * 30:(index + 1) * 30]
-        entries[offset + 2:offset + 2 + len(chunk)] = chunk
-    checksum = 0
-    for index, byte in enumerate(entries):
-        if index not in (2, 3):
-            checksum = (rotate16(checksum) + byte) & 0xffff
-    struct.pack_into('<H', entries, 2, checksum)
-    return entries
-
-
-def make_fixture(disk, program):
-    with disk.open('wb') as stream:
-        stream.truncate(16 * 1024 * 1024)
-    subprocess.run(['mkfs.exfat', str(disk)], check=True, stdout=subprocess.DEVNULL)
-    data = bytearray(disk.read_bytes())
-    sector = 1 << data[108]
-    cluster_bytes = sector << data[109]
-    fat = struct.unpack_from('<I', data, 80)[0] * sector
-    heap = struct.unpack_from('<I', data, 88)[0] * sector
-    count = struct.unpack_from('<I', data, 92)[0]
-    root = struct.unpack_from('<I', data, 96)[0]
-
-    def offset(cluster):
-        return heap + (cluster - 2) * cluster_bytes
-
-    root_offset = offset(root)
-    bitmap_offset = None
-    free_entry = None
-    for pos in range(root_offset, root_offset + cluster_bytes, 32):
-        if data[pos] == 0x81:
-            bitmap_offset = offset(struct.unpack_from('<I', data, pos + 20)[0])
-        if data[pos] == 0:
-            free_entry = pos
-            break
-    assert bitmap_offset is not None and free_entry is not None
-
-    def allocate(number):
-        run = 0
-        for index in range(count):
-            if data[bitmap_offset + index // 8] & (1 << (index % 8)):
-                run = 0
-            else:
-                run += 1
-            if run == number:
-                first = index - number + 1
-                for bit in range(first, index + 1):
-                    data[bitmap_offset + bit // 8] |= 1 << (bit % 8)
-                return first + 2
-        raise AssertionError('fixture disk full')
-
-    directory = allocate(1)
-    binary = program.read_bytes()
-    first = allocate((len(binary) + cluster_bytes - 1) // cluster_bytes)
-    data[offset(first):offset(first) + len(binary)] = binary
-    struct.pack_into('<I', data, fat + directory * 4, 0xffffffff)
-    file_set = entry('HELLO.ELF', first, len(binary))
-    data[offset(directory):offset(directory) + len(file_set)] = file_set
-    dir_set = entry('BIN', directory, cluster_bytes, directory=True)
-    data[free_entry:free_entry + len(dir_set)] = dir_set
-    # PercentInUse is optional and excluded from the boot checksum.
-    data[112] = data[12 * sector + 112] = 0xff
-    disk.write_bytes(data)
-    subprocess.run(['fsck.exfat', '-n', str(disk)], check=True, stdout=subprocess.DEVNULL)
-
-
-def smoke(arch, cpus):
+def smoke(arch, cpus, filesystem):
     target = 'x86_64-unknown-none' if arch == 'amd64' else 'aarch64-unknown-none-softfloat'
     program = ROOT / 'user' / 'target' / target / 'release' / 'hello'
     if arch == 'amd64':
@@ -118,11 +34,21 @@ def smoke(arch, cpus):
         args = ['qemu-system-aarch64', '-machine', 'virt,gic-version=3',
                 '-cpu', 'cortex-a72', '-kernel', str(boot), '-nographic', '-monitor', 'none']
     assert boot.is_file() and program.is_file(), 'build kernel/image and user programs first'
-    for tool in [args[0], 'mkfs.exfat', 'fsck.exfat']:
+    dependencies = ['mkfs.exfat', 'fsck.exfat'] if filesystem == 'exfat' else ['mkfs.fat', 'fsck.fat', 'rustc']
+    for tool in [args[0], *dependencies]:
         assert shutil.which(tool), f'{tool} is required'
     with tempfile.TemporaryDirectory(prefix='mmurtl-shell-') as directory:
         disk = Path(directory) / 'disk.img'
-        make_fixture(disk, program)
+        if filesystem == 'exfat':
+            create_image(disk, {'HELLO.ELF': program.read_bytes()})
+        else:
+            bits = filesystem[3:]
+            with disk.open('wb') as stream:
+                stream.truncate({'12': 1440 * 1024, '16': 16 * 1024 * 1024, '32': 64 * 1024 * 1024}[bits])
+            subprocess.run(['mkfs.fat', '-F', bits, str(disk)], check=True, stdout=subprocess.DEVNULL)
+            seed = Path(directory) / 'seed-fat'
+            subprocess.run(['rustc', '--edition=2021', str(ROOT / 'tools/tests/fat_driver.rs'), '-o', str(seed)], check=True)
+            subprocess.run([str(seed), str(disk), '--seed', str(program)], check=True)
         if arch == 'amd64':
             args += ['-drive', f'format=raw,file={disk},if=virtio']
         else:
@@ -193,17 +119,28 @@ def smoke(arch, cpus):
             command(b'md test')
             command(b'path test', prompt=b'/test> ')
             command(b'rd .', b'cannot remove', prompt=b'/test> ')
+            command(b'rd /TEST', b'cannot remove', prompt=b'/test> ')
             command(b'write "a b.txt" "hello shell"', prompt=b'/test> ')
             command(b'type "a b.txt"', b'hello shell', prompt=b'/test> ')
             command(b'copy "a b.txt" copy.txt', prompt=b'/test> ')
             command(b'copy "a b.txt" copy.txt', b'already exists', prompt=b'/test> ')
             command(b'dump copy.txt', b'68 65 6c 6c 6f', prompt=b'/test> ')
+            if filesystem != 'exfat':
+                command('write "café 😀.txt" "unicode data"'.encode(), prompt=b'/test> ')
+                command('type "CAFÉ 😀.TXT"'.encode(), b'unicode data', prompt=b'/test> ')
+                command('del "café 😀.txt"'.encode(), prompt=b'/test> ')
             command(b'cd ..')
             command(b'rd test', b'directory not empty')
             command(b'del test', b'use RD')
             command(b'del "test/a b.txt"')
             command(b'del test/copy.txt')
             command(b'rd test')
+            if filesystem != 'exfat':
+                command(b'md "Long current directory"')
+                command(b'cd "Long current directory"', prompt=b'/Long current directory> ')
+                command(b'rd /LONGCU~1', b'cannot remove', prompt=b'/Long current directory> ')
+                command(b'cd /')
+                command(b'rd "Long current directory"')
             command(b'cd /does-not-exist', b'no such directory')
             command(b'type missing', b'file not found')
             command(b'write bad.elf "not an ELF"')
@@ -223,19 +160,20 @@ def smoke(arch, cpus):
             proc.stdin.flush()
             receive(b'/> ', 5)
             command(b'echo after-crlf', b'after-crlf')
-            print(f'{arch}, {cpus} CPUs: shell, editing, exFAT, and foreground ELF tests passed', flush=True)
+            print(f'{arch}, {cpus} CPUs, {filesystem}: shell, editing, filesystem, and foreground ELF tests passed', flush=True)
         finally:
             proc.terminate()
             proc.wait(timeout=5)
-            log_path = ROOT / 'target' / f'shell-test-{arch}-{cpus}.log'
+            log_path = ROOT / 'target' / f'shell-test-{arch}-{cpus}-{filesystem}.log'
             log_path.write_bytes(log)
             print(f'Log: {log_path}', flush=True)
-        subprocess.run(['fsck.exfat', '-n', str(disk)], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(['fsck.exfat' if filesystem == 'exfat' else 'fsck.fat', '-n', str(disk)], check=True, stdout=subprocess.DEVNULL)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--arch', choices=['amd64', 'arm64'], required=True)
     parser.add_argument('--cpus', type=int, default=4, choices=[1, 2, 4, 8])
+    parser.add_argument('--filesystem', choices=['exfat', 'fat12', 'fat16', 'fat32'], default='exfat')
     options = parser.parse_args()
-    smoke(options.arch, options.cpus)
+    smoke(options.arch, options.cpus, options.filesystem)

@@ -139,6 +139,9 @@ pub fn init() -> bool {
     if let Some(ioapic_base) = madt.ioapic_base {
         let (gsi, flags) = madt.isa_irq_to_gsi(1);
         ioapic_route(ioapic_base, madt.ioapic_gsi_base, gsi, flags, KEYBOARD_VECTOR, local_apic_id());
+        let (gsi, flags) = madt.isa_irq_to_gsi(4);
+        ioapic_route(ioapic_base, madt.ioapic_gsi_base, gsi, flags,
+            crate::arch::interrupts::InterruptIndex::Com1.as_u8(), local_apic_id());
     }
 
     // Fully mask the legacy PIC — the LAPIC/IOAPIC own interrupts now

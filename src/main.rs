@@ -54,9 +54,9 @@ pub fn kernel_run() -> ! {
     serial::write_str("[TEST] Network ARP test...\n");
     virtio::net::arp_demo();
 
-    // Mount the exFAT filesystem and exercise read + create paths
-    serial::write_str("[TEST] exFAT filesystem...\n");
-    fs::exfat::demo();
+    // Discover a FAT volume or mount and exercise the exFAT filesystem
+    serial::write_str("[INIT] Filesystem discovery...\n");
+    fs::init();
 
     // Initialize IPC (blocking RQB message passing)
     serial::write_str("[INIT] IPC subsystem...\n");
