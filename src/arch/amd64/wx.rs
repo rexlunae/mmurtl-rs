@@ -2,6 +2,31 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 const VECTOR: u8 = 0x32;
 static ACK: [AtomicBool; crate::scheduler::MAX_CPUS] = [const { AtomicBool::new(false) }; crate::scheduler::MAX_CPUS];
+static SHOOTDOWN: spin::Mutex<()> = spin::Mutex::new(());
+
+/// Runtime shared-kernel invalidation. The caller has released FRAME_LOCK
+/// and the scheduler lock, and keeps reclaimed frames private until we return.
+pub fn invalidate_shared() {
+    let targets = crate::scheduler::boot_cpu_targets();
+    let _guard = SHOOTDOWN.lock();
+    let current = super::cpu_index();
+    unsafe { flush_all(); }
+    for (cpu, target) in targets.iter().enumerate() {
+        if cpu == current { continue; }
+        if let Some(id) = target {
+            ACK[cpu].store(false, Ordering::Release);
+            super::apic::send_ipi(*id, VECTOR);
+        }
+    }
+    for (cpu, target) in targets.iter().enumerate() {
+        if cpu == current || target.is_none() { continue; }
+        for _ in 0..1000 {
+            if ACK[cpu].load(Ordering::Acquire) { break; }
+            super::apic::pit_wait_ms(1);
+        }
+        assert!(ACK[cpu].load(Ordering::Acquire), "runtime stack TLB shootdown timeout");
+    }
+}
 unsafe fn flush_all() {
     // CR3 alone does not invalidate global translations.
     let cr4: u64;

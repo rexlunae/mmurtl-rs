@@ -6,6 +6,7 @@
 
 pub mod frame_allocator;
 pub mod heap;
+pub mod stacks;
 pub mod user;
 
 pub use frame_allocator::PhysRange;

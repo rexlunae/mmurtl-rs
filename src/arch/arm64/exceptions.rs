@@ -149,12 +149,37 @@ exception_common:
     mov x28, xzr
     mov x29, xzr
     mov x30, xzr
-    mov x1, sp
+    mov x19, x0               // trusted vector kind
+    mov x20, sp               // original saved frame, above random gap
+    mov x0, sp
+    ldr x1, [sp, #264]
+    and x1, x1, #15
+    cmp x1, #0
+    cset x1, eq
+    bl kernel_stack_offset
+    sub sp, sp, x0
+    mov x0, x19
+    mov x1, x20
     bl arm64_exception          // x0 = kind, x1 = frame -> x0 = frame to resume
     mov sp, x0
     bl scheduler_unlock         // releases the lock only if we switched
     mov x0, sp
+    ldr x1, [sp, #264]
+    and x1, x1, #15
+    cmp x1, #0
+    cset x1, eq
+    bl kernel_stack_erase_bottom
+    mov x19, x0
+    mov x0, sp
     bl arm64_user_return_policy
+    mov x0, x19
+    cbz x0, .Lstack_erased
+    mov x1, sp
+.Lstack_erase:
+    str xzr, [x0], #8
+    cmp x0, x1
+    b.lo .Lstack_erase
+.Lstack_erased:
 
     ldp x1, x2, [sp, #256]
     msr elr_el1, x1

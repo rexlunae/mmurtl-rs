@@ -164,6 +164,7 @@ impl Scheduler {
                 REAPING.fetch_add(1, Ordering::SeqCst);
                 let _ = out.push(Reapable {
                     kstack_phys: core::mem::take(&mut t.kstack_phys),
+                    kstack_virt: t.kernel_stack_bottom,
                     space: core::mem::take(&mut t.address_space),
                     slot: t.user_slot.take(),
                 });
@@ -653,12 +654,7 @@ pub fn current_task_name() -> &'static str {
 
 /// Allocate a task stack from the kernel heap
 fn alloc_stack() -> KernelStack {
-    let pages = TASK_STACK_SIZE / 4096;
-    let phys = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_zeroed_contiguous(pages))
-        .flatten()
-        .expect("OOM allocating task stack");
-    let virt = crate::arch::phys_to_virt(phys);
-    KernelStack { virt: virt as u64, phys, size: TASK_STACK_SIZE as u64 }
+    crate::memory::stacks::allocate()
 }
 
 // ========================================================================
@@ -668,6 +664,7 @@ fn alloc_stack() -> KernelStack {
 /// Resources of an exited task, handed to the reaper
 struct Reapable {
     kstack_phys: u64,
+    kstack_virt: u64,
     space: u64,
     slot: Option<u64>,
 }
@@ -704,13 +701,7 @@ extern "C" fn reaper_task() -> ! {
         for r in &batch {
             let mut frames = 0u64;
             if r.kstack_phys != 0 {
-                let pages = (TASK_STACK_SIZE / 4096) as u64;
-                crate::memory::heap::with_frame_allocator(|fa| {
-                    for i in 0..pages {
-                        fa.deallocate_frame(r.kstack_phys + i * 4096);
-                    }
-                });
-                frames += pages;
+                frames += crate::memory::stacks::release(r.kstack_virt, r.kstack_phys);
             }
             if let Some(slot) = r.slot {
                 frames += crate::memory::user::release(r.space, slot) as u64;

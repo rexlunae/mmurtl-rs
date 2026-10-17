@@ -514,6 +514,18 @@ core::arch::global_asm!(
     // Now that we're off the old task's stack, release the scheduler lock
     // (clobbers caller-saved registers — fine, we restore from the stack)
     "call scheduler_unlock",
+    "mov rdi, rsp",
+    "mov rsi, [rsp + 128]",
+    "and esi, 3",
+    "call kernel_stack_erase_bottom",
+    "test rax, rax",
+    "jz 3f",
+    "mov rdi, rax",
+    "mov rcx, rsp",
+    "sub rcx, rdi",
+    "xor eax, eax",
+    "rep stosb",
+    "3:",
     // Restore registers
     "pop r15",
     "pop r14",
@@ -686,6 +698,18 @@ x86_exception_common:
     xor r15d, r15d
     cld
     call x86_exception_dispatch
+    mov rdi, rsp
+    mov rsi, [rsp + 144]
+    and esi, 3
+    call kernel_stack_erase_bottom
+    test rax, rax
+    jz 3f
+    mov rdi, rax
+    mov rcx, rsp
+    sub rcx, rdi
+    xor eax, eax
+    rep stosb
+3:
     pop r15
     pop r14
     pop r13

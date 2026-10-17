@@ -376,6 +376,42 @@ fn kernel_root() -> u64 {
     super::memory::virt_to_phys(core::ptr::addr_of!(L0) as u64)
 }
 
+/// Dedicated high TTBR1 stack region; FRAME_LOCK serializes table mutation.
+pub fn map_stack_page(va: u64, pa: u64, fa: &mut crate::memory::frame_allocator::FrameAllocator) {
+    assert!((0xffff_e000_0000_0000..0xffff_e080_0000_0000).contains(&va));
+    unsafe {
+        let mut table = table_pointer(kernel_root());
+        for level in 0..3 {
+            let entry = table.add(index(va, level));
+            let mut descriptor = core::ptr::read_volatile(entry);
+            if descriptor & VALID == 0 {
+                let frame = fa.allocate_zeroed_frame().expect("stack page table");
+                asm!("dsb ishst");
+                descriptor = frame | TABLE | VALID;
+                core::ptr::write_volatile(entry, descriptor);
+            }
+            assert_eq!(descriptor & (VALID | TABLE), VALID | TABLE);
+            table = table_pointer(descriptor & ADDR_MASK);
+        }
+        let entry = table.add(index(va, 3));
+        assert_eq!(core::ptr::read_volatile(entry) & VALID, 0);
+        core::ptr::write_volatile(entry, pa | TABLE | VALID | ATTR_NORMAL | SH_INNER | AF | PXN | UXN);
+        asm!("dsb ishst", "isb");
+    }
+}
+pub fn stack_page_mapped(va: u64) -> bool {
+    unsafe { walk(kernel_root(), va, false).is_some_and(|entry| core::ptr::read_volatile(entry) & VALID != 0) }
+}
+pub fn unmap_stack_page(va: u64) -> u64 {
+    unsafe {
+        let entry = walk(kernel_root(), va, false).expect("stack page table missing");
+        let descriptor = core::ptr::read_volatile(entry);
+        assert_ne!(descriptor & VALID, 0);
+        core::ptr::write_volatile(entry, 0);
+        descriptor & ADDR_MASK
+    }
+}
+
 fn alloc_zeroed_frame() -> Option<u64> {
     let pa = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_zeroed_frame())??;
     Some(pa)

@@ -178,4 +178,5 @@ static GLOBAL_ALLOC: BumpAllocator = BumpAllocator::new();
 /// Initialize the kernel heap
 pub fn init_heap() {
     with_frame_allocator(|fa| GLOBAL_ALLOC.init(fa)).expect("frame allocator before heap");
+    crate::memory::stacks::init();
 }
