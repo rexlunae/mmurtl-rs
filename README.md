@@ -1390,3 +1390,49 @@ frame, attempt a RELRO pointer write, then restart HELLO ten times and
 require distinct entry addresses. CANARY/RELRO are stored with `.TEST`
 extensions in disposable images so the normal boot completion checks do
 not treat an intentional protection fault as an ordinary program failure.
+
+### Kernel forward-edge CFI
+
+Both kernel targets build kernel/core/alloc with KCFI. Compiler-generated
+indirect calls check a function type hash before transferring control.
+On x86, only UD2 sites listed in the retained `.kcfi_traps` table receive
+CFI diagnostics; ARM recognizes the compiler's reserved BRK encoding.
+Failures halt the CPU through bounded, lock-free UART output, with PC and
+target addresses redacted unless `debug-addresses` is explicitly built.
+Raw assembly context restores and trusted assembly handoffs do not gain
+type checks from KCFI. This is architectural control-flow protection and
+does not prevent speculative attacks.
+
+x86 also emits ENDBR64 and disables compiler jump tables to avoid NO_TRACK
+branches. Every admitted CPU must report CET-IBT before per-CPU entry code
+enables CR4.CET and supervisor ENDBR enforcement. User CET, shadow stacks,
+legacy compatibility and NO_TRACK bypasses remain disabled. Vector, syscall,
+copy and trampoline assembly entries carry explicit landing pads; #CP
+receives a fatal kernel CFI diagnostic. This QEMU version exposes no CET-IBT,
+so its feature gating and emitted code are tested here, but positive x86
+hardware enforcement still needs a capable emulator or host.
+
+ARM emits BTI pads and marks shared kernel text GP when all admitted CPUs
+support BTI. Strict SCTLR_EL1.BT1 landing compatibility is applied per CPU;
+GP descriptors provide enforcement. Trusted Rust handoffs use x16 call
+semantics, and exception fixups clear pending BTYPE before returning to an
+ordinary recovery instruction. User ELF GP properties are not implemented.
+Unsupported CPUs retain KCFI with inert architectural landing instructions.
+These baseline defenses also remain active under `mitigations=off`.
+
+CI audits optimized type checks, trap records, compiler/assembly landing
+pads and feature-policy ownership. Deliberate fault images are opt-in:
+```sh
+make bios arm64 KERNEL_FEATURES=test-cfi
+python3 tools/test-cfi.py --arch amd64
+python3 tools/test-cfi.py --arch arm64
+make arm64 KERNEL_FEATURES=test-bti
+python3 tools/test-cfi.py --arch arm64 --kind bti
+make bios KERNEL_FEATURES=test-ibt
+python3 tools/test-cfi.py --arch amd64 --kind ibt --allow-unavailable
+make bios arm64  # restore normal images
+python3 tools/test-kernel-cfi.py
+```
+The landing tests attempt a transfer to an instruction without a landing
+pad. ARM `-cpu max` positively traps this transfer; unsupported x86 tests
+explicitly skip and do not claim enforcement.

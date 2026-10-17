@@ -50,6 +50,7 @@ global_asm!(
 
     .macro VENTRY kind
     .balign 0x80
+    bti jc
     sub sp, sp, #272
     .if \kind == 4
     // No stack access until the synchronous guard check is complete.
@@ -100,6 +101,7 @@ exception_vectors:
 
     .global exception_common
 exception_common:
+    bti jc
     stp x2, x3, [sp, #16]
     stp x4, x5, [sp, #32]
     stp x6, x7, [sp, #48]
@@ -278,6 +280,7 @@ unsafe extern "C" fn arm64_exception(kind: u64, frame: *mut TaskContext) -> u64 
         // Kernel sync: `svc` is a voluntary yield; anything else is a bug
         4 => {
             let esr = esr();
+            if esr >> 26 == 0x0d {crate::cfi::fatal(b"BTI",(*frame).elr,Some((*frame).elr));}
             if esr >> 26 == EC_BRK && esr & 0xffe0 == 0x8220 {
                 let register=(esr & 31) as usize;
                 crate::cfi::fatal(b"KCFI",(*frame).elr,(*frame).x.get(register).copied());
@@ -288,14 +291,16 @@ unsafe extern "C" fn arm64_exception(kind: u64, frame: *mut TaskContext) -> u64 
             if esr >> 26 == 0x25 { // data abort from current EL
                 if let Some(fixup) = super::uaccess::fixup((*frame).elr) {
                     (*frame).elr = fixup;
+                    (*frame).spsr &= !(3<<10);
                     return sp;
                 }
             }
             if let Some(fixup) = super::pan::test_fixup(esr, (*frame).elr, far()) {
-                (*frame).elr = fixup; return sp;
+                (*frame).elr = fixup; (*frame).spsr &= !(3<<10); return sp;
             }
             if let Some(fixup) = super::wx::fixup(esr, (*frame).elr, far()) {
                 (*frame).elr = fixup;
+                (*frame).spsr &= !(3<<10);
                 return sp;
             }
             kernel_fault("synchronous exception", esr, &*frame)

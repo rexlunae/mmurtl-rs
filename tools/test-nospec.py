@@ -29,9 +29,19 @@ def main():
         for name in names:
             body = functions['mmurtl_rs::' + name]
             if name == 'syscall::dispatch':
-                branch = re.search(r'\b(?:jmpq?\s+\*|br\s+x)', body)
-                assert branch, f'{target}: expected dispatch indirect branch not found; update audit for new codegen'
-                body = body[:branch.start()]
+                if target.startswith('x86'):
+                    # CET builds disable jump tables. Require the mask and
+                    # serializing barrier before the comparison tree's first
+                    # branch after masking (the early range reject is safe).
+                    mask = re.search(r'\bsbbq?\b', body)
+                    assert mask, f'{target}: missing dispatch mask'
+                    branch = re.search(r'\bj[a-z]+\s', body[mask.end():])
+                    assert branch, f'{target}: missing dispatch comparison tree'
+                    body = body[:mask.end() + branch.start()]
+                else:
+                    branch = re.search(r'\bbr\s+x', body)
+                    assert branch, f'{target}: expected dispatch indirect branch not found; update audit for new codegen'
+                    body = body[:branch.start()]
             masks = len(re.findall(r'\bsbbq?\b' if target.startswith('x86') else r'\bcsetm\b', body))
             assert masks >= (1 if name == 'syscall::dispatch' else 2), f'{target} {name}: missing bounds masks'
             if target.startswith('aarch64'):

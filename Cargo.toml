@@ -35,3 +35,6 @@ test-stack-overflow = []
 test-stack-state = []
 # Regression image: make a compiler-instrumented wrong-type indirect call.
 test-cfi = []
+# Regression images: attempt a non-landing-pad branch when hardware exists.
+test-bti = []
+test-ibt = []

@@ -8,6 +8,7 @@ core::arch::global_asm!(r#"
 .text
 .global wx_write, wx_write_pc, wx_write_denied, wx_execute, wx_execute_denied, wx_text
 wx_write:
+    bti jc
 wx_write_pc:
     strb w1, [x0]
     mov x0, #0
@@ -20,6 +21,7 @@ wx_write_denied:
     dsb nsh
     isb
 wx_execute:
+    bti jc
     stp x29, x30, [sp, #-16]!
     blr x0
     dsb nsh
@@ -36,6 +38,7 @@ wx_execute_denied:
     dsb nsh
     isb
 wx_text:
+    bti jc
     ret
     dsb nsh
     isb

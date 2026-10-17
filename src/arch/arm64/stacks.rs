@@ -23,6 +23,7 @@ core::arch::global_asm!(r#"
 .text
 .global arm64_stack_overflow
 arm64_stack_overflow:
+    bti jc
     msr daifset, #15
     mrs x0, tpidr_el1
     adrp x1, ARM64_STACK_EMERGENCY

@@ -1,5 +1,6 @@
 //! Boot policy, admitted-CPU capability intersection, and truthful status.
 pub mod types;
+pub mod cfi_policy;
 pub mod kaslr;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_access;

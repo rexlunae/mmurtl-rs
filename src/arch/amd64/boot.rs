@@ -114,6 +114,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::security::finalize();
     crate::topology::report();
     super::store_bypass::init();
+    crate::cfi::init();
     crate::security::report();
 
     // Initialize PCI and USB

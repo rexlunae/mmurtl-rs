@@ -237,7 +237,7 @@ pub fn audit_kernel_wx() {
     }
     unsafe {
         visit(kernel_root(), 0, false, false);
-        extern "C" { static __text_start: u8; }
+        extern "C" { static __text_start: u8; static __text_end: u8; }
         let image_va = core::ptr::addr_of!(__text_start) as u64;
         let pa = super::memory::virt_to_phys(image_va);
         unsafe fn leaf(va: u64) -> u64 {
@@ -251,6 +251,11 @@ pub fn audit_kernel_wx() {
             unreachable!()
         }
         let image = leaf(image_va);
+        if crate::cfi::enabled() {
+            for va in (image_va..core::ptr::addr_of!(__text_end) as u64).step_by(4096) {
+                assert_ne!(leaf(va) & crate::security::cfi_policy::PTE_GP, 0, "unguarded BTI text page");
+            }
+        }
         let linear = leaf(super::memory::phys_to_virt(pa) as u64);
         assert_eq!(image & (AP_RO_BIT | PXN | UXN | AP_EL0_BIT), AP_RO_BIT | UXN, "image text permissions");
         assert_eq!(linear & (AP_RO_BIT | PXN | UXN | AP_EL0_BIT), AP_RO_BIT | PXN | UXN, "linear text alias permissions");
@@ -401,6 +406,20 @@ pub fn map_stack_page(va: u64, pa: u64, fa: &mut crate::memory::frame_allocator:
 }
 pub fn stack_page_mapped(va: u64) -> bool {
     unsafe { walk(kernel_root(), va, false).is_some_and(|entry| core::ptr::read_volatile(entry) & VALID != 0) }
+}
+/// Boot-only: no user task is runnable yet. GP is installed only when
+/// every admitted CPU supports BTI, then broadcast-invalidated.
+pub fn guard_kernel_text() {
+    unsafe extern "C" {static __text_start:u8;static __text_end:u8;}
+    let start=core::ptr::addr_of!(__text_start) as u64;let end=core::ptr::addr_of!(__text_end) as u64;
+    unsafe {
+        for page in (start..end).step_by(4096) {
+            let entry=walk(kernel_root(),page,false).expect("kernel text leaf missing");
+            let descriptor=entry.read_volatile();assert_eq!(descriptor&PXN,0);
+            entry.write_volatile(descriptor|crate::security::cfi_policy::PTE_GP);
+        }
+        asm!("dsb ishst","tlbi vmalle1is","dsb ish","isb");
+    }
 }
 pub fn unmap_stack_page(va: u64) -> u64 {
     unsafe {

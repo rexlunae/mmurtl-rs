@@ -59,6 +59,8 @@ pub fn kernel_run() -> ! {
     random::report();
     #[cfg(feature="test-cfi")]
     cfi::test_mismatch();
+    #[cfg(any(feature="test-bti",feature="test-ibt"))]
+    cfi::test_landing();
     #[cfg(feature = "test-stack-overflow")]
     memory::stacks::test_overflow();
     #[cfg(all(target_arch = "x86_64", feature = "test-machine-check"))]

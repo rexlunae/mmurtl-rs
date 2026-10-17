@@ -128,6 +128,7 @@ park:
     // from EL1. Returns at EL1 on the same stack.
     .globl drop_to_el1
 drop_to_el1:
+    bti jc
     mrs x9, CurrentEL
     lsr x9, x9, #2
     cmp x9, #1
@@ -199,6 +200,7 @@ drop_to_el1:
     // rebasing RELATIVE relocations, use only registers until branching high.
     .globl arm64_enter_high
 arm64_enter_high:
+    bti jc
     adr x10, _start
     movz x11, #(LINK_BASE >> 16), lsl #16
     sub x10, x10, x11
@@ -241,13 +243,15 @@ arm64_enter_high:
     ic iallu
     dsb nsh
     isb
-    br x9
+    mov x16, x9
+    br x16
     dsb nsh
     isb
 
     // Secondary CPU entry (PSCI CPU_ON): x0 = &ApBoot, MMU off
     .globl secondary_start
 secondary_start:
+    bti jc
     mov x19, x0
     bl drop_to_el1
     msr cpacr_el1, xzr         // FPEN/ZEN/SMEN: trap FP/SIMD/SVE/SME at EL1
@@ -279,7 +283,8 @@ secondary_start:
     adrp x9, arm64_secondary_main
     add x9, x9, :lo12:arm64_secondary_main
     add x9, x9, x10
-    br x9
+    mov x16, x9
+    br x16
     dsb nsh
     isb
     b park
@@ -289,6 +294,7 @@ secondary_start:
     // AP_SPIN_BOOT (CPUs are released one at a time)
     .globl secondary_spin_entry
 secondary_spin_entry:
+    bti jc
     adrp x0, AP_SPIN_BOOT
     add x0, x0, :lo12:AP_SPIN_BOOT
     ldr x0, [x0]
@@ -474,6 +480,7 @@ extern "C" fn arm64_high_main(state: *const BootState) -> ! {
     super::mmu::finalize_asids();
     super::pan::init();
     super::store_bypass::init();
+    crate::cfi::init();
     crate::security::report();
 
     crate::serial::write_str("[INIT] Virtio drivers...\n");
