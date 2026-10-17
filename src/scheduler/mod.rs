@@ -236,6 +236,7 @@ impl Scheduler {
         // guarantees an exited task's space is loaded nowhere once it has
         // been switched out, so the reaper can free it.
         crate::arch::switch_address_space(cpu, t.address_space);
+        crate::arch::set_user_counter_access(t.user && t.high_res_time);
         if t.user {
             // Traps from user mode must land on this task's own kernel stack
             crate::arch::on_switch_to_user(cpu, t.kernel_stack_top);
@@ -548,9 +549,18 @@ pub fn create_user_task(
     slot: u64,
     name: &'static str,
 ) -> u32 {
+    create_user_task_with_time(entry, user_rsp, arg, space, slot, name, false)
+}
+
+/// HIGH_RES_TIME is granted only by trusted kernel task creation code.
+pub fn create_user_task_with_time(
+    entry: u64, user_rsp: u64, arg: u64, space: u64, slot: u64,
+    name: &'static str, high_res_time: bool,
+) -> u32 {
     let stack = alloc_stack();
-    let task =
+    let mut task =
         TaskControlBlock::new_user(entry, user_rsp, arg, space, slot, stack, PRIORITY_DEFAULT, name);
+    task.high_res_time = high_res_time;
     let (tid, ipi_target) = with_scheduler(|sched| {
         let tid = sched.add_task(task);
         (tid, sched.find_idle_cpu(current_cpu()))

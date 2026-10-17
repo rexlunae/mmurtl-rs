@@ -638,6 +638,17 @@ requires the entry point to be in an executable segment — all before
 mapping anything. Segments are mapped with exactly their permissions,
 zero-filled past their file data (`.bss`).
 
+High-resolution timer reads require the kernel-granted `HIGH_RES_TIME`
+task capability, denied by default and applied on every context switch.
+The kernel creation API grants it before making a task runnable; disk ELF
+programs and user syscalls cannot grant it. amd64 enforces CR4.TSD and
+clears PCE; arm64 sets CNTKCTL_EL1 explicitly and disables user PMU access
+where a PMU exists. The capability allows counter reads, not timer
+programming, PMU, power/energy MSRs, or voltage/frequency controls.
+`SYS_CLOCK_MS` (10) returns uptime at scheduler tick resolution for every
+task. Restricting timers raises the cost of timing attacks but does not
+eliminate channels such as counting threads on another CPU.
+
 FP/SIMD instructions are deliberately disabled on every CPU until the
 scheduler implements eager per-task FP state save/restore. The policy is
 set explicitly on BIOS/UEFI amd64 and on arm64 entry/secondary paths,

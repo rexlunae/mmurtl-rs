@@ -212,3 +212,14 @@ fn init_pit(hz: u32) {
 pub fn delay_ms(ms: u32) {
     apic::pit_wait_ms(ms);
 }
+
+/// Apply the incoming task's timer policy; PMU access always stays privileged.
+pub fn set_user_counter_access(high_res_time: bool) {
+    unsafe {
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+        cr4 &= !(1 << 8); // PCE: no user RDPMC
+        if high_res_time { cr4 &= !(1 << 2); } else { cr4 |= 1 << 2; } // TSD
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack));
+    }
+}

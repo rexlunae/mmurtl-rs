@@ -129,3 +129,24 @@ pub fn yield_now() {
 /// Nothing to do: a user task's exceptions land on its kernel stack
 /// because SP_EL1 is left at its top when we ERET into EL0
 pub fn on_switch_to_user(_cpu: usize, _kstack_top: u64) {}
+
+/// Only counter reads may be granted. EL0 timer programming and event
+/// streams stay disabled, and PMU access is never granted.
+pub fn set_user_counter_access(high_res_time: bool) {
+    unsafe {
+        core::arch::asm!("msr cntkctl_el1, {}", "isb", in(reg) if high_res_time { 3u64 } else { 0 }, options(nostack));
+    }
+}
+
+/// Initialize every CPU without relying on firmware's UNKNOWN PMU policy.
+pub fn init_user_counter_policy() {
+    set_user_counter_access(false);
+    unsafe {
+        let dfr: u64;
+        core::arch::asm!("mrs {}, id_aa64dfr0_el1", out(reg) dfr, options(nomem, nostack));
+        let pmuver = (dfr >> 8) & 15;
+        if pmuver != 0 && pmuver != 15 {
+            core::arch::asm!("msr pmuserenr_el0, xzr", "isb", options(nostack));
+        }
+    }
+}

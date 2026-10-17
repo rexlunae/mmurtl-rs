@@ -110,6 +110,8 @@ pub struct TaskControlBlock {
     /// User-mode task: runs user code, enters the kernel via interrupts
     /// and syscalls on its kernel stack
     pub user: bool,
+    /// Kernel-granted HIGH_RES_TIME capability; never granted by ELF contents.
+    pub high_res_time: bool,
     /// Page-table root of the task's address space (0 = the kernel's own;
     /// kernel tasks run there)
     pub address_space: u64,
@@ -186,6 +188,7 @@ impl TaskControlBlock {
             wait_for: 0,
             wake_tick: 0,
             user: false,
+            high_res_time: false,
             address_space: 0,
             user_slot: None,
             kstack_phys: stack.phys,
@@ -243,6 +246,7 @@ impl TaskControlBlock {
             wait_for: 0,
             wake_tick: 0,
             user: false,
+            high_res_time: false,
             address_space: 0,
             user_slot: None,
             kstack_phys: 0,

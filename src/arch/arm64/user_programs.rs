@@ -246,11 +246,71 @@ user_rogue_simd_start:
     .globl user_rogue_simd_end
 user_rogue_simd_end:
 
+
+    .globl user_time_start
+user_time_start:
+    mov x19, #8
+1:
+    mrs x0, cntvct_el0
+    mrs x0, cntpct_el0
+    mov x8, #6
+    mov x0, #20
+    svc #0
+    subs x19, x19, #1
+    b.ne 1b
+    mov x8, #0
+    svc #0
+    brk #0
+    .globl user_time_end
+user_time_end:
+    .globl user_pmu_start
+user_pmu_start:
+    mrs x0, pmccntr_el0
+    brk #0
+    .globl user_pmu_end
+user_pmu_end:
+    .globl user_coarse_start
+user_coarse_start:
+    mov x8, #10
+    svc #0
+    mov x19, x0
+    mov x8, #6
+    mov x0, #30
+    svc #0
+    mov x8, #10
+    svc #0
+    cmp x0, x19
+    b.ls 2f
+    mov x8, #0
+    svc #0
+2:  brk #0
+    .globl user_coarse_end
+user_coarse_end:
+
+    .globl user_time_denied_start
+user_time_denied_start:
+    mov x8, #6
+    mov x0, #30
+    svc #0
+    mrs x0, cntvct_el0
+    brk #0
+    .globl user_time_denied_end
+user_time_denied_end:
+
     .popsection
     "#
 );
 
 extern "C" {
+    static user_time_denied_start: u8;
+    static user_time_denied_end: u8;
+    static user_time_start: u8;
+    static user_time_end: u8;
+    static user_pmu_start: u8;
+    static user_pmu_end: u8;
+    static user_coarse_start: u8;
+    static user_coarse_end: u8;
+
     static user_hello_start: u8;
     static user_hello_end: u8;
     static user_echo_start: u8;
@@ -295,3 +355,11 @@ program!(exit_only, user_exit_start, user_exit_end);
 program!(rogue_fp, user_rogue_fp_start, user_rogue_fp_end);
 
 program!(rogue_simd, user_rogue_simd_start, user_rogue_simd_end);
+
+program!(time, user_time_start, user_time_end);
+
+program!(pmu, user_pmu_start, user_pmu_end);
+
+program!(coarse, user_coarse_start, user_coarse_end);
+
+program!(time_denied, user_time_denied_start, user_time_denied_end);

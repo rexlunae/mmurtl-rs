@@ -293,7 +293,9 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
     crate::serial::init();
     crate::serial::write_line("[FPU] user FP/SIMD/SVE/SME disabled on every CPU (no context switching yet)");
     crate::print_banner();
+    crate::serial::write_line("[TIME] user high-resolution counters: per-task (default off)");
     super::exceptions::init();
+    super::init_user_counter_policy();
 
     {
         use core::fmt::Write;

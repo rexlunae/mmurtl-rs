@@ -68,6 +68,10 @@ pub fn was_killed(tid: u32) -> bool {
 // Loading
 // ========================================================================
 
+static TID_TIME_DENIED: AtomicU32 = AtomicU32::new(0);
+static TID_TIME_ALLOWED: AtomicU32 = AtomicU32::new(0);
+static TID_PMU_DENIED: AtomicU32 = AtomicU32::new(0);
+static TID_COARSE: AtomicU32 = AtomicU32::new(0);
 static TID_HELLO: AtomicU32 = AtomicU32::new(0);
 static TID_SPIN: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_READ: AtomicU32 = AtomicU32::new(0);
@@ -133,6 +137,13 @@ pub fn demo() {
 
     TID_ROGUE_SIMD.store(spawn("rogue_simd", prog::rogue_simd(), 0), Ordering::SeqCst);
     TID_ROGUE_FP.store(spawn("rogue_fp", prog::rogue_fp(), 0), Ordering::SeqCst);
+    TID_TIME_DENIED.store(spawn("time_denied", prog::time_denied(), 0), Ordering::SeqCst);
+    TID_PMU_DENIED.store(spawn("pmu_denied", prog::pmu(), 0), Ordering::SeqCst);
+    TID_COARSE.store(spawn("coarse_clock", prog::coarse(), 0), Ordering::SeqCst);
+    if let Ok(img) = crate::memory::user::load_program(prog::time()) {
+        TID_TIME_ALLOWED.store(scheduler::create_user_task_with_time(img.entry, img.stack_top, 0,
+            img.space, img.slot, "time_allowed", true), Ordering::SeqCst);
+    }
     spawn_elf_programs();
 }
 
@@ -353,6 +364,12 @@ extern "C" fn user_check_task() -> ! {
     pass &= report("rogue_peek can't see uecho's pages", killed(&TID_ROGUE_PEEK));
     pass &= report("rogue_fp killed, kernel alive", killed(&TID_ROGUE_FP));
     pass &= report("rogue_simd killed, kernel alive", killed(&TID_ROGUE_SIMD));
+    pass &= wait_until(5000, || [&TID_TIME_DENIED, &TID_TIME_ALLOWED, &TID_PMU_DENIED, &TID_COARSE]
+        .iter().all(|tid| exited(tid)));
+    pass &= report("unprivileged timer denied", killed(&TID_TIME_DENIED));
+    pass &= report("unprivileged PMU denied", killed(&TID_PMU_DENIED));
+    pass &= report("HIGH_RES_TIME survives switches", exited(&TID_TIME_ALLOWED) && !killed(&TID_TIME_ALLOWED));
+    pass &= report("coarse clock advances", exited(&TID_COARSE) && !killed(&TID_COARSE));
     pass &= all_done;
 
     // A user-mode service exiting mid-request fails it with Aborted
