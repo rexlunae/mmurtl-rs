@@ -289,6 +289,17 @@ extern "x86-interrupt" fn general_protection_handler(
         unsafe { stack_frame.as_mut().update(|f| f.instruction_pointer = x86_64::VirtAddr::new(pc)); }
         return;
     }
+    if error_code == 0 {
+        let pc = stack_frame.instruction_pointer.as_u64();
+        if let Some(fixup) = super::uaccess::fixup(pc).or_else(|| super::protection::test_gp_fixup(pc, error_code)) {
+            super::user_access_end();
+            unsafe { stack_frame.as_mut().update(|frame| {
+                frame.instruction_pointer = x86_64::VirtAddr::new(fixup);
+                frame.cpu_flags &= !(1 << 18);
+            }); }
+            return;
+        }
+    }
     panic!("GENERAL PROTECTION FAULT error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
 

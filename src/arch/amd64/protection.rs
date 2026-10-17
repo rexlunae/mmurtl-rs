@@ -1,9 +1,6 @@
 //! Enable only access-protection features shared by every online CPU.
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-const SMEP: u64 = 1 << 20;
-const SMAP: u64 = 1 << 21;
-const LASS: u64 = 1 << 27;
-const UMIP: u64 = 1 << 11;
+use crate::security::x86_access::{SMEP, SMAP, UMIP, LASS};
 static CAPS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
 static APPLIED: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
 static READY: AtomicBool = AtomicBool::new(false);
@@ -24,7 +21,7 @@ pub fn enumerate(cpu: usize) {
     unsafe {
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
-        cr4 &= !(SMEP | SMAP | UMIP);
+        cr4 &= !(SMEP | SMAP | UMIP | LASS);
         core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack));
         core::arch::asm!("pushfq", "and qword ptr [rsp], -262145", "popfq"); // clear inherited AC
     }
@@ -33,10 +30,9 @@ pub fn enumerate(cpu: usize) {
 
 pub fn finalize() {
     let admitted = crate::security::freeze();
-    let mut common = SMEP | SMAP | UMIP;
-    for cpu in 0..64 {
-        if admitted & (1 << cpu) != 0 { common &= CAPS[cpu].load(Ordering::Acquire); }
-    }
+    let common = crate::security::x86_access::common((0..64)
+        .filter(|cpu| admitted & (1 << cpu) != 0)
+        .map(|cpu| CAPS[cpu].load(Ordering::Acquire)));
     COMMON.store(common, Ordering::Release);
     SMAP_ENTRY_ENABLED.store(u8::from(common & SMAP != 0), Ordering::Release);
     READY.store(true, Ordering::Release);
@@ -44,15 +40,12 @@ pub fn finalize() {
     assert!(!admit_ap(63, || panic!("late AP admitted after finalization")));
     crate::serial::write_line("[TEST] finalized CPU admission rejects late starters");
     crate::serial::write_str("[CPU] common access protections:");
-    for (mask, name) in [(SMEP, " SMEP"), (SMAP, " SMAP"), (UMIP, " UMIP")] {
+    for (mask, name) in [(SMEP, " SMEP"), (SMAP, " SMAP"), (UMIP, " UMIP"), (LASS, " LASS")] {
         if common & mask != 0 { crate::serial::write_str(name); }
     }
     crate::serial::write_line(" (enforced before each CPU runs tasks)");
-    // This kernel's code and physmap may occupy the lower canonical half.
-    // LASS would reject legitimate supervisor instruction/data accesses.
-    if (0..64).filter(|cpu| admitted & (1 << cpu) != 0).all(|cpu| CAPS[cpu].load(Ordering::Acquire) & LASS != 0) {
-        crate::serial::write_line("[CPU] LASS supported, deferred: kernel mappings require higher-half relocation");
-    } else { crate::serial::write_line("[CPU] LASS: unavailable on common CPU feature set"); }
+    crate::serial::write_line(if common & LASS != 0 { "[CPU] LASS enabled (higher-half kernel; STAC/CLAC user access)" }
+        else { "[CPU] LASS: unavailable on common CPU feature set (requires SMAP)" });
 }
 
 /// Serialize admission with finalization. A late AP is rejected before
@@ -70,6 +63,12 @@ pub fn apply_current(cpu: usize) {
     // must not prevent the final policy from being applied later.
     if !READY.load(Ordering::Acquire) || APPLIED[cpu].load(Ordering::Relaxed) { return; }
     let common = COMMON.load(Ordering::Acquire);
+    if common & LASS != 0 {
+        let stack: u64;
+        unsafe { core::arch::asm!("mov {}, rsp", out(reg) stack, options(nomem, nostack)); }
+        assert!(stack >> 63 == 1 && apply_current as *const () as u64 >> 63 == 1
+            && super::page_table::physical_memory_offset() >> 63 == 1, "LASS requires higher-half kernel mappings");
+    }
     unsafe {
         let (mut cr0, mut cr4): (u64, u64);
         core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
@@ -91,6 +90,7 @@ pub fn smap_enabled() -> bool { SMAP_ENTRY_ENABLED.load(Ordering::Relaxed) != 0 
 pub fn clear_access() {
     if smap_enabled() { unsafe { core::arch::asm!("clac", options(nostack)); } }
 }
+pub fn lass_enabled() -> bool { COMMON.load(Ordering::Acquire) & LASS != 0 }
 pub fn umip_enabled() -> bool { COMMON.load(Ordering::Acquire) & UMIP != 0 }
 
 // Deliberately faulting boot probes. The private gate is DPL0, and the
@@ -159,6 +159,23 @@ pub fn test_fixup(pc: u64, address: u64, error: u64) -> Option<u64> {
     None
 }
 
+/// LASS faults before paging with #GP(0), so CR2 is not meaningful.
+/// Recover only exact private probe PCs, with the fetch target armed on BSP.
+pub fn test_gp_fixup(pc: u64, error: u64) -> Option<u64> {
+    if error != 0 || super::cpu_index() != 0 { return None; }
+    unsafe {
+        let entry = core::ptr::addr_of!(protection_test_ex_table).cast::<i64>();
+        if pc == (entry as u64).wrapping_add_signed(entry.read()) {
+            return Some((entry.add(1) as u64).wrapping_add_signed(entry.add(1).read()));
+        }
+    }
+    let expected = EXEC_TEST_ADDR.load(Ordering::Acquire);
+    if expected != 0 && pc == expected && (crate::memory::user::USER_BASE..crate::memory::user::USER_END).contains(&pc) {
+        return Some(protection_smep_denied as *const () as u64);
+    }
+    None
+}
+
 pub fn self_test() {
     let common = COMMON.load(Ordering::Acquire);
     let img = match crate::memory::user::load_program(&[0xc3]) { // RET
@@ -166,6 +183,15 @@ pub fn self_test() {
         Err(_) => { crate::serial::write_line("[TEST] access protections skipped: no test memory"); return; }
     };
     let mut pass = true;
+    // Canonicality also raises #GP(0), allowing the exact copy/gate
+    // recovery path to be tested even on CPUs without LASS.
+    let invalid = 0x0000_8000_0000_0000u64;
+    let mut byte = 0u8;
+    pass &= unsafe { super::uaccess::copy_from_user(&mut byte, invalid, 1) } == 1;
+    pass &= unsafe { super::uaccess::copy_to_user(invalid, &byte, 1) } == 1;
+    if common & SMAP != 0 { pass &= unsafe { protection_smap_probe(invalid) } == 1; }
+    assert!(pass, "#GP user-copy/private-gate fixups failed");
+    crate::serial::write_line("[TEST] #GP fixups passed (noncanonical read/write, private gate where SMAP present)");
     let text = self_test as *const () as u64;
     let pa = super::page_table::translate_virtual(x86_64::VirtAddr::new(text)).expect("test text unmapped");
     let alias = super::page_table::phys_to_virt(pa).as_u64();
