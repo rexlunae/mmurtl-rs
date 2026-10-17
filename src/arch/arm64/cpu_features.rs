@@ -43,6 +43,7 @@ pub fn enumerate(cpu: usize) {
     if csv3 == 1 { caps.not_affected |= V::Meltdown.bit(); }
     if (caps.raw[0] >> 48) & 15 == 1 { caps.features |= F::DIT; }
     if matches!((caps.raw[1] >> 4) & 15, 1 | 2) { caps.features |= F::SSBS; }
+    if crate::security::cfi_policy::arm_bti(caps.raw[1]) { caps.features |= F::BTI; }
     if (caps.raw[1] >> 4) & 15 == 2 { caps.features |= F::SSBS2; }
     if (caps.raw[2] >> 60) & 15 == 1 { caps.features |= F::ECBHB; }
     if (caps.raw[3] >> 28) & 15 == 1 { caps.features |= F::CLRBHB; }

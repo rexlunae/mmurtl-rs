@@ -100,6 +100,7 @@ core::arch::global_asm!(r#"
 .text
 .global pan_read_probe, pan_write_probe
 pan_read_probe:
+    bti jc
 .Lpan_read_fault:
     ldrb w1, [x0]
     mov x0, #0
@@ -112,6 +113,7 @@ pan_read_probe:
     dsb nsh
     isb
 pan_write_probe:
+    bti jc
 .Lpan_write_fault:
     strb w1, [x0]
     mov x0, #0

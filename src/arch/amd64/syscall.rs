@@ -23,6 +23,7 @@ pub const SYSCALL_VECTOR: u8 = 0x80;
 core::arch::global_asm!(
     ".globl syscall_int_entry",
     "syscall_int_entry:",
+    "endbr64",
     "cmp byte ptr [rip + SMAP_ENTRY_ENABLED], 0",
     "je 2f",
     "clac",

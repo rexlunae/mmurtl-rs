@@ -4,8 +4,8 @@
 # arm64 kernel: a position-independent executable that relocates itself
 # at boot (see src/arch/arm64/boot.rs), so loaders may place it anywhere
 [target.aarch64-unknown-none-softfloat]
-rustflags = ["-Z", "emit-stack-sizes", "--cfg", 'chacha20_backend="soft"', "-C", "target-feature=+harden-sls-retbr,+harden-sls-blr,+harden-sls-nocomdat", "-C", "relocation-model=pie", "-C", "link-arg=-pie", "-C", "link-arg=--no-dynamic-linker"]
+rustflags = ["-Z", "sanitizer=kcfi", "-Z", "branch-protection=bti", "-Z", "emit-stack-sizes", "--cfg", 'chacha20_backend="soft"', "-C", "target-feature=+harden-sls-retbr,+harden-sls-blr,+harden-sls-nocomdat", "-C", "relocation-model=pie", "-C", "link-arg=-pie", "-C", "link-arg=--no-dynamic-linker"]
 
 # Kernel FP/SIMD state is disabled; cryptography must use scalar code.
 [target.x86_64-unknown-none]
-rustflags = ["-Z", "emit-stack-sizes", "--cfg", 'chacha20_backend="soft"', "-C", "target-feature=+harden-sls-ret,+harden-sls-ijmp"]
+rustflags = ["-Z", "sanitizer=kcfi", "-Z", "cf-protection=branch", "-C", "jump-tables=no", "-Z", "emit-stack-sizes", "--cfg", 'chacha20_backend="soft"', "-C", "target-feature=+harden-sls-ret,+harden-sls-ijmp"]

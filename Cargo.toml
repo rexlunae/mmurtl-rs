@@ -33,3 +33,8 @@ test-machine-check = []
 test-stack-overflow = []
 # Regression instrumentation: observe entry offsets and a seeded stack region.
 test-stack-state = []
+# Regression image: make a compiler-instrumented wrong-type indirect call.
+test-cfi = []
+# Regression images: attempt a non-landing-pad branch when hardware exists.
+test-bti = []
+test-ibt = []

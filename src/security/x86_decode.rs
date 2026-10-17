@@ -4,7 +4,7 @@ use super::{SpecCaps, Vulnerability as V, feature as F};
 pub fn decode(mut caps: SpecCaps, read_arch_caps: impl FnOnce() -> u64) -> SpecCaps {
     caps.features = 0; caps.not_affected = 0; caps.raw[4] = 0;
     for (bit, feature) in [(26,F::IBRS | F::IBPB),(27,F::STIBP),(28,F::L1D_FLUSH),
-        (29,F::ARCH_CAPS),(31,F::SSBD),(10,F::MD_CLEAR)] {
+        (29,F::ARCH_CAPS),(31,F::SSBD),(10,F::MD_CLEAR),(20,F::IBT)] {
         if caps.raw[0] & (1 << bit) != 0 { caps.features |= feature; }
     }
     for (word, bit, feature) in [(5,7,F::SMEP),(5,20,F::SMAP),(6,2,F::UMIP),(7,6,F::LASS),

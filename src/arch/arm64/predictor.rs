@@ -117,6 +117,7 @@ core::arch::global_asm!(r#"
 .section .text.predictor_vectors, "ax"
 .macro PREDICTOR_SLOT kind, mode, count, fw, conduit
 .Lpred_slot\@:
+    bti jc
     sub sp, sp, #272
     .if \kind == 4
     // No stack access until the synchronous guard check is complete.

@@ -234,6 +234,9 @@ fn invalid_opcode_handler(stack_frame: &mut InterruptStackFrame) {
     if from_user(&stack_frame) {
         kill_user_task(&stack_frame, "#UD invalid opcode", None);
     }
+    if super::cfi::is_kcfi_trap(stack_frame.instruction_pointer.as_u64()) {
+        crate::cfi::fatal(b"KCFI",stack_frame.instruction_pointer.as_u64(),super::cfi::kcfi_target(stack_frame));
+    }
     panic!("INVALID OPCODE\n{:#?}", stack_frame);
 }
 
@@ -464,6 +467,7 @@ fn security_exception_handler(
 core::arch::global_asm!(
     ".globl timer_handler",
     "timer_handler:",
+    "endbr64",
     "cmp byte ptr [rip + SMAP_ENTRY_ENABLED], 0",
     "je 2f",
     "clac",
@@ -557,6 +561,7 @@ core::arch::global_asm!(
     // shares the switch/unlock/restore tail above.
     ".globl yield_handler",
     "yield_handler:",
+    "endbr64",
     "cmp byte ptr [rip + SMAP_ENTRY_ENABLED], 0",
     "je 2f",
     "clac",
@@ -633,6 +638,7 @@ core::arch::global_asm!(r#"
 .macro INTERRUPT_STUB name, vector, error
 .global \name
 \name:
+    endbr64
     cmp byte ptr [rip + SMAP_ENTRY_ENABLED], 0
     je 1f
     clac
@@ -662,6 +668,7 @@ INTERRUPT_STUB entry_alignment_check_handler, 17, 1
 INTERRUPT_STUB entry_machine_check_handler, 18, 0
 INTERRUPT_STUB entry_simd_fpu_handler, 19, 0
 INTERRUPT_STUB entry_virtualization_handler, 20, 0
+INTERRUPT_STUB entry_control_protection_handler, 21, 1
 INTERRUPT_STUB entry_security_exception_handler, 30, 1
 INTERRUPT_STUB entry_keyboard_handler, 33, 0
 INTERRUPT_STUB entry_com1_handler, 36, 0
@@ -672,6 +679,7 @@ INTERRUPT_STUB entry_tlb_handler, 50, 0
 
 .global x86_exception_common
 x86_exception_common:
+    endbr64
     push rax
     push rcx
     push rdx
@@ -768,6 +776,7 @@ extern "C" {
     fn entry_machine_check_handler();
     fn entry_simd_fpu_handler();
     fn entry_virtualization_handler();
+    fn entry_control_protection_handler();
     fn entry_security_exception_handler();
     fn entry_keyboard_handler();
     fn entry_com1_handler();
@@ -798,6 +807,10 @@ unsafe extern "C" fn x86_exception_dispatch(vector: u64, frame: &mut InterruptSt
         18 => machine_check_handler(frame),
         19 => simd_fpu_handler(frame),
         20 => virtualization_handler(frame),
+        21 => {
+            if from_user(frame) {kill_user_task(frame,"#CP control-protection fault",None);}
+            crate::cfi::fatal(b"CET-IBT/#CP",frame.instruction_pointer.as_u64(),Some(frame.instruction_pointer.as_u64()));
+        }
         30 => security_exception_handler(frame, error),
         33 => keyboard_handler(frame),
         36 => com1_handler(frame),
@@ -822,6 +835,7 @@ static IDT: Lazy<()> = Lazy::new(|| unsafe {
     // Initialize in place; returning a 4 KiB IDT by value used multiple
     // stack copies in the Once/Lazy chain.
     let idt = &mut *core::ptr::addr_of_mut!(IDT_TABLE);
+    idt.cp_protection_exception.set_handler_addr(x86_64::VirtAddr::new(entry_control_protection_handler as *const () as u64));
 
     // CPU exceptions
     idt.divide_error.set_handler_addr(x86_64::VirtAddr::new(entry_divide_error_handler as *const () as u64));

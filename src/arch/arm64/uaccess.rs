@@ -4,6 +4,7 @@ core::arch::global_asm!(r#"
     .text
     .globl user_copy_from
 user_copy_from:
+    bti jc
     cbz x2, .Lfrom_done
 .Lfrom_fault:
     ldtrb w3, [x1]
@@ -19,6 +20,7 @@ user_copy_from:
     isb
     .globl user_copy_to
 user_copy_to:
+    bti jc
     cbz x2, .Lto_done
 .Lto_loop:
     ldrb w3, [x1]

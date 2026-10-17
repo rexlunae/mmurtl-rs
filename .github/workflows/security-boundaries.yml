@@ -22,6 +22,11 @@ jobs:
         run: python3 tools/test-nospec.py
       - name: Verify entry register clearing and SLS barriers
         run: python3 tools/test-entry-sls.py
+      - name: Verify kernel KCFI traps and branch landing pads
+        run: |
+          python3 tools/test-kernel-cfi.py
+          rustc --edition=2021 tools/tests/cfi_policy.rs -o /tmp/mmurtl-cfi-policy-test
+          /tmp/mmurtl-cfi-policy-test
       - name: Verify kernel stack frame budgets and guarded layout
         run: |
           python3 tools/test-stack-sizes.py

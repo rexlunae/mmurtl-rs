@@ -41,6 +41,7 @@ extern "C" fn kernel_stack_erase_bottom(frame: u64, user: u64) -> u64 {
 }
 #[no_mangle]
 extern "C" fn kernel_stack_offset(frame: u64, user: u64) -> u64 {
+    crate::cfi::apply_current();
     if user == 0 || bottom(frame).is_none() { return 0; }
     let offset = crate::random::u64().unwrap_or_else(|_| crate::random::early_u64()) & 0x3f0;
     #[cfg(feature = "test-stack-state")]
@@ -163,8 +164,8 @@ pub fn enter_main() -> ! {
     unsafe { core::arch::asm!("mov rsp, {top}", "sub rsp, 8", "mov qword ptr [rsp], 0", "jmp {entry}", "int3",
         top = in(reg) top, entry = in(reg) crate::kernel_run as *const (), options(noreturn)); }
     #[cfg(target_arch = "aarch64")]
-    unsafe { core::arch::asm!("mov sp, {top}", "br {entry}", "dsb nsh", "isb",
-        top = in(reg) top, entry = in(reg) crate::kernel_run as *const (), options(noreturn)); }
+    unsafe { core::arch::asm!("mov sp, {top}", "br x16", "dsb nsh", "isb",
+        top = in(reg) top, in("x16") crate::kernel_run as *const (), options(noreturn)); }
 }
 #[cfg(feature = "test-stack-overflow")]
 pub fn test_overflow() -> ! {

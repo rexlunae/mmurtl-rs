@@ -96,6 +96,7 @@ ap_tramp_pm32:
 
 .code64
 ap_tramp_lm64:
+    endbr64
     movw $0x10, %ax
     movw %ax, %ds
     movw %ax, %es

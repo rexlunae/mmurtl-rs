@@ -4,6 +4,7 @@ core::arch::global_asm!(r#"
     .text
     .globl user_copy_bytes
 user_copy_bytes:
+    endbr64
     mov rcx, rdx
     cld
 .Lcopy_fault:

@@ -22,7 +22,7 @@ pub fn enumerate(cpu: usize) {
     unsafe {
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
-        cr4 &= !(SMEP | SMAP | UMIP | LASS);
+        cr4 &= !(SMEP | SMAP | UMIP | LASS | crate::security::cfi_policy::CR4_CET); // CET initialized only after common-capability selection
         core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack));
         core::arch::asm!("pushfq", "and qword ptr [rsp], -262145", "popfq"); // clear inherited AC
     }
@@ -112,6 +112,7 @@ core::arch::global_asm!(r#"
     .text
     .globl protection_smap_probe
 protection_smap_probe:
+    endbr64
     stac
     int 0x83
     clac
@@ -119,6 +120,7 @@ protection_smap_probe:
     int3
     .globl protection_test_gate
 protection_test_gate:
+    endbr64
     cmp byte ptr [rip + SMAP_ENTRY_ENABLED], 0
     je 2f
     clac
@@ -134,6 +136,7 @@ protection_test_gate:
     int3
     .globl protection_smep_probe
 protection_smep_probe:
+    endbr64
     call rdi
     xor eax, eax
     ret
