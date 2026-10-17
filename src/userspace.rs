@@ -73,6 +73,10 @@ static TID_TIME_ALLOWED: AtomicU32 = AtomicU32::new(0);
 static TID_PMU_DENIED: AtomicU32 = AtomicU32::new(0);
 static TID_COARSE: AtomicU32 = AtomicU32::new(0);
 static TID_UACCESS: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "x86_64")]
+static TID_SIDT: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "x86_64")]
+static TID_AC: AtomicU32 = AtomicU32::new(0);
 static TID_HELLO: AtomicU32 = AtomicU32::new(0);
 static TID_SPIN: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_READ: AtomicU32 = AtomicU32::new(0);
@@ -158,6 +162,13 @@ pub fn demo() {
         TID_ROGUE_ALIGN.store(spawn("rogue_align", prog::rogue_align(), 0), Ordering::SeqCst);
     }
     TID_UACCESS.store(spawn("uaccess_faults", prog::uaccess(), 0), Ordering::SeqCst);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::arch::protection::umip_enabled() {
+            TID_SIDT.store(spawn("rogue_sidt", prog::sidt(), 0), Ordering::SeqCst);
+        }
+        TID_AC.store(spawn("rogue_ac", prog::ac(), 0), Ordering::SeqCst);
+    }
     spawn_elf_programs();
 }
 
@@ -393,6 +404,15 @@ extern "C" fn user_check_task() -> ! {
     }
     pass &= wait_until(5000, || exited(&TID_UACCESS));
     pass &= report("unmapped copies return EFAULT", exited(&TID_UACCESS) && !killed(&TID_UACCESS));
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::arch::protection::umip_enabled() {
+            pass &= wait_until(5000, || exited(&TID_SIDT));
+            pass &= report("UMIP denies SIDT", killed(&TID_SIDT));
+        }
+        pass &= wait_until(5000, || exited(&TID_AC));
+        pass &= report("user AC cleared on syscall entry", exited(&TID_AC) && !killed(&TID_AC));
+    }
     pass &= all_done;
 
     // A user-mode service exiting mid-request fails it with Aborted

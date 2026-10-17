@@ -2,6 +2,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 const SMEP: u64 = 1 << 20;
 const SMAP: u64 = 1 << 21;
+const LASS: u64 = 1 << 27;
 const UMIP: u64 = 1 << 11;
 static CAPS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
 static APPLIED: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
@@ -20,6 +21,7 @@ pub fn enumerate(cpu: usize) {
             if leaf.ebx & (1 << 7) != 0 { caps |= SMEP; }
             if leaf.ebx & (1 << 20) != 0 { caps |= SMAP; }
             if leaf.ecx & (1 << 2) != 0 { caps |= UMIP; }
+            if leaf.eax >= 1 && core::arch::x86_64::__cpuid_count(7, 1).eax & (1 << 6) != 0 { caps |= LASS; }
         }
     }
     unsafe {
@@ -46,17 +48,19 @@ pub fn finalize() {
     crate::serial::write_line(" (enforced before each CPU runs tasks)");
     // This kernel's code and physmap may occupy the lower canonical half.
     // LASS would reject legitimate supervisor instruction/data accesses.
-    crate::serial::write_line("[CPU] LASS deferred: kernel mappings require higher-half relocation");
+    if (0..super::smp::cpus_online()).all(|cpu| CAPS[cpu].load(Ordering::Acquire) & LASS != 0) {
+        crate::serial::write_line("[CPU] LASS supported, deferred: kernel mappings require higher-half relocation");
+    } else { crate::serial::write_line("[CPU] LASS: unavailable on common CPU feature set"); }
 }
 
 /// Called with interrupts disabled before choosing a task's page tables.
 /// APs may have parked before finalize; they apply the common policy on
 /// their first scheduler entry, before any task can enter ring 3.
 pub fn apply_current(cpu: usize) {
-    let common = COMMON.load(Ordering::Acquire);
     // Until finalize, don't mark this CPU configured: an early idle tick
     // must not prevent the final policy from being applied later.
     if !READY.load(Ordering::Acquire) || APPLIED[cpu].load(Ordering::Relaxed) { return; }
+    let common = COMMON.load(Ordering::Acquire);
     unsafe {
         let (mut cr0, mut cr4): (u64, u64);
         core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
@@ -79,3 +83,104 @@ pub fn clear_access() {
     if smap_enabled() { unsafe { core::arch::asm!("clac", options(nostack)); } }
 }
 pub fn umip_enabled() -> bool { COMMON.load(Ordering::Acquire) & UMIP != 0 }
+
+// Deliberately faulting boot probes. The private gate is DPL0, and the
+// dynamic instruction-fetch fixup is armed only in the private test space
+// before creating any runnable user tasks.
+static EXEC_TEST_ADDR: AtomicU64 = AtomicU64::new(0);
+core::arch::global_asm!(r#"
+    .text
+    .globl protection_smap_probe
+protection_smap_probe:
+    stac
+    int 0x83
+    clac
+    ret
+    .globl protection_test_gate
+protection_test_gate:
+    cmp byte ptr [rip + SMAP_ENTRY_ENABLED], 0
+    je 2f
+    clac
+2:
+.Lsmap_fault:
+    movzx eax, byte ptr [rdi]
+    xor eax, eax
+    iretq
+.Lsmap_denied:
+    mov eax, 1
+    iretq
+    .globl protection_smep_probe
+protection_smep_probe:
+    call rdi
+    xor eax, eax
+    ret
+    .globl protection_smep_denied
+protection_smep_denied:
+    add rsp, 8
+    mov eax, 1
+    ret
+    .pushsection .rodata.ex_table, "a"
+    .balign 8
+    .globl protection_test_ex_table
+protection_test_ex_table:
+    .quad .Lsmap_fault - .
+    .quad .Lsmap_denied - .
+    .popsection
+"#);
+extern "C" {
+    fn protection_smap_probe(ptr: u64) -> u64;
+    fn protection_smep_probe(ptr: u64) -> u64;
+    fn protection_test_gate();
+    fn protection_smep_denied();
+    static protection_test_ex_table: [i64; 2];
+}
+pub fn test_gate_address() -> u64 { protection_test_gate as *const () as u64 }
+pub fn test_fixup(pc: u64, address: u64, error: u64) -> Option<u64> {
+    unsafe {
+        let entry = core::ptr::addr_of!(protection_test_ex_table).cast::<i64>();
+        if pc == (entry as u64).wrapping_add_signed(entry.read()) {
+            return Some((entry.add(1) as u64).wrapping_add_signed(entry.add(1).read()));
+        }
+    }
+    let expected = EXEC_TEST_ADDR.load(Ordering::Acquire);
+    if expected != 0 && pc == expected && address == expected
+        && error & 0x15 == 0x11 && super::cpu_index() == 0 {
+        return Some(protection_smep_denied as *const () as u64);
+    }
+    None
+}
+
+pub fn self_test() {
+    let common = COMMON.load(Ordering::Acquire);
+    if common & (SMAP | SMEP) == 0 { return; }
+    let img = match crate::memory::user::load_program(&[0xc3]) { // RET
+        Ok(img) => img,
+        Err(_) => { crate::serial::write_line("[TEST] access protections skipped: no test memory"); return; }
+    };
+    let mut pass = true;
+    super::without_interrupts(|| {
+        super::switch_address_space(0, img.space);
+        if common & SMAP != 0 {
+            // The gate must clear AC that we deliberately set before entry.
+            pass &= unsafe { protection_smap_probe(img.entry) } == 1;
+        }
+        if common & SMEP != 0 {
+            EXEC_TEST_ADDR.store(img.entry, Ordering::Release);
+            pass &= unsafe { protection_smep_probe(img.entry) } == 1;
+            EXEC_TEST_ADDR.store(0, Ordering::Release);
+        }
+        super::switch_address_space(0, 0);
+    });
+    crate::memory::user::release(img.space, img.slot);
+    assert!(pass, "SMEP/SMAP fault probes failed");
+    crate::serial::write_line("[TEST] access protections: inherited AC cleared, unguarded read/execute denied");
+}
+
+/// Syscall entry must close user-controlled AC before any Rust handler.
+pub fn assert_syscall_entry() {
+    if smap_enabled() {
+        let flags: u64;
+        unsafe { core::arch::asm!("pushfq", "pop {}", out(reg) flags); }
+        assert!(flags & (1 << 18) == 0, "user AC leaked through syscall entry");
+    }
+}

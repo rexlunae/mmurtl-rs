@@ -659,6 +659,17 @@ The alignment probe uses mapped unaligned memory with AC set, followed by
 UD2 so QEMU TCG versions that omit alignment checking still terminate it.
 Actual #MF/#XM delivery remains unavailable while FP/SIMD is disabled.
 
+amd64 intersects SMEP, SMAP, and UMIP support across online CPUs, then
+applies that common policy and CR0.WP before each CPU runs scheduled tasks.
+SMAP access decisions are cached; syscall/timer/yield assembly entries
+conditionally clear AC before saving registers, and every Rust exception
+or IRQ handler clears it before its body. STAC/CLAC include compiler memory
+barriers around deliberate user copies. Boot probes verify inherited AC
+cannot bypass SMAP, supervisor execution of user pages is denied by SMEP,
+and user SIDT is denied where UMIP is supported. Unsupported CPUs use the
+baseline user page permissions. LASS support is detected but enabling it
+requires moving current lower-half kernel mappings into the higher half.
+
 User copies use registered exception-table fixups: amd64 `rep movsb`
 inside the SMAP access window, and arm64 `ldtrb`/`sttrb` with EL0 permissions.
 Only faults at those exact instructions recover; unrelated kernel faults

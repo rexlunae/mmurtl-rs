@@ -275,7 +275,9 @@ extern "x86-interrupt" fn page_fault_handler(
     use x86_64::registers::control::Cr2;
     let address = Cr2::read();
     if !from_user(&stack_frame) {
-        if let Some(fixup) = super::uaccess::fixup(stack_frame.instruction_pointer.as_u64()) {
+        let pc = stack_frame.instruction_pointer.as_u64();
+        if let Some(fixup) = super::uaccess::fixup(pc).or_else(||
+            super::protection::test_fixup(pc, address.as_u64(), error_code.bits())) {
             super::user_access_end();
             unsafe { stack_frame.as_mut().update(|frame| {
                 frame.instruction_pointer = x86_64::VirtAddr::new(fixup);
@@ -534,6 +536,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt.stack_segment_fault.set_handler_fn(stack_segment_handler);
     idt.general_protection_fault.set_handler_fn(general_protection_handler);
     idt.page_fault.set_handler_fn(page_fault_handler);
+    unsafe { idt[0x83].set_handler_addr(x86_64::VirtAddr::new(super::protection::test_gate_address())); }
     idt.x87_floating_point.set_handler_fn(x87_fpu_handler);
     idt.alignment_check.set_handler_fn(alignment_check_handler);
     idt.simd_floating_point.set_handler_fn(simd_fpu_handler);

@@ -97,6 +97,8 @@ pub fn kernel_run() -> ! {
     }
 
     memory::user::uaccess_self_test();
+    #[cfg(target_arch = "x86_64")]
+    arch::protection::self_test();
 
     // Create demo tasks — idle CPUs are kicked with a reschedule IPI and
     // start running these immediately, even before the BSP enables

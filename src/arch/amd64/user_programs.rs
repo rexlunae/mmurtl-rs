@@ -368,12 +368,40 @@ user_uaccess_start:
     .globl user_uaccess_end
 user_uaccess_end:
 
+
+    .globl user_sidt_start
+user_sidt_start:
+    subq $16, %rsp
+    sidt (%rsp)
+    xorl %eax, %eax
+    int $0x80
+    ud2
+    .globl user_sidt_end
+user_sidt_end:
+    .globl user_ac_start
+user_ac_start:
+    pushfq
+    orq $0x40000, (%rsp)
+    popfq
+    movl $5, %eax
+    int $0x80
+    testq %rax, %rax
+    jz 2f
+    xorl %eax, %eax
+    int $0x80
+2:  ud2
+    .globl user_ac_end
+user_ac_end:
     .popsection
     "#,
     options(att_syntax)
 );
 
 extern "C" {
+    static user_sidt_start: u8;
+    static user_sidt_end: u8;
+    static user_ac_start: u8;
+    static user_ac_end: u8;
     static user_uaccess_start: u8;
     static user_uaccess_end: u8;
     static user_time_denied_start: u8;
@@ -449,3 +477,6 @@ program!(rogue_debug_entry, user_rogue_debug_entry_start, user_rogue_debug_entry
 program!(rogue_align, user_rogue_align_start, user_rogue_align_end);
 
 program!(uaccess, user_uaccess_start, user_uaccess_end);
+
+program!(sidt, user_sidt_start, user_sidt_end);
+program!(ac, user_ac_start, user_ac_end);
