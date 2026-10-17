@@ -161,8 +161,8 @@ pub fn test_fixup(pc: u64, address: u64, error: u64) -> Option<u64> {
 
 /// LASS faults before paging with #GP(0), so CR2 is not meaningful.
 /// Recover only exact private probe PCs, with the fetch target armed on BSP.
-pub fn lass_test_fixup(pc: u64, error: u64) -> Option<u64> {
-    if !lass_enabled() || error != 0 || super::cpu_index() != 0 { return None; }
+pub fn test_gp_fixup(pc: u64, error: u64) -> Option<u64> {
+    if error != 0 || super::cpu_index() != 0 { return None; }
     unsafe {
         let entry = core::ptr::addr_of!(protection_test_ex_table).cast::<i64>();
         if pc == (entry as u64).wrapping_add_signed(entry.read()) {
@@ -183,6 +183,15 @@ pub fn self_test() {
         Err(_) => { crate::serial::write_line("[TEST] access protections skipped: no test memory"); return; }
     };
     let mut pass = true;
+    // Canonicality also raises #GP(0), allowing the exact copy/gate
+    // recovery path to be tested even on CPUs without LASS.
+    let invalid = 0x0000_8000_0000_0000u64;
+    let mut byte = 0u8;
+    pass &= unsafe { super::uaccess::copy_from_user(&mut byte, invalid, 1) } == 1;
+    pass &= unsafe { super::uaccess::copy_to_user(invalid, &byte, 1) } == 1;
+    if common & SMAP != 0 { pass &= unsafe { protection_smap_probe(invalid) } == 1; }
+    assert!(pass, "#GP user-copy/private-gate fixups failed");
+    crate::serial::write_line("[TEST] #GP fixups passed (noncanonical read/write, private gate where SMAP present)");
     let text = self_test as *const () as u64;
     let pa = super::page_table::translate_virtual(x86_64::VirtAddr::new(text)).expect("test text unmapped");
     let alias = super::page_table::phys_to_virt(pa).as_u64();

@@ -764,8 +764,22 @@ or IRQ handler clears it before its body. STAC/CLAC include compiler memory
 barriers around deliberate user copies. Boot probes verify inherited AC
 cannot bypass SMAP, supervisor execution of user pages is denied by SMEP,
 and user SIDT is denied where UMIP is supported. Unsupported CPUs use the
-baseline user page permissions. LASS support is detected but enabling it
-requires moving current lower-half kernel mappings into the higher half.
+baseline user page permissions. LASS is enabled when every admitted CPU
+supports LASS and SMAP. Its higher-half code/stack/physical-window prerequisites
+are asserted before setting CR4.LASS on each CPU. STAC/CLAC permits deliberate
+user data access; unguarded accesses and lower-half instruction fetches fault
+before page walking. Exact copy/probe fixups handle #GP(0) as well as #PF,
+clear saved AC, and leave unrelated kernel #GP faults fatal.
+
+LASS is selected independently of the transient-execution policy, like the
+other baseline access protections. Boot probes automatically exercise its
+read/execute fault paths on a supporting CPU. Noncanonical read/write and
+private-gate probes validate #GP recovery even without LASS. Host tests cover
+mixed CPU capabilities, missing SMAP, empty admission and reserved bits.
+The installed QEMU lacks LASS support; hardware enforcement remains untested.
+The architecture reports instruction-fetch violations at the branch target,
+which is why the armed fetch probe fixes up that target, not its caller
+([Intel SDM, linear-address preprocessing](https://cdrdv2-public.intel.com/851064/325384-087-sdm-vol-3abcd.pdf)).
 
 User copies use registered exception-table fixups: amd64 `rep movsb`
 inside the SMAP access window, and arm64 `ldtrb`/`sttrb` with EL0 permissions.
