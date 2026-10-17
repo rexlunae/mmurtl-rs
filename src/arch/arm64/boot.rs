@@ -461,6 +461,7 @@ extern "C" fn arm64_high_main(state: *const BootState) -> ! {
     // Interrupts: controller + this CPU, UART RX, the generic timer
     super::irq::init(&info);
     super::serial::enable_rx_irq();
+    crate::topology::bsp_ready();
 
     crate::serial::write_str("[INIT] Scheduler...\n");
     crate::scheduler::init();
@@ -468,6 +469,7 @@ extern "C" fn arm64_high_main(state: *const BootState) -> ! {
     crate::serial::write_str("[INIT] SMP...\n");
     super::smp::boot_secondaries(&info);
     crate::security::finalize();
+    crate::topology::report();
     super::predictor::finalize();
     super::mmu::finalize_asids();
     super::pan::init();

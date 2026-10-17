@@ -233,17 +233,29 @@ pub fn boot_aps() {
     }
 
     let mut cpu_num = 1u64; // BSP is CPU 0
-    for &apic_id in madt.cpu_apic_ids.iter() {
-        if apic_id == bsp_id {
-            continue;
-        }
+    let mut deferred = alloc::vec::Vec::new();
+    let mut boot = |apic_id| {
+        if cpu_num as usize >= crate::scheduler::MAX_CPUS { return false; }
         if !boot_one_ap(apic_id, cpu_num) {
             POSSIBLE_LATE_AP.store(true, Ordering::Release);
             // The low-memory mailbox/stack fields are shared. Never reuse
             // them after a timeout while the old AP might still read them.
-            break;
+            return false;
         }
         cpu_num += 1;
+        true
+    };
+    let mut complete = true;
+    for &apic_id in &madt.cpu_apic_ids {
+        if apic_id == bsp_id { continue; }
+        if crate::topology::covered_candidate(apic_id as u64) {
+            deferred.push(apic_id);
+            continue;
+        }
+        if !boot(apic_id) { complete = false; break; }
+    }
+    if complete {
+        for apic_id in deferred { if !boot(apic_id) { break; } }
     }
 
     crate::arch::microcode::seal();
@@ -327,13 +339,16 @@ pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
         }) { return false; }
         crate::arch::protection::enumerate(cpu_num as usize);
         crate::arch::set_user_counter_access(false);
-        true
+        crate::topology::admit(cpu_num as usize)
     }, || {
         crate::scheduler::register_ap(cpu_num as usize);
         CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
     }) {
-        // Finalized policy is immutable. This CPU never loads its IDT or
-        // joins the scheduler, and cannot execute unsupported entry CLAC.
+        // A sealed late starter is rejected before preparation. An SMT
+        // sibling prepared before sealing has guarded NMI/MC gates and its
+        // ISA participates in the shared CLAC decision, but runs no tasks.
+        // Acknowledge parking so the BSP can start other physical cores.
+        AP_READY.store(true, Ordering::SeqCst);
         loop { unsafe { core::arch::asm!("cli", "hlt", options(nomem, nostack)); } }
     }
     let apic_id = crate::arch::apic::local_apic_id();

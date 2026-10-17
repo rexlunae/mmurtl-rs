@@ -13,6 +13,7 @@
 extern crate alloc;
 
 mod arch;
+mod topology;
 mod serial;
 mod memory;
 mod scheduler;
