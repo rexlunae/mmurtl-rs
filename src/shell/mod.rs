@@ -294,6 +294,8 @@ fn execute(line: &str, cwd: &mut Path) -> Result<(), &'static str> {
             out!("{} KiB physical memory free\n",crate::memory::heap::free_frames()*4);
             let (live,cached,objects)=crate::memory::heap::stats();
             out!("{} KiB heap live, {} KiB slab backing, {} live allocations\n",live/1024,cached/1024,objects);
+            #[cfg(feature="kfence")]
+            out!("{} KiB sampled backing (including pending unmaps)\n",crate::memory::fence::stats().2/1024);
         }
         "UPTIME" if count == 0 => out!(
             "{} ms\n",

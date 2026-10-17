@@ -59,6 +59,8 @@ pub fn print_banner() {
 pub fn kernel_run() -> ! {
     kptr::init();
     random::report();
+    #[cfg(feature="test-heap-oom")]
+    memory::heap::oom_self_test();
     #[cfg(feature="test-kfence")]
     memory::fence::test();
     serial::write_line("[RETURN] strong compiler stack guards active");

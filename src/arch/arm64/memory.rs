@@ -48,7 +48,7 @@ pub fn phys_to_virt(phys: u64) -> *mut u8 {
 /// Separate randomized heap VA, backed by independent physical frames.
 pub fn heap_init(fa: &mut FrameAllocator) -> (u64, u64) {
     let start=crate::security::kaslr::arm_heap(crate::random::early_u64());
-    map_heap(start,HEAP_INITIAL,fa);
+    map_heap(start,HEAP_INITIAL,fa).expect("initial heap backing");
     (start,start+HEAP_INITIAL)
 }
 
@@ -56,14 +56,18 @@ pub fn heap_init(fa: &mut FrameAllocator) -> (u64, u64) {
 pub fn heap_extend(end: u64, needed: u64, fa: &mut FrameAllocator) -> Option<u64> {
     let grow = (needed + HEAP_GROW_CHUNK - 1) / HEAP_GROW_CHUNK * HEAP_GROW_CHUNK;
     if end.checked_add(grow)?>heap_limit() {return None;}
-    map_heap(end,grow,fa);Some(grow)
+    map_heap(end,grow,fa)?;Some(grow)
 }
 pub fn heap_limit()->u64 {0xffff_d400_0000_0000}
-fn map_heap(start:u64,size:u64,fa:&mut FrameAllocator) {
+fn map_heap(start:u64,size:u64,fa:&mut FrameAllocator)->Option<()> {
+    if fa.free_count()<crate::memory::slab::backing_frames(start,size)? {return None;}
+    // FRAME_LOCK remains held across preflight and publication. No other
+    // consumer can take these data/table frames before mapping completes.
     for va in (start..start+size).step_by(FRAME_SIZE as usize) {
         let pa=fa.allocate_zeroed_frame().expect("heap backing frame");
         super::mmu::map_heap_page(va,pa,fa);
     }
+    Some(())
 }
 
 /// IRQ-masked, non-nested user access windows (normally use uaccess wrappers).

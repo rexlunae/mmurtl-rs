@@ -1163,7 +1163,7 @@ tracked separately.
 
 The amd64 bootloader randomizes its PIE image, physical window, boot info and
 boot stack within `0xffff800000000000..0xffffbfffffffffff`. The heap has a
-separate, excluded range starting at `0xffffc00000000000`, with 21 bits of
+separate, excluded range starting at `0xffffc00000000000`, with nearly 21 bits of
 2-MiB placement selected after early microcode and CPU entropy initialization.
 Emergency stacks use a separate randomized region beginning at
 `0xffffc80000000000`, also excluded from bootloader and heap placement.
@@ -1503,10 +1503,17 @@ domain/size owner and is never reassigned, including after every object is
 freed. Backing remains cached at each class's peak footprint. This trades
 release of empty cache pages for protection against cross-cache VA reuse;
 object reclamation stops steady workloads from growing indefinitely.
+Scheduler slots retain exited-task bookkeeping until replacement drops the
+old task box/inbox. The churn assertion measures steady-state ownership,
+rather than requiring every metadata object to disappear immediately.
 Large classes use an aligned span; small classes share one page.
 ARM heap pages now have independent physical backing in a separate virtual
 region, removing the contiguous-physical-growth requirement. x86 establishes
 all heap PML4 links before private roots copy them.
+Every random start retains at least 128 GiB plus one growth chunk of virtual
+headroom, covering the allocator's span/alignment bounds. Growth preflights
+data and a conservative upper bound on page-table frames under FRAME_LOCK;
+insufficient capacity returns failure before any mapping is published.
 
 Free-list words encode `next ^ boot_secret ^ slot_address`, and every pop
 validates range, alignment, cache ownership and allocation bitmap before
@@ -1532,6 +1539,8 @@ Dedicated task/inbox caches and IRQ-masked allocations are not sampled.
 Guard/UAF diagnostics use lock-free UART output with allocation/free task
 and CPU context, cache, size and restricted fault addresses. Unwinding and
 allocation/free stack traces are unavailable in this aborting kernel.
+Live sample bytes/objects are included in heap totals; mapped sample backing,
+including pending unmaps, is reported separately from retained slab backing.
 MTE tagging is not implemented; tagging would be an additional probabilistic
 layer, rather than replacing ownership checks and scrubbing.
 
@@ -1546,6 +1555,11 @@ python3 tools/test-security.py --arch arm64 --cpu max --cpus 4 --el2 \
 make bios arm64 KERNEL_FEATURES=test-kfence
 python3 tools/test-cfi.py --arch amd64 --kind kfence
 python3 tools/test-cfi.py --arch arm64 --kind kfence
+make bios arm64 KERNEL_FEATURES=test-heap-oom
+python3 tools/test-security.py --arch amd64 --cpus 4 \
+  --require '[HEAP TEST] exhaustion preserved frames/mappings'
+python3 tools/test-security.py --arch arm64 --cpu max --cpus 4 \
+  --require '[HEAP TEST] exhaustion preserved frames/mappings'
 make bios arm64
 ```
 The task test warms caches, then requires stable live objects, cache backing

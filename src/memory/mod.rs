@@ -6,7 +6,7 @@
 
 pub mod frame_allocator;
 pub mod heap;
-mod slab;
+pub(crate) mod slab;
 #[cfg(feature="kfence")]
 pub mod fence;
 pub mod stacks;
