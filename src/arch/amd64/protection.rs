@@ -105,6 +105,7 @@ protection_smap_probe:
     int 0x83
     clac
     ret
+    int3
     .globl protection_test_gate
 protection_test_gate:
     cmp byte ptr [rip + SMAP_ENTRY_ENABLED], 0
@@ -115,19 +116,23 @@ protection_test_gate:
     movzx eax, byte ptr [rdi]
     xor eax, eax
     iretq
+    int3
 .Lsmap_denied:
     mov eax, 1
     iretq
+    int3
     .globl protection_smep_probe
 protection_smep_probe:
     call rdi
     xor eax, eax
     ret
+    int3
     .globl protection_smep_denied
 protection_smep_denied:
     add rsp, 8
     mov eax, 1
     ret
+    int3
     .pushsection .rodata.ex_table, "a"
     .balign 8
     .globl protection_test_ex_table

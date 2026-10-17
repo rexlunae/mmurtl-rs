@@ -15,6 +15,8 @@ user_copy_from:
 .Lfrom_done:
     mov x0, x2
     ret
+    dsb nsh
+    isb
     .globl user_copy_to
 user_copy_to:
     cbz x2, .Lto_done
@@ -29,6 +31,8 @@ user_copy_to:
 .Lto_done:
     mov x0, x2
     ret
+    dsb nsh
+    isb
     .pushsection .rodata.ex_table, "a"
     .balign 8
     .globl user_copy_ex_table

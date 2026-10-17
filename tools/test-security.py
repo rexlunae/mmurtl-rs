@@ -120,7 +120,7 @@ def main():
                         if b'NMI-SURVIVED\r\n/>' in output or b'NMI-SURVIVED\n/>' in output: break
                 assert output.count(b'NMI-SURVIVED') >= 2, 'shell did not respond after NMI'
             text = output.decode(errors='replace')
-            required = ['/> ', 'All userspace checks passed', 'All IPC checks passed', *args.require]
+            required = ['/> ', 'All userspace checks passed', 'All IPC checks passed', 'entry register/flags round trip passed', *args.require]
             for marker in required:
                 assert marker in text, f'missing {marker!r}:\n{text[-5000:]}'
             assert '!!! KERNEL PANIC' not in text and 'checks FAILED' not in text

@@ -10,8 +10,10 @@ ucode_rdmsr:
     movq %rax, (%rsi)
     xorl %eax, %eax
     retq
+    int3
 2:  movl $1, %eax
     retq
+    int3
 ucode_wrmsr:
     movl %edi, %ecx
     movl %esi, %eax
@@ -20,16 +22,20 @@ ucode_wrmsr:
 3:  wrmsr
     xorl %eax, %eax
     retq
+    int3
 4:  movl $1, %eax
     retq
+    int3
 .global ucode_gp_probe
 ucode_gp_probe:
     movw $0xfff8, %ax
 5:  movw %ax, %ds
     xorl %eax, %eax
     retq
+    int3
 6:  movl $1, %eax
     retq
+    int3
 .pushsection .rodata.ucode_ex_table, "a"
 .balign 8
 .global ucode_ex_table

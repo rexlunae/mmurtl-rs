@@ -12,21 +12,33 @@ wx_write_pc:
     strb w1, [x0]
     mov x0, #0
     ret
+    dsb nsh
+    isb
 wx_write_denied:
     mov x0, #1
     ret
+    dsb nsh
+    isb
 wx_execute:
     stp x29, x30, [sp, #-16]!
     blr x0
+    dsb nsh
+    isb
     mov x0, #0
     ldp x29, x30, [sp], #16
     ret
+    dsb nsh
+    isb
 wx_execute_denied:
     mov x0, #1
     ldp x29, x30, [sp], #16
     ret
+    dsb nsh
+    isb
 wx_text:
     ret
+    dsb nsh
+    isb
 "#);
 extern "C" {
     fn wx_write(ptr: u64, value: u64) -> u64;

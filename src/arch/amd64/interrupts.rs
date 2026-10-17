@@ -1,7 +1,8 @@
 //! Interrupt Descriptor Table — Handles CPU exceptions and hardware IRQs.
 //!
 //! Sets up IDT entries for all CPU exceptions and hardware IRQs.
-//! Includes handlers with proper x86-interrupt calling convention.
+//! Explicit assembly entries preserve CPU frames and clear live registers
+//! before ordinary Rust handlers run.
 
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use x86_64::instructions::port::Port;
@@ -91,7 +92,7 @@ pub fn unmask_console() {
     }
 }
 
-extern "x86-interrupt" fn com1_handler(_frame: InterruptStackFrame) {
+fn com1_handler(_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     crate::arch::serial::handle_rx_irq();
     irq_eoi(4);
@@ -99,7 +100,7 @@ extern "x86-interrupt" fn com1_handler(_frame: InterruptStackFrame) {
 
 /// Test-only DPL0 interrupt: deliberately change carry in the handler.
 /// IRET must restore the interrupted comparison's CF before SBB resumes.
-extern "x86-interrupt" fn nospec_flags_handler(_frame: InterruptStackFrame) {
+fn nospec_flags_handler(_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     unsafe { core::arch::asm!("cmc", options(nostack)); }
 }
@@ -143,7 +144,7 @@ impl InterruptIndex {
 
 // ========================================================================
 // Interrupt Handler Definitions
-// All handlers use `extern "x86-interrupt"` calling convention
+// Assembly saves/clears all GPRs; ordinary Rust handlers borrow the CPU frame.
 // ========================================================================
 
 /// Whether an exception was raised by ring-3 code
@@ -157,7 +158,7 @@ fn kill_user_task(frame: &InterruptStackFrame, what: &str, addr: Option<u64>) ->
     crate::userspace::kill_faulting_task(what, frame.instruction_pointer.as_u64(), addr)
 }
 
-extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
+fn divide_error_handler(stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     if from_user(&stack_frame) {
         kill_user_task(&stack_frame, "#DE divide error", None);
@@ -171,7 +172,7 @@ static CPU_NMIS: [core::sync::atomic::AtomicU64; crate::scheduler::MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; crate::scheduler::MAX_CPUS];
 pub fn current_nmi_count() -> u64 { CPU_NMIS[super::cpu_index()].load(core::sync::atomic::Ordering::Relaxed) }
 
-extern "x86-interrupt" fn debug_handler(mut stack_frame: InterruptStackFrame) {
+fn debug_handler(stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     // The saved CS describes where #DB was delivered, not who armed TF.
     // A deferred user trap delivered ANYWHERE inside a kernel entry has
@@ -203,7 +204,7 @@ pub fn debug_self_test() {
     assert!(DEBUG_EVENTS.load(core::sync::atomic::Ordering::Relaxed) > before);
 }
 
-extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
+fn nmi_handler(_stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     // NMI can interrupt a serial writer or allocator while it holds a
     // lock. Count it without printing, allocating, or entering the scheduler.
@@ -211,24 +212,24 @@ extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
     CPU_NMIS[super::cpu_index()].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
-extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
+fn breakpoint_handler(stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     crate::serial::write_str("[BREAKPOINT] at ");
     crate::kptr::write(stack_frame.instruction_pointer.as_u64());
     crate::serial::write_str("\n");
 }
 
-extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
+fn overflow_handler(stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     panic!("OVERFLOW\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn bound_range_handler(stack_frame: InterruptStackFrame) {
+fn bound_range_handler(stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     panic!("BOUND RANGE EXCEEDED\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+fn invalid_opcode_handler(stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     if from_user(&stack_frame) {
         kill_user_task(&stack_frame, "#UD invalid opcode", None);
@@ -236,38 +237,38 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     panic!("INVALID OPCODE\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptStackFrame) {
+fn device_not_available_handler(stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     if from_user(&stack_frame) { kill_user_task(&stack_frame, "#NM FP/SIMD disabled", None); }
     panic!("Kernel used disabled FP/SIMD\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn double_fault_handler(
-    stack_frame: InterruptStackFrame,
+fn double_fault_handler(
+    stack_frame: &mut InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
     super::protection::clear_access();
     panic!("DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn invalid_tss_handler(
-    stack_frame: InterruptStackFrame,
+fn invalid_tss_handler(
+    stack_frame: &mut InterruptStackFrame,
     error_code: u64,
 ) {
     super::protection::clear_access();
     panic!("INVALID TSS error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
 
-extern "x86-interrupt" fn segment_not_present_handler(
-    stack_frame: InterruptStackFrame,
+fn segment_not_present_handler(
+    stack_frame: &mut InterruptStackFrame,
     error_code: u64,
 ) {
     super::protection::clear_access();
     panic!("SEGMENT NOT PRESENT error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
 
-extern "x86-interrupt" fn stack_segment_handler(
-    stack_frame: InterruptStackFrame,
+fn stack_segment_handler(
+    stack_frame: &mut InterruptStackFrame,
     error_code: u64,
 ) {
     super::protection::clear_access();
@@ -277,8 +278,8 @@ extern "x86-interrupt" fn stack_segment_handler(
     panic!("STACK SEGMENT FAULT error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
 
-extern "x86-interrupt" fn general_protection_handler(
-    mut stack_frame: InterruptStackFrame,
+fn general_protection_handler(
+    stack_frame: &mut InterruptStackFrame,
     error_code: u64,
 ) {
     super::protection::clear_access();
@@ -303,8 +304,8 @@ extern "x86-interrupt" fn general_protection_handler(
     panic!("GENERAL PROTECTION FAULT error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
 
-extern "x86-interrupt" fn page_fault_handler(
-    mut stack_frame: InterruptStackFrame,
+fn page_fault_handler(
+    stack_frame: &mut InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     super::protection::clear_access();
@@ -343,14 +344,14 @@ extern "x86-interrupt" fn page_fault_handler(
     panic!("Unresolved page fault");
 }
 
-extern "x86-interrupt" fn x87_fpu_handler(stack_frame: InterruptStackFrame) {
+fn x87_fpu_handler(stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     if from_user(&stack_frame) { kill_user_task(&stack_frame, "#MF floating-point exception", None); }
     panic!("x87 FPU ERROR\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn alignment_check_handler(
-    stack_frame: InterruptStackFrame,
+fn alignment_check_handler(
+    stack_frame: &mut InterruptStackFrame,
     error_code: u64,
 ) {
     super::protection::clear_access();
@@ -401,7 +402,7 @@ pub fn test_machine_check() -> ! {
     unsafe { core::arch::asm!("int 0x12", options(noreturn)); }
 }
 
-extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame) -> ! {
+fn machine_check_handler(stack_frame: &mut InterruptStackFrame) -> ! {
     super::protection::clear_access();
     emergency_text("\n[MCE] fatal machine check at ");
     // Machine checks cannot take formatting/RNG/serial locks. Redact with
@@ -433,19 +434,19 @@ extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame
     loop { unsafe { core::arch::asm!("cli", "hlt", options(nomem, nostack)); } }
 }
 
-extern "x86-interrupt" fn simd_fpu_handler(stack_frame: InterruptStackFrame) {
+fn simd_fpu_handler(stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     if from_user(&stack_frame) { kill_user_task(&stack_frame, "#XM SIMD exception", None); }
     panic!("SIMD FPU ERROR\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFrame) {
+fn virtualization_handler(stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     panic!("VIRTUALIZATION EXCEPTION\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn security_exception_handler(
-    stack_frame: InterruptStackFrame,
+fn security_exception_handler(
+    stack_frame: &mut InterruptStackFrame,
     error_code: u64,
 ) {
     super::protection::clear_access();
@@ -485,6 +486,21 @@ core::arch::global_asm!(
     "push r15",
     // RSP now points to saved TaskContext — pass it to the scheduler
     "mov rdi, rsp",
+    "xor eax, eax",
+    "xor ecx, ecx",
+    "xor edx, edx",
+    "xor ebx, ebx",
+    "xor ebp, ebp",
+    "xor esi, esi",
+    "xor r8d, r8d",
+    "xor r9d, r9d",
+    "xor r10d, r10d",
+    "xor r11d, r11d",
+    "xor r12d, r12d",
+    "xor r13d, r13d",
+    "xor r14d, r14d",
+    "xor r15d, r15d",
+    "cld",
     // Call the Rust scheduler — returns new RSP in RAX.
     // (EOI is sent inside schedule_and_switch, APIC- or PIC-appropriate.)
     // NOTE: schedule_and_switch returns with the scheduler lock still
@@ -516,6 +532,7 @@ core::arch::global_asm!(
     "pop rax",
     // Return to the next task
     "iretq",
+    "int3",
 
     // Voluntary yield (int YIELD_VECTOR): identical context save, but
     // calls yield_and_switch (no EOI — nothing to acknowledge) and then
@@ -542,11 +559,26 @@ core::arch::global_asm!(
     "push r14",
     "push r15",
     "mov rdi, rsp",
+    "xor eax, eax",
+    "xor ecx, ecx",
+    "xor edx, edx",
+    "xor ebx, ebx",
+    "xor ebp, ebp",
+    "xor esi, esi",
+    "xor r8d, r8d",
+    "xor r9d, r9d",
+    "xor r10d, r10d",
+    "xor r11d, r11d",
+    "xor r12d, r12d",
+    "xor r13d, r13d",
+    "xor r14d, r14d",
+    "xor r15d, r15d",
+    "cld",
     "call yield_and_switch",
     "jmp context_switch_tail"
 );
 
-extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
+fn keyboard_handler(_stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     let scancode: u8 = unsafe {
         let mut status_port: Port<u8> = Port::new(0x64);
@@ -561,11 +593,12 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 }
 
 /// LAPIC spurious interrupt — no EOI must be sent
-extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {
-    super::protection::clear_access();}
+fn spurious_handler(_stack_frame: &mut InterruptStackFrame) {
+    super::protection::clear_access();
+}
 
 /// LAPIC error interrupt
-extern "x86-interrupt" fn apic_error_handler(_stack_frame: InterruptStackFrame) {
+fn apic_error_handler(_stack_frame: &mut InterruptStackFrame) {
     super::protection::clear_access();
     crate::serial::write_line("[APIC] Error interrupt received");
     crate::arch::apic::eoi();
@@ -575,6 +608,165 @@ extern "x86-interrupt" fn apic_error_handler(_stack_frame: InterruptStackFrame) 
 // IDT Initialization
 // ========================================================================
 
+// A uniform error/vector prefix makes every gate's saved GPR frame identical.
+// Hardware has aligned RSP to 16 bytes; the prefix plus 15 GPRs preserves
+// SysV call alignment. The CPU frame is borrowed in place, including fixups.
+core::arch::global_asm!(r#"
+.macro INTERRUPT_STUB name, vector, error
+.global \name
+\name:
+    cmp byte ptr [rip + SMAP_ENTRY_ENABLED], 0
+    je 1f
+    clac
+1:
+.if !\error
+    push 0
+.endif
+    push \vector
+    jmp x86_exception_common
+.endm
+INTERRUPT_STUB entry_divide_error_handler, 0, 0
+INTERRUPT_STUB entry_debug_handler, 1, 0
+INTERRUPT_STUB entry_nmi_handler, 2, 0
+INTERRUPT_STUB entry_breakpoint_handler, 3, 0
+INTERRUPT_STUB entry_overflow_handler, 4, 0
+INTERRUPT_STUB entry_bound_range_handler, 5, 0
+INTERRUPT_STUB entry_invalid_opcode_handler, 6, 0
+INTERRUPT_STUB entry_device_not_available_handler, 7, 0
+INTERRUPT_STUB entry_double_fault_handler, 8, 1
+INTERRUPT_STUB entry_invalid_tss_handler, 10, 1
+INTERRUPT_STUB entry_segment_not_present_handler, 11, 1
+INTERRUPT_STUB entry_stack_segment_handler, 12, 1
+INTERRUPT_STUB entry_general_protection_handler, 13, 1
+INTERRUPT_STUB entry_page_fault_handler, 14, 1
+INTERRUPT_STUB entry_x87_fpu_handler, 16, 0
+INTERRUPT_STUB entry_alignment_check_handler, 17, 1
+INTERRUPT_STUB entry_machine_check_handler, 18, 0
+INTERRUPT_STUB entry_simd_fpu_handler, 19, 0
+INTERRUPT_STUB entry_virtualization_handler, 20, 0
+INTERRUPT_STUB entry_security_exception_handler, 30, 1
+INTERRUPT_STUB entry_keyboard_handler, 33, 0
+INTERRUPT_STUB entry_com1_handler, 36, 0
+INTERRUPT_STUB entry_apic_error_handler, 254, 0
+INTERRUPT_STUB entry_spurious_handler, 255, 0
+INTERRUPT_STUB entry_nospec_flags_handler, 132, 0
+INTERRUPT_STUB entry_tlb_handler, 50, 0
+
+.global x86_exception_common
+x86_exception_common:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, [rsp + 120]
+    lea rsi, [rsp + 136]
+    mov rdx, [rsp + 128]
+    xor eax, eax
+    xor ecx, ecx
+    xor ebx, ebx
+    xor ebp, ebp
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+    xor r12d, r12d
+    xor r13d, r13d
+    xor r14d, r14d
+    xor r15d, r15d
+    cld
+    call x86_exception_dispatch
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    add rsp, 16
+    iretq
+    int3
+"#);
+extern "C" {
+    fn entry_divide_error_handler();
+    fn entry_debug_handler();
+    fn entry_nmi_handler();
+    fn entry_breakpoint_handler();
+    fn entry_overflow_handler();
+    fn entry_bound_range_handler();
+    fn entry_invalid_opcode_handler();
+    fn entry_device_not_available_handler();
+    fn entry_double_fault_handler();
+    fn entry_invalid_tss_handler();
+    fn entry_segment_not_present_handler();
+    fn entry_stack_segment_handler();
+    fn entry_general_protection_handler();
+    fn entry_page_fault_handler();
+    fn entry_x87_fpu_handler();
+    fn entry_alignment_check_handler();
+    fn entry_machine_check_handler();
+    fn entry_simd_fpu_handler();
+    fn entry_virtualization_handler();
+    fn entry_security_exception_handler();
+    fn entry_keyboard_handler();
+    fn entry_com1_handler();
+    fn entry_apic_error_handler();
+    fn entry_spurious_handler();
+    fn entry_nospec_flags_handler();
+    fn entry_tlb_handler();
+}
+#[no_mangle]
+unsafe extern "C" fn x86_exception_dispatch(vector: u64, frame: &mut InterruptStackFrame, error: u64) {
+    match vector {
+        0 => divide_error_handler(frame),
+        1 => debug_handler(frame),
+        2 => nmi_handler(frame),
+        3 => breakpoint_handler(frame),
+        4 => overflow_handler(frame),
+        5 => bound_range_handler(frame),
+        6 => invalid_opcode_handler(frame),
+        7 => device_not_available_handler(frame),
+        8 => double_fault_handler(frame, error),
+        10 => invalid_tss_handler(frame, error),
+        11 => segment_not_present_handler(frame, error),
+        12 => stack_segment_handler(frame, error),
+        13 => general_protection_handler(frame, error),
+        14 => page_fault_handler(frame, PageFaultErrorCode::from_bits_truncate(error)),
+        16 => x87_fpu_handler(frame),
+        17 => alignment_check_handler(frame, error),
+        18 => machine_check_handler(frame),
+        19 => simd_fpu_handler(frame),
+        20 => virtualization_handler(frame),
+        30 => security_exception_handler(frame, error),
+        33 => keyboard_handler(frame),
+        36 => com1_handler(frame),
+        254 => apic_error_handler(frame),
+        255 => spurious_handler(frame),
+        132 => nospec_flags_handler(frame),
+        50 => super::wx::tlb_handler(),
+        _ => panic!("unregistered exception stub"),
+    }
+}
+
+
 /// Timer handler — defined in global_asm above
 extern "C" {
     fn timer_handler();
@@ -582,34 +774,34 @@ extern "C" {
 }
 
 /// The IDT — initialized once at boot
-static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
+static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| unsafe {
     let mut idt = InterruptDescriptorTable::new();
 
     // CPU exceptions
-    idt.divide_error.set_handler_fn(divide_error_handler);
+    idt.divide_error.set_handler_addr(x86_64::VirtAddr::new(entry_divide_error_handler as *const () as u64));
     unsafe {
-        idt.debug.set_handler_fn(debug_handler).set_stack_index(super::gdt::DEBUG_IST_INDEX);
-        idt.non_maskable_interrupt.set_handler_fn(nmi_handler).set_stack_index(super::gdt::NMI_IST_INDEX);
-        idt.machine_check.set_handler_fn(machine_check_handler).set_stack_index(super::gdt::MACHINE_CHECK_IST_INDEX);
+        idt.debug.set_handler_addr(x86_64::VirtAddr::new(entry_debug_handler as *const () as u64)).set_stack_index(super::gdt::DEBUG_IST_INDEX);
+        idt.non_maskable_interrupt.set_handler_addr(x86_64::VirtAddr::new(entry_nmi_handler as *const () as u64)).set_stack_index(super::gdt::NMI_IST_INDEX);
+        idt.machine_check.set_handler_addr(x86_64::VirtAddr::new(entry_machine_check_handler as *const () as u64)).set_stack_index(super::gdt::MACHINE_CHECK_IST_INDEX);
     }
-    idt.breakpoint.set_handler_fn(breakpoint_handler);
-    idt.overflow.set_handler_fn(overflow_handler);
-    idt.bound_range_exceeded.set_handler_fn(bound_range_handler);
-    idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
-    idt.device_not_available.set_handler_fn(device_not_available_handler);
-    idt.invalid_tss.set_handler_fn(invalid_tss_handler);
-    idt.segment_not_present.set_handler_fn(segment_not_present_handler);
-    idt.stack_segment_fault.set_handler_fn(stack_segment_handler);
-    idt.general_protection_fault.set_handler_fn(general_protection_handler);
-    idt.page_fault.set_handler_fn(page_fault_handler);
-    idt[0x32].set_handler_fn(super::wx::tlb_handler);
-    idt[0x84].set_handler_fn(nospec_flags_handler);
+    idt.breakpoint.set_handler_addr(x86_64::VirtAddr::new(entry_breakpoint_handler as *const () as u64));
+    idt.overflow.set_handler_addr(x86_64::VirtAddr::new(entry_overflow_handler as *const () as u64));
+    idt.bound_range_exceeded.set_handler_addr(x86_64::VirtAddr::new(entry_bound_range_handler as *const () as u64));
+    idt.invalid_opcode.set_handler_addr(x86_64::VirtAddr::new(entry_invalid_opcode_handler as *const () as u64));
+    idt.device_not_available.set_handler_addr(x86_64::VirtAddr::new(entry_device_not_available_handler as *const () as u64));
+    idt.invalid_tss.set_handler_addr(x86_64::VirtAddr::new(entry_invalid_tss_handler as *const () as u64));
+    idt.segment_not_present.set_handler_addr(x86_64::VirtAddr::new(entry_segment_not_present_handler as *const () as u64));
+    idt.stack_segment_fault.set_handler_addr(x86_64::VirtAddr::new(entry_stack_segment_handler as *const () as u64));
+    idt.general_protection_fault.set_handler_addr(x86_64::VirtAddr::new(entry_general_protection_handler as *const () as u64));
+    idt.page_fault.set_handler_addr(x86_64::VirtAddr::new(entry_page_fault_handler as *const () as u64));
+    idt[0x32].set_handler_addr(x86_64::VirtAddr::new(entry_tlb_handler as *const () as u64));
+    idt[0x84].set_handler_addr(x86_64::VirtAddr::new(entry_nospec_flags_handler as *const () as u64));
     unsafe { idt[0x83].set_handler_addr(x86_64::VirtAddr::new(super::protection::test_gate_address())); }
-    idt.x87_floating_point.set_handler_fn(x87_fpu_handler);
-    idt.alignment_check.set_handler_fn(alignment_check_handler);
-    idt.simd_floating_point.set_handler_fn(simd_fpu_handler);
-    idt.virtualization.set_handler_fn(virtualization_handler);
-    idt.security_exception.set_handler_fn(security_exception_handler);
+    idt.x87_floating_point.set_handler_addr(x86_64::VirtAddr::new(entry_x87_fpu_handler as *const () as u64));
+    idt.alignment_check.set_handler_addr(x86_64::VirtAddr::new(entry_alignment_check_handler as *const () as u64));
+    idt.simd_floating_point.set_handler_addr(x86_64::VirtAddr::new(entry_simd_fpu_handler as *const () as u64));
+    idt.virtualization.set_handler_addr(x86_64::VirtAddr::new(entry_virtualization_handler as *const () as u64));
+    idt.security_exception.set_handler_addr(x86_64::VirtAddr::new(entry_security_exception_handler as *const () as u64));
 
     // Hardware interrupts
     unsafe {
@@ -629,17 +821,17 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             .set_handler_addr(x86_64::VirtAddr::new(super::syscall::entry_address()))
             .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
     }
-    idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_handler);
-    idt[InterruptIndex::Com1.as_usize()].set_handler_fn(com1_handler);
+    idt[InterruptIndex::Keyboard.as_usize()].set_handler_addr(x86_64::VirtAddr::new(entry_keyboard_handler as *const () as u64));
+    idt[InterruptIndex::Com1.as_usize()].set_handler_addr(x86_64::VirtAddr::new(entry_com1_handler as *const () as u64));
 
     // LAPIC vectors
-    idt[crate::arch::apic::ERROR_VECTOR as usize].set_handler_fn(apic_error_handler);
-    idt[crate::arch::apic::SPURIOUS_VECTOR as usize].set_handler_fn(spurious_handler);
+    idt[crate::arch::apic::ERROR_VECTOR as usize].set_handler_addr(x86_64::VirtAddr::new(entry_apic_error_handler as *const () as u64));
+    idt[crate::arch::apic::SPURIOUS_VECTOR as usize].set_handler_addr(x86_64::VirtAddr::new(entry_spurious_handler as *const () as u64));
 
     // Double fault with IST stack
     unsafe {
         idt.double_fault
-            .set_handler_fn(double_fault_handler)
+            .set_handler_addr(x86_64::VirtAddr::new(entry_double_fault_handler as *const () as u64))
             .set_stack_index(crate::arch::gdt::DOUBLE_FAULT_IST_INDEX);
     }
 

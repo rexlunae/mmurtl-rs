@@ -44,6 +44,21 @@ core::arch::global_asm!(
     "push r14",
     "push r15",
     "mov rdi, rsp",
+    "xor eax, eax",
+    "xor ecx, ecx",
+    "xor edx, edx",
+    "xor ebx, ebx",
+    "xor ebp, ebp",
+    "xor esi, esi",
+    "xor r8d, r8d",
+    "xor r9d, r9d",
+    "xor r10d, r10d",
+    "xor r11d, r11d",
+    "xor r12d, r12d",
+    "xor r13d, r13d",
+    "xor r14d, r14d",
+    "xor r15d, r15d",
+    "cld",
     // We are on the caller's own kernel stack: run the handler with
     // interrupts on, so it can be preempted and can block.
     "sti",
@@ -65,6 +80,7 @@ core::arch::global_asm!(
     "pop rcx",
     "pop rax", // the handler stored the return value in the saved RAX
     "iretq",
+    "int3",
 );
 
 extern "C" {

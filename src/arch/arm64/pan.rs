@@ -104,17 +104,25 @@ pan_read_probe:
     ldrb w1, [x0]
     mov x0, #0
     ret
+    dsb nsh
+    isb
 .Lpan_read_denied:
     mov x0, #1
     ret
+    dsb nsh
+    isb
 pan_write_probe:
 .Lpan_write_fault:
     strb w1, [x0]
     mov x0, #0
     ret
+    dsb nsh
+    isb
 .Lpan_write_denied:
     mov x0, #1
     ret
+    dsb nsh
+    isb
 .pushsection .rodata.pan_ex_table, "a"
 .balign 8
 .global pan_ex_table

@@ -112,6 +112,7 @@ ap_tramp_lm64:
     movq ap_tramp_entry - ap_trampoline_start + 0x8000, %rax
     xorl %ebp, %ebp
     jmpq *%rax
+    int3
 
 # Minimal GDT for the mode transitions (the AP loads the real kernel GDT
 # once it reaches Rust code)

@@ -11,6 +11,7 @@ user_copy_bytes:
 .Lcopy_fixup:
     mov rax, rcx
     ret
+    int3
     .pushsection .rodata.ex_table, "a"
     .balign 8
     .globl user_copy_ex_table

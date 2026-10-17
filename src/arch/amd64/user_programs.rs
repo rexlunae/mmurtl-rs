@@ -287,6 +287,63 @@ user_pmu_start:
 user_pmu_end:
     .globl user_coarse_start
 user_coarse_start:
+    # Seed every non-return GPR and user CF/DF before crossing into EL1.
+    movq $257, %rbx
+    movq $258, %rbp
+    movq $259, %rcx
+    movq $260, %rdx
+    movq $261, %rsi
+    movq $262, %rdi
+    movq $263, %r8
+    movq $264, %r9
+    movq $265, %r10
+    movq $266, %r11
+    movq $267, %r12
+    movq $268, %r13
+    movq $269, %r14
+    movq $270, %r15
+    movl $10, %eax
+    stc
+    std
+    int $0x80
+    pushfq
+    popq %rax
+    cld
+    andl $0x401, %eax
+    cmpl $0x401, %eax
+    jne .Lentryregs_fail
+    cmpq $257, %rbx
+    jne .Lentryregs_fail
+    cmpq $258, %rbp
+    jne .Lentryregs_fail
+    cmpq $259, %rcx
+    jne .Lentryregs_fail
+    cmpq $260, %rdx
+    jne .Lentryregs_fail
+    cmpq $261, %rsi
+    jne .Lentryregs_fail
+    cmpq $262, %rdi
+    jne .Lentryregs_fail
+    cmpq $263, %r8
+    jne .Lentryregs_fail
+    cmpq $264, %r9
+    jne .Lentryregs_fail
+    cmpq $265, %r10
+    jne .Lentryregs_fail
+    cmpq $266, %r11
+    jne .Lentryregs_fail
+    cmpq $267, %r12
+    jne .Lentryregs_fail
+    cmpq $268, %r13
+    jne .Lentryregs_fail
+    cmpq $269, %r14
+    jne .Lentryregs_fail
+    cmpq $270, %r15
+    jne .Lentryregs_fail
+    movl $1, %eax
+    leaq .Lentryregs_message(%rip), %rdi
+    movl $(.Lentryregs_message_end - .Lentryregs_message), %esi
+    int $0x80
     movl $10, %eax
     int $0x80
     movq %rax, %r12
@@ -300,6 +357,11 @@ user_coarse_start:
     xorl %eax, %eax
     int $0x80
 2:  ud2
+.Lentryregs_fail:
+    ud2
+.Lentryregs_message:
+    .ascii "[USER] entry register/flags round trip passed\n"
+.Lentryregs_message_end:
     .globl user_coarse_end
 user_coarse_end:
 

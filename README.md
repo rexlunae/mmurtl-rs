@@ -1200,3 +1200,31 @@ with kernel addresses and enters the real guarded #MC gate, checking that
 RIP/ADDR/MISC are restricted. Adding `,debug-addresses` and passing `--debug`
 checks the opt-in diagnostic output. Rebuild normally afterward: the test
 image intentionally halts instead of starting the shell.
+
+### Entry register and straight-line speculation hygiene
+
+All x86 syscall, timer/yield, exception and device-interrupt gates save the
+complete GPR state before clearing live registers. Exception stubs normalize
+the error/vector prefix and invoke ordinary Rust handlers with only a trusted
+vector, CPU-frame pointer and error code. The borrowed hardware frame carries
+fault fixups back to assembly; the common tail restores GPRs and executes
+IRETQ. Existing guarded IST stacks remain in use. CLD establishes the Rust
+ABI's direction-flag assumption, while the saved user flags are restored.
+ARM similarly clears x2–x30 after saving state and closing PAN, before Rust.
+
+LLVM SLS features protect compiled returns and indirect transfers, including
+core/alloc. Handwritten x86 RET/IRETQ, GDT far returns and indirect AP handoff paths have INT3
+fall-through barriers; ARM RET/ERET/BR paths have baseline DSB NSH; ISB, and
+the boot-only BLR fault probe does likewise. ARM compiler indirect-call thunks
+use hardened branch tails. These build-time sequences remain present with
+`mitigations=off`. They reduce fall-through speculation and available live
+operands; predictor isolation and return-prediction attacks remain separate.
+
+`tools/test-entry-sls.py` checks the optimized entry saves/clears, x86 CLD and
+transfer barriers throughout executable kernel code. The mixed-mode x86 AP
+trampoline is excluded from the general decode, with its 64-bit indirect
+handoff checked separately. A user probe reuses the coarse-clock task, seeds
+every non-return GPR and flags, invokes a syscall and verifies restoration;
+it does not add a task or expose a debug syscall. The x86 probe includes DF=1.
+These checks establish emitted instructions and architectural behavior in
+QEMU, rather than a hardware side-channel proof.

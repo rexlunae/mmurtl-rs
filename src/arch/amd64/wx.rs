@@ -14,7 +14,7 @@ unsafe fn flush_all() {
     }
 }
 
-pub extern "x86-interrupt" fn tlb_handler(_: x86_64::structures::idt::InterruptStackFrame) {
+pub fn tlb_handler() {
     super::protection::clear_access();
     unsafe { flush_all(); }
     super::apic::eoi();
