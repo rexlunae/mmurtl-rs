@@ -144,6 +144,7 @@ pub fn kernel_run() -> ! {
     serial::write_str(" CPU(s) scheduling.\n");
 
     // Enable interrupts — the boot CPU joins the scheduling rotation
+    scheduler::start();
     arch::enable_interrupts();
 
     // Idle loop

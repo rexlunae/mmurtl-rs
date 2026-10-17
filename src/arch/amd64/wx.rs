@@ -9,6 +9,9 @@ static SHOOTDOWN: spin::Mutex<()> = spin::Mutex::new(());
 pub fn invalidate_shared() {
     let targets = crate::scheduler::boot_cpu_targets();
     let _guard = SHOOTDOWN.lock();
+    // Pin the caller until its local flush and all remote acknowledgments
+    // finish; migration could otherwise skip the CPU recorded as current.
+    crate::arch::without_interrupts(|| {
     let current = super::cpu_index();
     unsafe { flush_all(); }
     for (cpu, target) in targets.iter().enumerate() {
@@ -26,6 +29,7 @@ pub fn invalidate_shared() {
         }
         assert!(ACK[cpu].load(Ordering::Acquire), "runtime stack TLB shootdown timeout");
     }
+    });
 }
 unsafe fn flush_all() {
     // CR3 alone does not invalidate global translations.

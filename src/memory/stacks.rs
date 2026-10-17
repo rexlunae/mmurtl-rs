@@ -79,6 +79,7 @@ pub fn init() {
     crate::arch::stacks::init_emergency();
 }
 pub fn allocate() -> crate::scheduler::KernelStack {
+    assert!(!crate::scheduler::running() || crate::arch::stacks::interrupts_enabled(), "runtime stack allocation requires IRQs enabled");
     let _mapping = MAPPINGS.lock();
     let guard = NEXT.fetch_update(Ordering::AcqRel, Ordering::Acquire,
         |old| old.checked_add(STRIDE).filter(|end| *end <= LIMIT))
@@ -115,10 +116,12 @@ pub extern "C" fn kernel_stack_fatal() -> ! {
     write(b"\n[STACK] DOUBLE FAULT / kernel stack guard hit on CPU");
     decimal(crate::arch::cpu_index() as u32);
     write(b" task T"); decimal(TASKS[crate::arch::cpu_index()].load(Ordering::Relaxed));
-    write(b"; emergency stack active; CPU halted\n");
+    write(if crate::arch::stacks::on_emergency_stack() { b"; emergency stack active; CPU halted\n" }
+        else { b"; ERROR: outside emergency stack; CPU halted\n" });
     loop { crate::arch::halt(); }
 }
 pub fn release(virt: u64, phys: u64) -> u64 {
+    assert!(crate::arch::stacks::interrupts_enabled(), "stack reclamation requires IRQs enabled");
     let _mapping = MAPPINGS.lock();
     assert!(virt >= BASE + 2 * PAGE && virt + SIZE < LIMIT);
     let mut pages = [0; (SIZE / PAGE) as usize];
@@ -157,6 +160,7 @@ pub fn test_overflow() -> ! {
             "mov sp, x0", "str xzr, [sp]", "brk #0", options(noreturn)); }
     }
     crate::scheduler::create_task(overflow, crate::scheduler::PRIORITY_DEFAULT, "stack_overflow");
+    crate::scheduler::start();
     crate::arch::enable_interrupts();
     loop { crate::arch::halt(); }
 }

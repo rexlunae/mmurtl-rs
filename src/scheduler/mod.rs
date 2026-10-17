@@ -415,6 +415,11 @@ impl Scheduler {
 use spin::Mutex;
 
 static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+static STARTED: AtomicBool = AtomicBool::new(false);
+pub fn running() -> bool { STARTED.load(Ordering::Acquire) }
+/// APs may handle boot IPIs early, but must not run tasks/reclamation while
+/// the BSP is still constructing tasks with interrupts disabled.
+pub fn start() { STARTED.store(true, Ordering::Release); }
 
 /// Run a closure with the scheduler locked and interrupts disabled on the
 /// calling CPU (the only safe way to take the lock outside an interrupt).
@@ -481,6 +486,7 @@ pub fn register_ap(cpu: usize) {
 /// Only from interrupt context, with `current_sp` pointing at the saved
 /// context on the current task's stack.
 pub unsafe fn switch_from_interrupt(current_sp: u64, timer: bool) -> u64 {
+    if !running() { return current_sp; }
     let cpu = current_cpu();
     let mut sched = SCHEDULER.lock();
     crate::arch::nospec::barrier_nospec();

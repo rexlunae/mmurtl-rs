@@ -11,6 +11,12 @@ pub fn unmap(va: u64) -> u64 {
     unsafe { page_table::unmap_page(Page::containing_address(VirtAddr::new(va))).expect("stack unmap").start_address().as_u64() }
 }
 pub fn invalidate() { super::wx::invalidate_shared(); }
+pub fn interrupts_enabled() -> bool { x86_64::instructions::interrupts::are_enabled() }
+pub fn on_emergency_stack() -> bool {
+    let sp: u64; unsafe { core::arch::asm!("mov {}, rsp",out(reg) sp,options(nomem,nostack)); }
+    let top = super::gdt::double_fault_stack_top(super::cpu_index());
+    top >= 32768 && (top - 32768..top).contains(&sp)
+}
 /// Detach empty lower tables, retaining the root link shared by private
 /// PML4s. Frames remain owned by the caller until the shootdown completes.
 pub fn detach_empty(va: u64) -> [u64; 2] {

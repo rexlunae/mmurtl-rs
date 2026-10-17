@@ -30,7 +30,9 @@ pub fn set_kernel_stack(cpu: usize, stack_top: u64) {
     if !tss.is_null() {
         unsafe {
             core::ptr::addr_of_mut!((*tss).privilege_stack_table[0])
-                .write_volatile(VirtAddr::new(stack_top));
+                // The packed TSS places RSP0 at an unaligned offset.
+                // This CPU has IRQs masked until the new context returns.
+                .write_unaligned(VirtAddr::new(stack_top));
         }
     }
 }
@@ -191,6 +193,11 @@ fn install_guarded_stacks(cpu: usize, tss: *mut TaskStateSegment) {
 /// before starting APs or user tasks.
 pub fn protect_bsp_stacks() {
     install_guarded_stacks(0, core::ptr::addr_of_mut!(BSP_TSS));
+}
+pub fn double_fault_stack_top(cpu: usize) -> u64 {
+    let tss = TSS_BY_CPU[cpu].load(Ordering::Acquire);
+    if tss.is_null() { return 0; }
+    unsafe { core::ptr::addr_of!((*tss).interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize]).read_unaligned().as_u64() }
 }
 
 /// Far return must skip its SLS barrier at the architectural target.

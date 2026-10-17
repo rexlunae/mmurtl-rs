@@ -1292,6 +1292,10 @@ read-only user TLS ABI is currently provided. Fatal output identifies the
 CPU/task without taking scheduler, allocator or serial locks. The initial
 firmware/bootstrap stack remains in use only until guarded mappings exist;
 the BSP switches stacks before ordinary kernel execution.
+APs handle boot IPIs before task execution is released; ordinary scheduling
+starts only once the BSP finishes constructing boot tasks. Runtime stack
+allocation/reclamation requires interrupts enabled. x86 shootdowns pin the
+initiating task to its CPU until all acknowledgments arrive.
 
 User-origin syscalls/exceptions reserve a fresh 16-byte-aligned gap of up to
 1008 bytes below the saved register frame. They use the per-CPU CSPRNG when
