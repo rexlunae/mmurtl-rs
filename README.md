@@ -659,6 +659,26 @@ The alignment probe uses mapped unaligned memory with AC set, followed by
 UD2 so QEMU TCG versions that omit alignment checking still terminate it.
 Actual #MF/#XM delivery remains unavailable while FP/SIMD is disabled.
 
+The syscall boundary masks dispatch indices, stack-buffer lengths, RQB
+lengths, and user-copy pointers with opaque assembly comparisons. Invalid
+pointers become the unmapped end of the user window. amd64 uses CMP/SBB;
+arm64 uses CMP/CSETM plus CSDB. Scheduler lock acquisitions and syscall
+dispatch also use a serializing barrier (CPUID on amd64; DSB SY/ISB on
+arm64). CPUID is conservative: LFENCE dispatch-serialization support varies
+on older AMD CPUs. Task IDs are searched through bounded iterators rather
+than used directly as table indices. Service names and log lengths are
+masked before slicing local buffers; RQBs are copied once and clamped.
+
+`tools/test-nospec.py` checks boundary/overflow cases and the optimized
+mask/barrier sequences at dispatch and both copy routines; CI builds both
+architectures and runs it. This is a focused regression audit, not a full
+gadget scanner or proof against all transient attacks. QEMU TCG does not
+speculate and this environment has no KVM device, so hardware leakage
+validation remains outstanding. An uncontended host CAS-lock benchmark
+(`tools/tests/nospec_lock_bench.rs`) measured median 3.7 ns without the
+barrier and 24.1 ns with CPUID here; these are host measurements, not kernel
+or contested-lock latency guarantees.
+
 User copies use registered exception-table fixups: amd64 `rep movsb`
 inside the SMAP access window, and arm64 `ldtrb`/`sttrb` with EL0 permissions.
 Only faults at those exact instructions recover; unrelated kernel faults

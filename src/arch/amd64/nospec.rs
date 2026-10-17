@@ -12,4 +12,9 @@ pub fn array_index_nospec(index: usize, size: usize) -> usize {
     index & array_index_mask_nospec(index, size)
 }
 #[inline(always)]
-pub fn barrier_nospec() { unsafe { core::arch::asm!("lfence", options(nostack)); } }
+pub fn barrier_nospec() {
+    // CPUID is serializing on every supported x86 CPU. Some AMD CPUs
+    // require a model-specific MSR before LFENCE serializes dispatch;
+    // use the conservative sequence until capability policy selects it.
+    core::arch::x86_64::__cpuid(0);
+}
