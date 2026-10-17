@@ -92,6 +92,7 @@ pub fn unmask_console() {
 }
 
 extern "x86-interrupt" fn com1_handler(_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     crate::arch::serial::handle_rx_irq();
     irq_eoi(4);
 }
@@ -140,6 +141,7 @@ fn kill_user_task(frame: &InterruptStackFrame, what: &str, addr: Option<u64>) ->
 }
 
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     if from_user(&stack_frame) {
         kill_user_task(&stack_frame, "#DE divide error", None);
     }
@@ -150,6 +152,7 @@ static DEBUG_EVENTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU
 static NMI_EVENTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 extern "x86-interrupt" fn debug_handler(mut stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     // The saved CS describes where #DB was delivered, not who armed TF.
     // A deferred user trap delivered ANYWHERE inside a kernel entry has
     // CPL0 here. Keep that entire path independent of scheduler locks,
@@ -181,26 +184,31 @@ pub fn debug_self_test() {
 }
 
 extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     // NMI can interrupt a serial writer or allocator while it holds a
     // lock. Count it without printing, allocating, or entering the scheduler.
     NMI_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     crate::serial::write_str("[BREAKPOINT] at ");
     crate::serial::write_hex(stack_frame.instruction_pointer.as_u64());
     crate::serial::write_str("\n");
 }
 
 extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     panic!("OVERFLOW\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn bound_range_handler(stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     panic!("BOUND RANGE EXCEEDED\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     if from_user(&stack_frame) {
         kill_user_task(&stack_frame, "#UD invalid opcode", None);
     }
@@ -208,6 +216,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 }
 
 extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     if from_user(&stack_frame) { kill_user_task(&stack_frame, "#NM FP/SIMD disabled", None); }
     panic!("Kernel used disabled FP/SIMD\n{:#?}", stack_frame);
 }
@@ -216,6 +225,7 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
+    super::protection::clear_access();
     panic!("DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
@@ -223,6 +233,7 @@ extern "x86-interrupt" fn invalid_tss_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    super::protection::clear_access();
     panic!("INVALID TSS error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
 
@@ -230,6 +241,7 @@ extern "x86-interrupt" fn segment_not_present_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    super::protection::clear_access();
     panic!("SEGMENT NOT PRESENT error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
 
@@ -237,6 +249,7 @@ extern "x86-interrupt" fn stack_segment_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    super::protection::clear_access();
     if from_user(&stack_frame) {
         kill_user_task(&stack_frame, "#SS stack fault", None);
     }
@@ -247,6 +260,7 @@ extern "x86-interrupt" fn general_protection_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    super::protection::clear_access();
     if from_user(&stack_frame) {
         kill_user_task(&stack_frame, "#GP general protection fault", None);
     }
@@ -257,10 +271,13 @@ extern "x86-interrupt" fn page_fault_handler(
     mut stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    super::protection::clear_access();
     use x86_64::registers::control::Cr2;
     let address = Cr2::read();
     if !from_user(&stack_frame) {
-        if let Some(fixup) = super::uaccess::fixup(stack_frame.instruction_pointer.as_u64()) {
+        let pc = stack_frame.instruction_pointer.as_u64();
+        if let Some(fixup) = super::uaccess::fixup(pc).or_else(||
+            super::protection::test_fixup(pc, address.as_u64(), error_code.bits())) {
             super::user_access_end();
             unsafe { stack_frame.as_mut().update(|frame| {
                 frame.instruction_pointer = x86_64::VirtAddr::new(fixup);
@@ -291,6 +308,7 @@ extern "x86-interrupt" fn page_fault_handler(
 }
 
 extern "x86-interrupt" fn x87_fpu_handler(stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     if from_user(&stack_frame) { kill_user_task(&stack_frame, "#MF floating-point exception", None); }
     panic!("x87 FPU ERROR\n{:#?}", stack_frame);
 }
@@ -299,6 +317,7 @@ extern "x86-interrupt" fn alignment_check_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    super::protection::clear_access();
     if from_user(&stack_frame) { kill_user_task(&stack_frame, "#AC alignment check", None); }
     panic!("ALIGNMENT CHECK error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
@@ -328,6 +347,7 @@ unsafe fn emergency_msr(index: u32) -> u64 {
     (hi as u64) << 32 | lo as u64
 }
 extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame) -> ! {
+    super::protection::clear_access();
     emergency_text("\n[MCE] fatal machine check at ");
     emergency_hex(stack_frame.instruction_pointer.as_u64());
     // These MSRs exist only when CPUID advertises MCA.
@@ -348,11 +368,13 @@ extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame
 }
 
 extern "x86-interrupt" fn simd_fpu_handler(stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     if from_user(&stack_frame) { kill_user_task(&stack_frame, "#XM SIMD exception", None); }
     panic!("SIMD FPU ERROR\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     panic!("VIRTUALIZATION EXCEPTION\n{:#?}", stack_frame);
 }
 
@@ -360,6 +382,7 @@ extern "x86-interrupt" fn security_exception_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    super::protection::clear_access();
     panic!("SECURITY EXCEPTION error_code={:#x}\n{:#?}", error_code, stack_frame);
 }
 
@@ -374,6 +397,10 @@ extern "x86-interrupt" fn security_exception_handler(
 core::arch::global_asm!(
     ".globl timer_handler",
     "timer_handler:",
+    "cmp byte ptr [rip + SMAP_ENTRY_ENABLED], 0",
+    "je 2f",
+    "clac",
+    "2:",
     // Push all general-purpose registers (TaskContext layout)
     "push rax",
     "push rcx",
@@ -429,6 +456,10 @@ core::arch::global_asm!(
     // shares the switch/unlock/restore tail above.
     ".globl yield_handler",
     "yield_handler:",
+    "cmp byte ptr [rip + SMAP_ENTRY_ENABLED], 0",
+    "je 2f",
+    "clac",
+    "2:",
     "push rax",
     "push rcx",
     "push rdx",
@@ -450,6 +481,7 @@ core::arch::global_asm!(
 );
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     let scancode: u8 = unsafe {
         let mut status_port: Port<u8> = Port::new(0x64);
         while (status_port.read() & 1) == 0 {}
@@ -463,10 +495,12 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 }
 
 /// LAPIC spurious interrupt — no EOI must be sent
-extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {}
+extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();}
 
 /// LAPIC error interrupt
 extern "x86-interrupt" fn apic_error_handler(_stack_frame: InterruptStackFrame) {
+    super::protection::clear_access();
     crate::serial::write_line("[APIC] Error interrupt received");
     crate::arch::apic::eoi();
 }
@@ -502,6 +536,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt.stack_segment_fault.set_handler_fn(stack_segment_handler);
     idt.general_protection_fault.set_handler_fn(general_protection_handler);
     idt.page_fault.set_handler_fn(page_fault_handler);
+    unsafe { idt[0x83].set_handler_addr(x86_64::VirtAddr::new(super::protection::test_gate_address())); }
     idt.x87_floating_point.set_handler_fn(x87_fpu_handler);
     idt.alignment_check.set_handler_fn(alignment_check_handler);
     idt.simd_floating_point.set_handler_fn(simd_fpu_handler);
