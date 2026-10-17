@@ -90,3 +90,10 @@ jobs:
           python3 tools/test-kernel-cfi.py
           python3 tools/test-kernel-return.py
           python3 tools/test-stack-sizes.py
+      - name: Install QEMU for frame-pressure boot regressions
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-system-arm
+      - name: Boot both kernels under real heap frame pressure
+        run: |
+          make bios arm64 KERNEL_FEATURES=test-heap-oom
+          python3 tools/test-security.py --arch amd64 --cpus 4 --nmi --require '[HEAP TEST] exhaustion preserved frames/mappings'
+          python3 tools/test-security.py --arch arm64 --cpu max --cpus 4 --el2 --require '[SMP] 4 CPU(s) online' --require '[HEAP TEST] exhaustion preserved frames/mappings'
