@@ -183,6 +183,12 @@ unsafe extern "C" fn arm64_exception(kind: u64, frame: *mut TaskContext) -> u64 
             if esr >> 26 == EC_SVC64 {
                 return crate::scheduler::yield_and_switch(sp);
             }
+            if esr >> 26 == 0x25 { // data abort from current EL
+                if let Some(fixup) = super::uaccess::fixup((*frame).elr) {
+                    (*frame).elr = fixup;
+                    return sp;
+                }
+            }
             kernel_fault("synchronous exception", esr, &*frame)
         }
         // IRQ from kernel or user code

@@ -254,11 +254,21 @@ extern "x86-interrupt" fn general_protection_handler(
 }
 
 extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
+    mut stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
     let address = Cr2::read();
+    if !from_user(&stack_frame) {
+        if let Some(fixup) = super::uaccess::fixup(stack_frame.instruction_pointer.as_u64()) {
+            super::user_access_end();
+            unsafe { stack_frame.as_mut().update(|frame| {
+                frame.instruction_pointer = x86_64::VirtAddr::new(fixup);
+                frame.cpu_flags &= !(1 << 18); // don't restore a faulted SMAP window
+            }); }
+            return;
+        }
+    }
 
     if from_user(&stack_frame) {
         let what = if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {

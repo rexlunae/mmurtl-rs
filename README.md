@@ -659,6 +659,20 @@ The alignment probe uses mapped unaligned memory with AC set, followed by
 UD2 so QEMU TCG versions that omit alignment checking still terminate it.
 Actual #MF/#XM delivery remains unavailable while FP/SIMD is disabled.
 
+User copies use registered exception-table fixups: amd64 `rep movsb`
+inside the SMAP access window, and arm64 `ldtrb`/`sttrb` with EL0 permissions.
+Only faults at those exact instructions recover; unrelated kernel faults
+still panic. A cheap overflow-safe window check replaces the per-page
+validation walk for copies. On failure, copies may have changed a prefix;
+RQBs and log buffers are consumed only after the complete copy succeeds.
+IPC retains its initial writable-buffer validation so invalid destinations
+do not dequeue requests, but revalidates by fault-tolerant copying after
+blocking. Remaining page queries include ancestor permission restrictions.
+Boot tests cover read-only destinations, partial guard-page faults, stale
+validation after deterministic unmapping, and live syscalls returning
+EFAULT while the task continues. This does not introduce shared address
+spaces or mapping mutations from user mode.
+
 Physical frames are scrubbed with volatile stores before being published
 free. All allocation APIs return zeroed frames, including contiguous DMA
 buffers and heap-growth claims. A bitmap tracks already-scrubbed free

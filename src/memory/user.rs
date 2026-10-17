@@ -226,26 +226,23 @@ pub fn range_ok(ptr: u64, len: u64, write: bool) -> bool {
     true
 }
 
-/// Copy bytes in from validated user memory
-pub fn copy_from_user(dst: &mut [u8], src: u64) -> bool {
-    if !range_ok(src, dst.len() as u64, false) {
-        return false;
-    }
-    crate::arch::user_access_begin();
-    unsafe { core::ptr::copy_nonoverlapping(src as *const u8, dst.as_mut_ptr(), dst.len()) };
-    crate::arch::user_access_end();
-    true
+/// Cheap overflow-safe bounds check. Hardware enforces page permissions
+/// during the fault-tolerant copy; no check-then-use page walk is needed.
+pub fn bounds_ok(ptr: u64, len: u64) -> bool {
+    len == 0 || (ptr >= USER_BASE && ptr < USER_END && len <= USER_END - ptr)
 }
 
-/// Copy bytes out to validated, writable user memory
+/// On failure, the destination may contain a copied prefix. Callers must
+/// discard it (RQBs are decoded only after this returns true).
+pub fn copy_from_user(dst: &mut [u8], src: u64) -> bool {
+    if !bounds_ok(src, dst.len() as u64) { return false; }
+    unsafe { crate::arch::uaccess::copy_from_user(dst.as_mut_ptr(), src, dst.len()) == 0 }
+}
+
+/// Failure may have written a prefix of the user buffer.
 pub fn copy_to_user(dst: u64, src: &[u8]) -> bool {
-    if !range_ok(dst, src.len() as u64, true) {
-        return false;
-    }
-    crate::arch::user_access_begin();
-    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len()) };
-    crate::arch::user_access_end();
-    true
+    if !bounds_ok(dst, src.len() as u64) { return false; }
+    unsafe { crate::arch::uaccess::copy_to_user(dst, src.as_ptr(), src.len()) == 0 }
 }
 
 // ========================================================================
@@ -406,4 +403,45 @@ pub fn load_elf(img: &[u8]) -> Result<UserImage, &'static str> {
 /// Validate an ELF image without loading it (for tests)
 pub fn check_elf(img: &[u8]) -> Result<(), &'static str> {
     parse_elf(img).map(|_| ())
+}
+
+/// Deterministic check-then-unmap test, before any user tasks are started.
+/// The private space is never runnable on another CPU. No scheduler or
+/// frame lock is held across a copy that deliberately takes a fault.
+pub fn uaccess_self_test() {
+    let img = match load_program(&[0x5a]) {
+        Ok(img) => img,
+        Err(error) => {
+            crate::serial::write_str("[TEST] user-copy fixups skipped: ");
+            crate::serial::write_line(error);
+            return;
+        }
+    };
+    let mut pass = true;
+    let mut removed = 0;
+    crate::arch::without_interrupts(|| {
+        let cpu = crate::arch::cpu_index();
+        crate::arch::switch_address_space(cpu, img.space);
+        let mut byte = [0u8; 1];
+        pass &= copy_from_user(&mut byte, img.entry) && byte == [0x5a];
+        pass &= !copy_to_user(img.entry, &[1]); // read-only code page
+        let boundary = img.stack_top - 8;
+        pass &= copy_to_user(boundary, &[0x33; 8]);
+        let mut partial = [0u8; 16];
+        pass &= !copy_from_user(&mut partial, boundary); // prefix then guard fault
+        pass &= partial[..8] == [0x33; 8];
+        pass &= !copy_to_user(boundary, &[0x44; 16]);
+        let page = img.stack_top - PAGE;
+        pass &= range_ok(page, 8, true);
+        removed = unsafe { crate::arch::uaccess::remove_test_page(img.space, page) };
+        pass &= !copy_from_user(&mut byte, page); // stale validation, actual fault
+        pass &= !copy_to_user(page, &[1]);
+        pass &= !copy_from_user(&mut byte, u64::MAX);
+        pass &= !copy_to_user(USER_END, &[1]);
+        crate::arch::switch_address_space(cpu, 0);
+    });
+    heap::with_frame_allocator(|fa| fa.deallocate_frame(removed));
+    release(img.space, img.slot);
+    assert!(pass, "fault-tolerant user-copy checks failed");
+    crate::serial::write_line("[TEST] user-copy fixups: read-only, guard, stale validation recovered");
 }

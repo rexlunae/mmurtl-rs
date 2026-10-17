@@ -72,6 +72,7 @@ static TID_TIME_DENIED: AtomicU32 = AtomicU32::new(0);
 static TID_TIME_ALLOWED: AtomicU32 = AtomicU32::new(0);
 static TID_PMU_DENIED: AtomicU32 = AtomicU32::new(0);
 static TID_COARSE: AtomicU32 = AtomicU32::new(0);
+static TID_UACCESS: AtomicU32 = AtomicU32::new(0);
 static TID_HELLO: AtomicU32 = AtomicU32::new(0);
 static TID_SPIN: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_READ: AtomicU32 = AtomicU32::new(0);
@@ -156,6 +157,7 @@ pub fn demo() {
         TID_ROGUE_DEBUG_ENTRY.store(spawn("rogue_db_entry", prog::rogue_debug_entry(), 0), Ordering::SeqCst);
         TID_ROGUE_ALIGN.store(spawn("rogue_align", prog::rogue_align(), 0), Ordering::SeqCst);
     }
+    TID_UACCESS.store(spawn("uaccess_faults", prog::uaccess(), 0), Ordering::SeqCst);
     spawn_elf_programs();
 }
 
@@ -389,6 +391,8 @@ extern "C" fn user_check_task() -> ! {
         pass &= report("delayed #DB entry survived", killed(&TID_ROGUE_DEBUG_ENTRY));
         pass &= report("rogue_align killed, kernel alive", killed(&TID_ROGUE_ALIGN));
     }
+    pass &= wait_until(5000, || exited(&TID_UACCESS));
+    pass &= report("unmapped copies return EFAULT", exited(&TID_UACCESS) && !killed(&TID_UACCESS));
     pass &= all_done;
 
     // A user-mode service exiting mid-request fails it with Aborted

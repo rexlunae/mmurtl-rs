@@ -225,3 +225,5 @@ pub fn set_user_counter_access(high_res_time: bool) {
 }
 
 pub mod memory_encryption;
+
+pub mod uaccess;

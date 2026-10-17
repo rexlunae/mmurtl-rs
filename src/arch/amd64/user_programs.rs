@@ -348,12 +348,34 @@ user_rogue_align_start:
     .globl user_rogue_align_end
 user_rogue_align_end:
 
+    .globl user_uaccess_start
+user_uaccess_start:
+    leaq 4096(%rip), %rdi
+    movl $16, %esi
+    movl $1, %eax
+    int $0x80
+    cmpq $-1, %rax
+    jne 1f
+    leaq -8(%rsp), %rdi
+    movl $16, %esi
+    movl $1, %eax
+    int $0x80
+    cmpq $-1, %rax
+    jne 1f
+    xorl %eax, %eax
+    int $0x80
+1:  ud2
+    .globl user_uaccess_end
+user_uaccess_end:
+
     .popsection
     "#,
     options(att_syntax)
 );
 
 extern "C" {
+    static user_uaccess_start: u8;
+    static user_uaccess_end: u8;
     static user_time_denied_start: u8;
     static user_time_denied_end: u8;
     static user_time_start: u8;
@@ -425,3 +447,5 @@ program!(time_denied, user_time_denied_start, user_time_denied_end);
 program!(rogue_debug, user_rogue_debug_start, user_rogue_debug_end);
 program!(rogue_debug_entry, user_rogue_debug_entry_start, user_rogue_debug_entry_end);
 program!(rogue_align, user_rogue_align_start, user_rogue_align_end);
+
+program!(uaccess, user_uaccess_start, user_uaccess_end);
