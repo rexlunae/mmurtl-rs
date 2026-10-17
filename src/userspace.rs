@@ -77,6 +77,12 @@ static TID_SPIN: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_READ: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PRIV: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PTR: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "x86_64")]
+static TID_ROGUE_DEBUG: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "x86_64")]
+static TID_ROGUE_DEBUG_ENTRY: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "x86_64")]
+static TID_ROGUE_ALIGN: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_SIMD: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_FP: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PEEK: AtomicU32 = AtomicU32::new(0);
@@ -143,6 +149,12 @@ pub fn demo() {
     if let Ok(img) = crate::memory::user::load_program(prog::time()) {
         TID_TIME_ALLOWED.store(scheduler::create_user_task_with_time(img.entry, img.stack_top, 0,
             img.space, img.slot, "time_allowed", true), Ordering::SeqCst);
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        TID_ROGUE_DEBUG.store(spawn("rogue_debug", prog::rogue_debug(), 0), Ordering::SeqCst);
+        TID_ROGUE_DEBUG_ENTRY.store(spawn("rogue_db_entry", prog::rogue_debug_entry(), 0), Ordering::SeqCst);
+        TID_ROGUE_ALIGN.store(spawn("rogue_align", prog::rogue_align(), 0), Ordering::SeqCst);
     }
     spawn_elf_programs();
 }
@@ -370,6 +382,13 @@ extern "C" fn user_check_task() -> ! {
     pass &= report("unprivileged PMU denied", killed(&TID_PMU_DENIED));
     pass &= report("HIGH_RES_TIME survives switches", exited(&TID_TIME_ALLOWED) && !killed(&TID_TIME_ALLOWED));
     pass &= report("coarse clock advances", exited(&TID_COARSE) && !killed(&TID_COARSE));
+    #[cfg(target_arch = "x86_64")]
+    {
+        wait_until(5000, || exited(&TID_ROGUE_DEBUG) && exited(&TID_ROGUE_DEBUG_ENTRY) && exited(&TID_ROGUE_ALIGN));
+        pass &= report("rogue_debug killed, kernel alive", killed(&TID_ROGUE_DEBUG));
+        pass &= report("delayed #DB entry survived", killed(&TID_ROGUE_DEBUG_ENTRY));
+        pass &= report("rogue_align killed, kernel alive", killed(&TID_ROGUE_ALIGN));
+    }
     pass &= all_done;
 
     // A user-mode service exiting mid-request fails it with Aborted

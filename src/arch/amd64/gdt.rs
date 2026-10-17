@@ -37,6 +37,11 @@ pub fn set_kernel_stack(cpu: usize, stack_top: u64) {
 
 /// Stack size for double-fault IST
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
+pub const NMI_IST_INDEX: u16 = 1;
+pub const MACHINE_CHECK_IST_INDEX: u16 = 2;
+pub const DEBUG_IST_INDEX: u16 = 3;
+// Early BSP stacks remain usable before page-table/allocator setup.
+static mut EARLY_IST: [IstStack; 3] = [const { IstStack([0; STACK_SIZE]) }; 3];
 const STACK_SIZE: usize = 4096 * 16; // 64KB
 
 /// Backing storage for an IST stack (the CPU writes the exception frame
@@ -70,6 +75,10 @@ static GDT: Lazy<InnerGdt> = Lazy::new(|| {
         let t = &mut *core::ptr::addr_of_mut!(BSP_TSS);
         let stack_top = core::ptr::addr_of!(DOUBLE_FAULT_STACK) as u64 + STACK_SIZE as u64;
         t.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(stack_top);
+        for i in 0..3 {
+            let base = core::ptr::addr_of!(EARLY_IST).cast::<IstStack>().add(i) as u64;
+            t.interrupt_stack_table[i + 1] = VirtAddr::new(base + STACK_SIZE as u64);
+        }
         &*core::ptr::addr_of!(BSP_TSS)
     };
     let tss_entry = gdt.add_entry(Descriptor::tss_segment(tss));
@@ -93,26 +102,17 @@ pub struct Selectors {
 
 /// Initialize an application processor's GDT.
 ///
-/// Each AP gets its own GDT, TSS, and double-fault IST stack (allocated
-/// from the heap and leaked — they live for the machine's lifetime). A TSS
+/// Each AP gets its own GDT, TSS, and guarded emergency stacks, retained
+/// for the machine's lifetime. A TSS
 /// cannot be shared: `ltr` marks its descriptor busy, so a second CPU
 /// loading the same descriptor would fault.
 pub fn init_ap(cpu: usize) {
     use alloc::boxed::Box;
-    use alloc::vec;
     use x86_64::instructions::segmentation::{CS, DS, ES, SS, Segment};
     use x86_64::instructions::tables::load_tss;
 
-    // Per-CPU double-fault IST stack
-    let ist_stack: &'static mut [u8] = Box::leak(vec![0u8; STACK_SIZE].into_boxed_slice());
-    let stack_top = ist_stack.as_ptr() as u64 + ist_stack.len() as u64;
-
-    // Leaked as a raw pointer: the GDT descriptor needs a 'static shared
-    // reference, and the scheduler later rewrites RSP0 through the pointer
     let tss: *mut TaskStateSegment = Box::into_raw(Box::new(TaskStateSegment::new()));
-    unsafe {
-        (*tss).interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::new(stack_top);
-    }
+    install_guarded_stacks(cpu, tss);
 
     let gdt: &'static mut GlobalDescriptorTable = Box::leak(Box::new(GlobalDescriptorTable::new()));
     let kernel_code = gdt.add_entry(Descriptor::kernel_code_segment());
@@ -145,4 +145,46 @@ pub fn init() {
         load_tss(GDT.selectors.tss_entry);
     }
     TSS_BY_CPU[0].store(core::ptr::addr_of_mut!(BSP_TSS), Ordering::Release);
+}
+
+/// Reserve four separate supervisor RW/NX stacks, each preceded by an
+/// unmapped guard. Never reclaimed: they belong to the CPU, not a task.
+fn install_guarded_stacks(cpu: usize, tss: *mut TaskStateSegment) {
+    use super::page_table::{self, BumpFrameAllocator};
+    use x86_64::{PhysAddr, structures::paging::{Page, PhysFrame, page_table::PageTableFlags as F}};
+    const BASE: u64 = 0xffff_a000_0000_0000;
+    const PAGES: u64 = 8; // 32 KiB, plus one guard page per stack
+    let mut tops = [0u64; 4];
+    crate::memory::heap::with_frame_allocator(|fa| {
+        let mut adapter = BumpFrameAllocator::new(fa);
+        for (slot, top) in tops.iter_mut().enumerate() {
+            let guard = BASE + (cpu as u64 * 4 + slot as u64) * (PAGES + 1) * 4096;
+            assert!(page_table::query_page(VirtAddr::new(guard)).is_none());
+            for page in 1..=PAGES {
+                let pa = fa.allocate_frame().expect("OOM: emergency stack");
+                unsafe {
+                    core::ptr::write_bytes(super::phys_to_virt(pa), 0, 4096);
+                    page_table::map_page(Page::containing_address(VirtAddr::new(guard + page * 4096)),
+                        PhysFrame::containing_address(PhysAddr::new(pa)), F::WRITABLE | F::NO_EXECUTE,
+                        &mut adapter).expect("map emergency stack");
+                }
+            }
+            *top = guard + (PAGES + 1) * 4096;
+            let flags = page_table::query_page(VirtAddr::new(*top - 1)).expect("missing IST mapping");
+            assert!(flags.contains(F::WRITABLE | F::NO_EXECUTE) && !flags.contains(F::USER_ACCESSIBLE));
+        }
+    }).expect("frame allocator not initialized");
+    for (slot, top) in tops.into_iter().enumerate() {
+        unsafe { (*tss).interrupt_stack_table[slot] = VirtAddr::new(top); }
+    }
+    use core::fmt::Write;
+    let mut line: heapless::String<80> = heapless::String::new();
+    let _ = write!(line, "[IST] CPU{}: guarded RW/NX #DF #NMI #MC #DB stacks\n", cpu);
+    crate::serial::write_str(&line);
+}
+
+/// Replace the early BSP stacks once the allocator and physmap exist,
+/// before starting APs or user tasks.
+pub fn protect_bsp_stacks() {
+    install_guarded_stacks(0, core::ptr::addr_of_mut!(BSP_TSS));
 }
