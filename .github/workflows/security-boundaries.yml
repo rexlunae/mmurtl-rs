@@ -14,6 +14,10 @@ jobs:
           persist-credentials: false
       - name: Build both kernel architectures
         run: make build arm64
+      - name: Build protected static-PIE user runtimes
+        run: make user user-arm64 USER_FEATURES=runtime-tests
+      - name: Verify emitted user canaries and startup order
+        run: python3 tools/test-user-runtime.py
       - name: Verify bounds and optimized speculation sequences
         run: python3 tools/test-nospec.py
       - name: Verify entry register clearing and SLS barriers
@@ -36,7 +40,7 @@ jobs:
           rustc --edition=2021 tools/tests/store_bypass.rs -o /tmp/mmurtl-store-bypass
           /tmp/mmurtl-store-bypass
       - name: Verify cryptographic vectors and entropy policy
-        run: python3 tools/test-random.py
+        run: MMURTL_USER_TESTS=1 python3 tools/test-random.py
       - name: Verify virtqueue descriptor ownership
         run: |
           rustc --edition=2021 tools/tests/virtqueue_ownership.rs -o /tmp/mmurtl-vq-test

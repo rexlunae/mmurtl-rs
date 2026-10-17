@@ -1,26 +1,16 @@
 //! User address-space region: loading user-mode programs and validating user
 //! pointers passed to syscalls.
 //!
-//! All tasks share one page table (MMURTL's flat model). User programs
-//! live in a dedicated lower-half window whose pages carry the USER bit;
-//! every other mapping — kernel image, heap, physical-memory window — is
-//! kernel-only, so user code can't read, write, or jump into the
-//! kernel. Each user task gets its own 1 MiB slot:
+//! Each task has a private user window in one lower-half 512 GiB table
+//! slot. Kernel mappings are shared and supervisor-only. Flat PIC and PIE
+//! images choose a fresh page-aligned code bias in the lower half; the
+//! guarded NX stack is placed independently in the upper half. A randomized
+//! aligned initial SP leaves room for the ELF startup block above it.
 //!
-//! ```text
-//!   slot + 0x00000   unmapped (null guard)
-//!   slot + 0x01000   code (read + execute)
-//!   ...
-//!   slot + 0xFB000   stack (read + write, no-execute), 16 KiB
-//!   slot + 0xFF000   unmapped (guard above the stack)
-//! ```
-//!
-//! Every user task has its own address space (`crate::arch::
-//! new_address_space`): the kernel's mappings are shared, but the user
-//! window contains only that task's own pages. Slots still give each
-//! program a distinct virtual range, so a program that reaches for another
-//! program's address finds nothing mapped there. Slots and spaces are
-//! recycled when the task is reaped.
+//! The 64-bit ownership bitmap limits live images independently of their
+//! randomized virtual addresses. Reaping releases their private mappings
+//! and ownership IDs. Legacy ET_EXEC code keeps its linked address, while
+//! its stack still receives a fresh placement.
 //!
 //! Architecture-neutral: page mapping/query and the user-access window
 //! (SMAP on amd64) come from `crate::arch`.
@@ -32,8 +22,6 @@ use super::heap;
 /// Start of the user window (top-level table slot 200 on both amd64 and
 /// arm64 — unused by the kernel, inside a 48-bit lower-half VA space)
 pub const USER_BASE: u64 = super::user_layout::BASE;
-/// Size of each task's slot
-pub const USER_SLOT_SIZE: u64 = 0x10_0000;
 /// Maximum number of user programs
 pub const USER_MAX_SLOTS: u64 = 64;
 /// End of the user window (exclusive)
@@ -41,7 +29,7 @@ pub const USER_END: u64 = super::user_layout::END;
 
 const CODE_OFFSET: u64 = 0x1000;
 const STACK_PAGES: u64 = 4;
-const STACK_TOP_OFFSET: u64 = USER_SLOT_SIZE - 0x1000;
+const MAX_FLAT_IMAGE: u64 = (1 << 20) - 6 * PAGE;
 const PAGE: u64 = 4096;
 
 /// Slot allocation bitmap (bit set = in use)
@@ -80,7 +68,7 @@ pub struct UserImage {
     pub startup: u64,
     /// Its address space (page-table root)
     pub space: u64,
-    /// Its slot in the user window
+    /// Its ownership ID (independent of virtual placement)
     pub slot: u64,
 }
 fn random_word() -> u64 {
@@ -93,11 +81,6 @@ fn random_word() -> u64 {
     })
 }
 fn layout() -> super::user_layout::Layout { super::user_layout::choose(random_word(),random_word(),random_word()) }
-
-/// Base address of `slot` (e.g. to point a test at another program)
-pub fn slot_base(slot: u64) -> u64 {
-    USER_BASE + slot * USER_SLOT_SIZE
-}
 
 /// Check the user window is free before first use
 pub fn init() -> bool {
@@ -156,7 +139,7 @@ pub fn release(space: u64, slot: u64) -> usize {
 /// non-executable stack.
 pub fn load_program(code: &[u8]) -> Result<UserImage, &'static str> {
     let code_pages = (code.len() as u64 + PAGE - 1) / PAGE;
-    if code.is_empty() || CODE_OFFSET + code_pages * PAGE > STACK_TOP_OFFSET - STACK_PAGES * PAGE {
+    if code.is_empty() || code_pages * PAGE > MAX_FLAT_IMAGE {
         return Err("program too large for a user slot");
     }
     let slot = alloc_slot().ok_or("no free user slots")?;
@@ -285,7 +268,7 @@ pub fn copy_to_user(dst: u64, src: &[u8]) -> bool {
 pub fn load_elf(bytes: &[u8]) -> Result<UserImage, &'static str> {
     let image=super::elf::parse(bytes,crate::arch::ELF_MACHINE,USER_BASE,super::user_layout::IMAGE_LIMIT)?;
     let placement=layout();
-    let bias=if image.pie { placement.bias } else { 0 };
+    let bias=if image.pie { placement.image_bias(image.alignment) } else { 0 };
     let slot=alloc_slot().ok_or("no free user slots")?;
     let space=match crate::arch::new_address_space() { Ok(space)=>space,Err(e)=>{free_slot(slot);return Err(e);} };
     let startup=placement.stack_edge-32;
@@ -302,7 +285,8 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, &'static str> {
                 unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(),kva.add((low-page) as usize),data.len()); }
                 for (target,addend) in image.relocations(bytes) {
                     if target>=page && target<page+PAGE {
-                        let value=bias.checked_add(addend as u64).ok_or("relocation wraps")?;
+                        // Both bias and nonnegative addend are bounded by validation/layout.
+                        let value=bias+addend as u64;
                         unsafe { kva.add((target-page) as usize).cast::<u64>().write_unaligned(value); }
                     }
                 }

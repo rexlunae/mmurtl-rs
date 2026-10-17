@@ -10,7 +10,7 @@ pub struct Segment {
 #[derive(Clone, Copy, Debug)]
 pub struct Region { pub start: u64, pub end: u64 }
 pub struct Image {
-    pub entry: u64, pub pie: bool, pub segments: heapless::Vec<Segment, 16>,
+    pub entry: u64, pub pie: bool, pub alignment: u64, pub segments: heapless::Vec<Segment, 16>,
     pub relro: Option<Region>, reloc_file: usize, reloc_count: usize,
 }
 pub fn rd16(b: &[u8], o: usize) -> u16 { u16::from_le_bytes(b[o..o+2].try_into().unwrap()) }
@@ -37,12 +37,13 @@ pub fn parse(bytes: &[u8], machine: u16, user_base: u64, user_limit: u64) -> Res
     if bytes[4]!=2 || bytes[5]!=1 || bytes[6]!=1 || rd32(bytes,20)!=1 { return Err("unsupported ELF format/version"); }
     let pie=match rd16(bytes,16) { 2=>false,3=>true,_=>return Err("not an executable or static PIE") };
     if rd16(bytes,18)!=machine { return Err("built for a different architecture"); }
+    if rd16(bytes,52)!=64 { return Err("bad ELF header size"); }
     let phoff=usize::try_from(rd64(bytes,32)).map_err(|_|"bad program header table")?;
     let size=rd16(bytes,54) as usize; let count=rd16(bytes,56) as usize;
     if size<56 || count==0 || count>32 || phoff.checked_add(size*count).filter(|end|*end<=bytes.len()).is_none() {
         return Err("bad program header table");
     }
-    let mut image=Image { entry:rd64(bytes,24),pie,segments:heapless::Vec::new(),relro:None,reloc_file:0,reloc_count:0 };
+    let mut image=Image { entry:rd64(bytes,24),pie,alignment:PAGE,segments:heapless::Vec::new(),relro:None,reloc_file:0,reloc_count:0 };
     let mut dynamic=None; let mut total=0u64;
     for i in 0..count {
         let at=phoff+i*size; let kind=rd32(bytes,at); let flags=rd32(bytes,at+4);
@@ -51,7 +52,7 @@ pub fn parse(bytes: &[u8], machine: u16, user_base: u64, user_limit: u64) -> Res
         if kind==3 { return Err("dynamic interpreter unsupported"); }
         if kind==0x6474e551 && flags&1!=0 { return Err("executable stack unsupported"); }
         if kind==2 {
-            if dynamic.is_some() || !pie || filesz==0 || filesz%16!=0 || filesz>4096 { return Err("bad dynamic table"); }
+            if dynamic.is_some() || !pie || filesz==0 || filesz>memsz || filesz%16!=0 || filesz>4096 { return Err("bad dynamic table"); }
             dynamic=Some((va,filesz,offset));
         }
         if kind==0x6474e552 && memsz!=0 {
@@ -59,6 +60,11 @@ pub fn parse(bytes: &[u8], machine: u16, user_base: u64, user_limit: u64) -> Res
             image.relro=Some(Region { start:va,end });
         }
         if kind!=1 || memsz==0 { continue; }
+        let align=rd64(bytes,at+48);
+        if align>1 && (!align.is_power_of_two() || va&(align-1)!=offset&(align-1)) { return Err("invalid segment alignment"); }
+        if pie && align>65536 { return Err("PIE alignment exceeds 64 KiB limit"); }
+        image.alignment=image.alignment.max(align);
+        if flags&!7!=0 || flags&4==0 { return Err("unsupported segment permissions"); }
         if filesz>memsz || offset.checked_add(filesz).filter(|end|*end<=bytes.len() as u64).is_none() {
             return Err("segment data past end of file");
         }
@@ -68,7 +74,7 @@ pub fn parse(bytes: &[u8], machine: u16, user_base: u64, user_limit: u64) -> Res
         total=total.checked_add(memsz).ok_or("image too large")?;
         if total>MAX_IMAGE { return Err("image exceeds memory limit"); }
         let first=va&!(PAGE-1); let last=end.checked_add(PAGE-1).ok_or("segment wraps")?&!(PAGE-1);
-        if image.segments.iter().any(|s| first < (s.vaddr+s.memsz+PAGE-1)&!(PAGE-1) && s.vaddr&!(PAGE-1)<last) {
+        if image.segments.iter().any(|s| first < ((s.vaddr+s.memsz+PAGE-1)&!(PAGE-1)) && (s.vaddr&!(PAGE-1))<last) {
             return Err("segments share a page");
         }
         image.segments.push(Segment {vaddr:va,memsz,offset,filesz,writable:flags&2!=0,executable:flags&1!=0})

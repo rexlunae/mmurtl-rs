@@ -236,7 +236,9 @@ user_rogue_ptr_end:
     # ---------------------------------------------------------------
     .globl user_exit_start
 user_exit_start:
-    leaq -16384(%rsp), %rdi
+    leaq 4095(%rsp), %rdi
+    andq $-4096, %rdi
+    subq $16384, %rdi
     movl $2048, %ecx
     movabsq $0x6d6d7572746c5345, %rax
     rep stosq
@@ -426,7 +428,9 @@ user_uaccess_start:
     int $0x80
     cmpq $-1, %rax
     jne 1f
-    leaq -8(%rsp), %rdi
+    leaq 4095(%rsp), %rdi
+    andq $-4096, %rdi
+    subq $8, %rdi
     movl $16, %esi
     movl $1, %eax
     int $0x80

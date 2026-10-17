@@ -285,6 +285,7 @@ fn test_elf(machine: u16, vaddr: u64, flags: u32, entry: u64) -> alloc::vec::Vec
     img[18..20].copy_from_slice(&machine.to_le_bytes());
     img[24..32].copy_from_slice(&entry.to_le_bytes());
     img[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
+    img[52..54].copy_from_slice(&64u16.to_le_bytes());
     img[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
     img[56..58].copy_from_slice(&1u16.to_le_bytes()); // phnum
     let ph = 64;

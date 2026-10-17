@@ -612,7 +612,8 @@ growth is accounted for separately, so it can't mask a leak):
 User programs no longer have to be assembly blobs inside the kernel. The
 `user/` crate is a small runtime (the syscall ABI for both
 architectures, RQB messages, `println!`, `entry!`) plus programs written
-in ordinary Rust, built as ELF executables linked into the user window.
+in ordinary Rust, built as protected static-PIE ELF executables. The kernel
+relocates them to a fresh randomized address in the private user window.
 At boot the kernel loads every `*.ELF` in `/BIN` on the exFAT disk,
 each into its own address space:
 
@@ -621,7 +622,7 @@ make user && make disk          # amd64: builds user/ and disk-amd64.img
 make user-arm64 && make disk-arm64
 ```
 ```
-[USER] Loaded /BIN/HELLO.ELF (19104 bytes) as T24, entry 0x640003000000
+[USER] Loaded /BIN/HELLO.ELF (...) as T24, entry 0x641234567000 (changes each start)
 [USER T24 CPL3] Rust ELF program running as task 24
 [USER T24 CPL3] sysinfo (task 15) replied, status 0: MMURTL/RS v0.1.0: 4 CPUs, up 0 ms
 [USER T24 CPL3] longest Collatz chain below 20000 starts at 17647 (279 steps)
@@ -637,6 +638,8 @@ writable+executable segments and segments that share a page, and
 requires the entry point to be in an executable segment — all before
 mapping anything. Segments are mapped with exactly their permissions,
 zero-filled past their file data (`.bss`).
+Static PIE adds symbol-free RELATIVE relocations and whole-page GNU RELRO;
+legacy ET_EXEC files retain their linked code addresses for compatibility.
 
 High-resolution timer reads require the kernel-granted `HIGH_RES_TIME`
 task capability, denied by default and applied on every context switch.
@@ -1329,3 +1332,57 @@ the next user entry, checks varying offsets and runs 1,000 short task
 lifetimes. Its frame accounting includes stack page-table reclamation;
 existing bump-heap growth remains separately accounted for and is not fixed
 by this change.
+
+### User-space ASLR and runtime guards
+
+Each private user address space spans one 512 GiB lower-half table slot,
+`0x640000000000..0x648000000000`. Flat PIC and static-PIE code receive a
+fresh bias with 25 bits of page-placement entropy. The 16 KiB RW/NX stack
+uses an independent 25-bit page placement in the upper half, plus a fresh
+16-byte-aligned initial-SP gap. Code and stack regions cannot overlap.
+The 64-image ownership bitmap limits simultaneous images independently of
+virtual placement; releasing an ownership ID does not determine a later
+image's address. New draws occur on every load. Layout secrecy and canary
+strength depend on credited CSPRNG entropy; an explicit warning appears
+when only the weak early fallback is available. Randomization does not
+prevent address disclosure or replace pointer validation and W^X.
+The default runtime requests 4 KiB ELF alignment. Other supported PIEs
+may request up to 64 KiB alignment, which the load bias honors and retains
+at least 21 bits of placement entropy.
+
+The ELF validator accepts legacy ET_EXEC and static ET_DYN. It bounds
+memory to 64 MiB and relocations to 4096, rejects dynamic interpreters,
+external dependencies, unsupported relocation formats/types/symbols,
+text relocations, overlapping pages, invalid alignment and out-of-image
+relocation targets. Only aligned R_X86_64_RELATIVE/R_AARCH64_RELATIVE
+writes to initially writable image data are supported. Relocations are
+applied through the physical backing before final user mappings become
+runnable. Whole-page PT_GNU_RELRO is mapped read-only immediately; no
+writable+executable user mapping is created. Legacy ET_EXEC code keeps
+its linked address while its stack is randomized.
+
+`make user user-arm64` builds the runtime with PIE and strong compiler
+stack protectors. ELF entry receives a private 32-byte startup block in
+RDI/x0: the first word is ABI magic/version `0x4d4d5552544c0001`, the second
+is a fresh per-task canary with a zero low byte, and the remaining words
+are reserved. The block sits above the initial SP. Naked entry assembly
+sets the private `__stack_chk_guard` before calling protected Rust;
+x86 also establishes the C call-stack alignment. `__stack_chk_fail`
+logs a guard failure and exits instead of using a corrupted return
+address. Flat assembly demos keep their existing argument convention.
+No user TLS setup or shared process-global canary is required.
+
+CI validates malformed ELF/relocation cases, actual built runtime images,
+placement bounds and optimized compiler canary checks. Opt-in regression
+programs are kept out of normal disk images:
+```sh
+make bios arm64 user user-arm64 USER_FEATURES=runtime-tests
+python3 tools/test-user-runtime.py
+python3 tools/test-user-aslr.py --arch amd64
+python3 tools/test-user-aslr.py --arch arm64
+```
+The VM tests run HELLO and SIEVE, deliberately corrupt a compiler-protected
+frame, attempt a RELRO pointer write, then restart HELLO ten times and
+require distinct entry addresses. CANARY/RELRO are stored with `.TEST`
+extensions in disposable images so the normal boot completion checks do
+not treat an intentional protection fault as an ordinary program failure.

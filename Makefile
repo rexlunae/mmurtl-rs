@@ -1,5 +1,7 @@
 KERNEL_FEATURES ?=
 KERNEL_NO_DEFAULT_FEATURES ?= 0
+USER_FEATURES ?=
+USER_FEATURE_FLAGS = $(if $(USER_FEATURES),--features $(USER_FEATURES),)
 KERNEL_FEATURE_FLAGS = $(if $(filter 1,$(KERNEL_NO_DEFAULT_FEATURES)),--no-default-features,) $(if $(KERNEL_FEATURES),--features $(KERNEL_FEATURES),)
 
 TARGET = x86_64-unknown-none.json
@@ -89,14 +91,14 @@ run-rpi3: arm64-image
 		-dtb $(RPI3_DTB)
 
 # User programs (Rust, ELF) for the kernel to load from /BIN on its disk.
-# amd64 uses the large code model: the user window sits above 2 GiB.
+# Static PIE uses relative addressing regardless of the randomized load VA.
 user:
-	cd user && RUSTFLAGS="-C code-model=large -C relocation-model=static" \
-		cargo build -Z build-std=core --target x86_64-unknown-none --release
+	cd user && RUSTFLAGS="-C relocation-model=pie -Z stack-protector=strong" \
+		cargo build -Z build-std=core --target x86_64-unknown-none $(USER_FEATURE_FLAGS) --release
 
 user-arm64:
-	cd user && RUSTFLAGS="-C relocation-model=static" \
-		cargo build -Z build-std=core --target aarch64-unknown-none-softfloat --release
+	cd user && RUSTFLAGS="-C relocation-model=pie -Z stack-protector=strong" \
+		cargo build -Z build-std=core --target aarch64-unknown-none-softfloat $(USER_FEATURE_FLAGS) --release
 
 # New exFAT images with programs in /BIN (Python 3 + exfatprogs, no root).
 # Existing images are preserved; remove one explicitly to recreate it.

@@ -227,7 +227,9 @@ user_rogue_ptr_end:
     .balign 16
     .globl user_exit_start
 user_exit_start:
-    sub x0, sp, #4, lsl #12
+    add x0, sp, #4095
+    and x0, x0, #-4096
+    sub x0, x0, #4, lsl #12
     mov x1, #2048
     mov x2, #0x5345
     movk x2, #0x746c, lsl #16
@@ -434,7 +436,9 @@ user_uaccess_start:
     svc #0
     cmn x0, #1
     b.ne 1f
-    sub x0, sp, #8
+    add x0, sp, #4095
+    and x0, x0, #-4096
+    sub x0, x0, #8
     mov x1, #16
     mov x8, #1
     svc #0

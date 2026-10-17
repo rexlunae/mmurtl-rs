@@ -8,6 +8,14 @@
 #![no_std]
 
 use core::fmt;
+/// Private per-task copy, initialized before compiler-protected Rust runs.
+#[no_mangle]
+pub static mut __stack_chk_guard: u64 = 0;
+#[no_mangle]
+pub extern "C" fn __stack_chk_fail() -> ! {
+    log("[USER CANARY] stack corruption detected; exiting");
+    exit()
+}
 
 // Syscall numbers (see the kernel's src/syscall.rs)
 pub const SYS_EXIT: u64 = 0;
@@ -148,10 +156,32 @@ macro_rules! println {
 macro_rules! entry {
     ($main:path) => {
         #[no_mangle]
-        #[link_section = ".text._start"]
-        pub extern "C" fn _start() -> ! {
+        pub extern "C" fn __mmurtl_main() -> ! {
             $main();
             $crate::exit()
+        }
+        #[cfg(target_arch = "x86_64")]
+        #[unsafe(naked)]
+        #[no_mangle]
+        #[link_section = ".text._start"]
+        pub unsafe extern "C" fn _start() -> ! {
+            core::arch::naked_asm!(
+                "cld", "mov rax, 0x4d4d5552544c0001", "cmp [rdi], rax", "jne 2f",
+                "mov rax, [rdi + 8]", "test rax, rax", "jz 2f", "mov [rip + __stack_chk_guard], rax",
+                "and rsp, -16", "call __mmurtl_main", "2:", "ud2",
+            );
+        }
+        #[cfg(target_arch = "aarch64")]
+        #[unsafe(naked)]
+        #[no_mangle]
+        #[link_section = ".text._start"]
+        pub unsafe extern "C" fn _start() -> ! {
+            core::arch::naked_asm!(
+                "ldr x1, [x0]", "mov x2, #1", "movk x2, #0x544c, lsl #16",
+                "movk x2, #0x5552, lsl #32", "movk x2, #0x4d4d, lsl #48", "cmp x1, x2", "b.ne 2f",
+                "ldr x1, [x0, #8]", "adrp x2, __stack_chk_guard", "add x2, x2, :lo12:__stack_chk_guard",
+                "cbz x1, 2f", "str x1, [x2]", "bl __mmurtl_main", "2:", "brk #0",
+            );
         }
     };
 }
