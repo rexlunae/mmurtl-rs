@@ -349,30 +349,27 @@ pub unsafe fn unmap_page(page: Page) -> Result<PhysFrame, &'static str> {
     Ok(frame)
 }
 
-/// Get page table flags for a mapped page
+/// Effective flags for a mapped page, including restrictions at every
+/// ancestor. RW and USER are ANDed; NX is ORed across the walk.
 pub fn query_page(vaddr: VirtAddr) -> Option<Flags> {
     unsafe {
-        let pml4 = active_pml4();
-        let pml4e = &pml4[vaddr.p4_index()];
-        if !pml4e.flags().contains(Flags::PRESENT) { return None; }
-
-        let pdpt = &*phys_to_virt(pml4e.addr()).as_ptr::<PageTable>();
-        let pdpte = &pdpt[vaddr.p3_index()];
-        if !pdpte.flags().contains(Flags::PRESENT) { return None; }
-        if pdpte.flags().contains(Flags::HUGE_PAGE) {
-            return Some(pdpte.flags() - Flags::HUGE_PAGE);
+        let mut table = active_pml4() as *const PageTable;
+        let mut access = Flags::WRITABLE | Flags::USER_ACCESSIBLE;
+        let mut nx = Flags::empty();
+        let indexes = [vaddr.p4_index(), vaddr.p3_index(), vaddr.p2_index(), vaddr.p1_index()];
+        for (level, index) in indexes.into_iter().enumerate() {
+            let entry = &(&*table)[index];
+            let flags = entry.flags();
+            if !flags.contains(Flags::PRESENT) { return None; }
+            access &= flags;
+            nx |= flags & Flags::NO_EXECUTE;
+            if level == 3 || (level > 0 && flags.contains(Flags::HUGE_PAGE)) {
+                return Some((flags - Flags::HUGE_PAGE - Flags::WRITABLE
+                    - Flags::USER_ACCESSIBLE - Flags::NO_EXECUTE) | access | nx);
+            }
+            if flags.contains(Flags::HUGE_PAGE) { return None; }
+            table = phys_to_virt(entry.addr()).as_ptr::<PageTable>();
         }
-
-        let pd = &*phys_to_virt(pdpte.addr()).as_ptr::<PageTable>();
-        let pde = &pd[vaddr.p2_index()];
-        if !pde.flags().contains(Flags::PRESENT) { return None; }
-        if pde.flags().contains(Flags::HUGE_PAGE) {
-            return Some(pde.flags() - Flags::HUGE_PAGE);
-        }
-
-        let pt = &*phys_to_virt(pde.addr()).as_ptr::<PageTable>();
-        let pte = &pt[vaddr.p1_index()];
-        if !pte.flags().contains(Flags::PRESENT) { return None; }
-        Some(pte.flags())
+        None
     }
 }

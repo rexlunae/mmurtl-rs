@@ -227,26 +227,23 @@ pub fn range_ok(ptr: u64, len: u64, write: bool) -> bool {
     true
 }
 
-/// Copy bytes in from validated user memory
-pub fn copy_from_user(dst: &mut [u8], src: u64) -> bool {
-    if !range_ok(src, dst.len() as u64, false) {
-        return false;
-    }
-    crate::arch::user_access_begin();
-    unsafe { core::ptr::copy_nonoverlapping(src as *const u8, dst.as_mut_ptr(), dst.len()) };
-    crate::arch::user_access_end();
-    true
+/// Cheap overflow-safe bounds check. Hardware enforces page permissions
+/// during the fault-tolerant copy; no check-then-use page walk is needed.
+pub fn bounds_ok(ptr: u64, len: u64) -> bool {
+    len == 0 || (ptr >= USER_BASE && ptr < USER_END && len <= USER_END - ptr)
 }
 
-/// Copy bytes out to validated, writable user memory
+/// On failure, the destination may contain a copied prefix. Callers must
+/// discard it (RQBs are decoded only after this returns true).
+pub fn copy_from_user(dst: &mut [u8], src: u64) -> bool {
+    if !bounds_ok(src, dst.len() as u64) { return false; }
+    unsafe { crate::arch::uaccess::copy_from_user(dst.as_mut_ptr(), src, dst.len()) == 0 }
+}
+
+/// Failure may have written a prefix of the user buffer.
 pub fn copy_to_user(dst: u64, src: &[u8]) -> bool {
-    if !range_ok(dst, src.len() as u64, true) {
-        return false;
-    }
-    crate::arch::user_access_begin();
-    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len()) };
-    crate::arch::user_access_end();
-    true
+    if !bounds_ok(dst, src.len() as u64) { return false; }
+    unsafe { crate::arch::uaccess::copy_to_user(dst, src.as_ptr(), src.len()) == 0 }
 }
 
 // ========================================================================
