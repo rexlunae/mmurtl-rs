@@ -104,6 +104,7 @@ pub fn boot_secondaries(info: &MachineInfo) {
         if target == me {
             continue;
         }
+        if next_cpu as usize >= crate::scheduler::MAX_CPUS { break; }
         let stack: &'static mut [u8] = Box::leak(vec![0u8; AP_STACK_SIZE].into_boxed_slice());
         let boot = Box::leak(Box::new(ApBoot {
             stack_top: stack.as_ptr() as u64 + AP_STACK_SIZE as u64,
@@ -168,14 +169,18 @@ pub fn boot_secondaries(info: &MachineInfo) {
 #[no_mangle]
 extern "C" fn arm64_secondary_main(cpu: u64) -> ! {
     super::mmu::retire_identity();
-    super::cpu_features::enumerate(cpu as usize);
-    if !crate::security::admit_cpu(cpu as usize, || {
+    if !crate::security::admit_cpu_prepared(cpu as usize, || {
+        if !crate::topology::admit(cpu as usize) { return false; }
+        super::cpu_features::enumerate(cpu as usize);
+        true
+    }, || {
         super::exceptions::init();
         super::init_user_counter_policy();
         super::irq::init_cpu();
         crate::scheduler::register_ap(cpu as usize);
         CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
     }) {
+        AP_READY.store(true, Ordering::SeqCst); // parked siblings complete bring-up too
         loop { unsafe { asm!("msr daifset, #0xf", "wfi", options(nomem, nostack)); } }
     }
 

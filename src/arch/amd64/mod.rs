@@ -241,3 +241,5 @@ pub mod wx;
 pub mod microcode;
 
 pub mod microcode_msr;
+
+pub mod topology;

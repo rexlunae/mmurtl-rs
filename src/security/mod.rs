@@ -24,6 +24,7 @@ pub fn init(args: &str) {
         Policy::automatic()
     });
     POLICY.call_once(|| policy);
+    crate::topology::init(args, policy);
 }
 pub fn policy() -> Policy { POLICY.get().copied().unwrap_or(Policy::automatic()) }
 pub fn record(cpu: usize, caps: SpecCaps) { CAPS.lock()[cpu] = Some(caps); }
@@ -105,7 +106,8 @@ pub fn report() {
         }
     }
     if policy().mode == Mode::AutoNoSmt {
-        crate::serial::write_line("[SPEC] SMT isolation requested; topology enforcement pending (#42)");
+        assert!(crate::topology::isolating(), "requested SMT isolation was not enforced");
+        crate::serial::write_line("[SPEC] SMT isolation enforced by CPU admission");
     }
 }
 

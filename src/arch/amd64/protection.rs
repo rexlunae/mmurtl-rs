@@ -2,6 +2,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use crate::security::x86_access::{SMEP, SMAP, UMIP, LASS};
 static CAPS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+static INITIALIZED: AtomicU64 = AtomicU64::new(0);
 static APPLIED: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
 static READY: AtomicBool = AtomicBool::new(false);
 static COMMON: AtomicU64 = AtomicU64::new(0);
@@ -26,13 +27,21 @@ pub fn enumerate(cpu: usize) {
         core::arch::asm!("pushfq", "and qword ptr [rsp], -262145", "popfq"); // clear inherited AC
     }
     CAPS[cpu].store(caps, Ordering::Release);
+    INITIALIZED.fetch_or(1 << cpu, Ordering::Release);
 }
 
 pub fn finalize() {
     let admitted = crate::security::freeze();
-    let common = crate::security::x86_access::common((0..64)
+    let mut common = crate::security::x86_access::common((0..64)
         .filter(|cpu| admitted & (1 << cpu) != 0)
         .map(|cpu| CAPS[cpu].load(Ordering::Acquire)));
+    // Parked SMT siblings retain guarded NMI/MC gates. Shared entry CLAC
+    // must also be legal on them, even though they never run user tasks.
+    let initialized = INITIALIZED.load(Ordering::Acquire);
+    if (0..64).filter(|cpu| initialized & (1 << cpu) != 0)
+        .any(|cpu| CAPS[cpu].load(Ordering::Acquire) & SMAP == 0) {
+        common = crate::security::x86_access::common([common & !SMAP].into_iter());
+    }
     COMMON.store(common, Ordering::Release);
     SMAP_ENTRY_ENABLED.store(u8::from(common & SMAP != 0), Ordering::Release);
     READY.store(true, Ordering::Release);
