@@ -367,7 +367,7 @@ fn run(cwd: &Path, name: &str) -> Result<(), &'static str> {
     let tid = scheduler::create_user_task(
         image.entry,
         image.stack_top,
-        0,
+        image.startup,
         image.space,
         image.slot,
         "shell-program",

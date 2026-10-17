@@ -204,7 +204,7 @@ fn spawn_elf_programs() {
             Ok(img) => {
                 // Task names live forever; ELF names come from disk
                 let task_name: &'static str = alloc::boxed::Box::leak(name.clone().into_boxed_str());
-                let tid = scheduler::create_user_task(img.entry, img.stack_top, 0, img.space, img.slot, task_name);
+                let tid = scheduler::create_user_task(img.entry, img.stack_top, img.startup, img.space, img.slot, task_name);
                 let _ = write!(line, "[USER] Loaded /{} ({} bytes) as T{}, entry 0x{:x}\n", path, size, tid, img.entry);
                 tid
             }
@@ -280,6 +280,7 @@ fn test_elf(machine: u16, vaddr: u64, flags: u32, entry: u64) -> alloc::vec::Vec
     img[4] = 2; // 64-bit
     img[5] = 1; // little-endian
     img[6] = 1;
+    img[20..24].copy_from_slice(&1u32.to_le_bytes());
     img[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
     img[18..20].copy_from_slice(&machine.to_le_bytes());
     img[24..32].copy_from_slice(&entry.to_le_bytes());
