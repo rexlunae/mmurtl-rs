@@ -26,7 +26,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  BIOS:   {}", bios_path.display());
     println!("  UEFI:   {}", uefi_path.display());
 
-    let builder = bootloader::DiskImageBuilder::new(kernel_path);
+    let mut builder = bootloader::DiskImageBuilder::new(kernel_path);
+    if let Some(path) = std::env::var_os("MMURTL_MICROCODE") {
+        let path = PathBuf::from(path);
+        if !path.is_file() { return Err("MMURTL_MICROCODE must name a vendor container file".into()); }
+        println!("  Microcode: {}", path.display());
+        builder.set_ramdisk(path);
+    }
     builder.create_bios_image(&bios_path)?;
     builder.create_uefi_image(&uefi_path)?;
 

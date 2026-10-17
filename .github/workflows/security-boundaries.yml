@@ -34,3 +34,7 @@ jobs:
         run: |
           rustc --edition=2021 tools/tests/virtqueue_ownership.rs -o /tmp/mmurtl-vq-test
           /tmp/mmurtl-vq-test
+      - name: Verify vendor microcode parsers
+        run: |
+          rustc --edition=2021 tools/tests/microcode.rs -o /tmp/mmurtl-ucode-test
+          /tmp/mmurtl-ucode-test

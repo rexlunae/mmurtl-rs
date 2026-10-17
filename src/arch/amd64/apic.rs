@@ -358,3 +358,12 @@ fn ioapic_route(
     crate::serial::write_dec(dest_apic_id as u64);
     crate::serial::write_str("\n");
 }
+
+/// Boot regression: deliver an NMI while ordinary IRQs remain masked.
+pub fn send_nmi(apic_id: u32) {
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        reg_write(LAPIC_ICR_HIGH, apic_id << 24);
+        reg_write(LAPIC_ICR_LOW, 0x0000_4400); // NMI, assert, physical destination
+        icr_wait();
+    });
+}
