@@ -45,6 +45,9 @@ pub enum IrqChip {
 
 /// What the kernel learns from the device tree
 pub struct MachineInfo {
+    /// Seed properties to consume and erase only after this parser releases its DTB borrow.
+    pub rng_seed: (u64, usize),
+    pub kaslr_seed: (u64, usize),
     pub bootargs: [u8; 512],
     pub bootargs_len: usize,
     pub ram: [(u64, u64); MAX_RAM], // (base, size)
@@ -97,6 +100,8 @@ impl MachineInfo {
     /// QEMU `virt` defaults, used for anything the tree doesn't say
     const fn qemu_virt_defaults() -> Self {
         Self {
+            rng_seed: (0, 0),
+            kaslr_seed: (0, 0),
             bootargs: [0; 512],
             bootargs_len: 0,
             ram: [(0, 0); MAX_RAM],
@@ -435,6 +440,8 @@ pub fn parse(addr: u64) -> MachineInfo {
                 let n = &mut stack[depth - 1];
                 let v = &b[val..val + len];
                 match name {
+                    b"rng-seed" if n.is_chosen && len <= 4096 => info.rng_seed = (addr + val as u64, len),
+                    b"kaslr-seed" if n.is_chosen && len == 8 => info.kaslr_seed = (addr + val as u64, len),
                     b"bootargs" if n.is_chosen => {
                         let len = v.iter().position(|b| *b == 0).unwrap_or(v.len());
                         if len <= info.bootargs.len() {

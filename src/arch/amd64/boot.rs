@@ -80,6 +80,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let module = match boot_info.ramdisk_addr { Optional::Some(a) => Some(a), Optional::None => None };
     super::microcode::init(module, boot_info.ramdisk_len);
     assert!(super::microcode::apply(0));
+    crate::random::init();
     super::protection::enumerate(0);
     super::memory::protect_image_aliases(boot_info.kernel_addr, boot_info.kernel_len, boot_info.kernel_image_offset);
     super::gdt::protect_bsp_stacks();

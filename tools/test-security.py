@@ -27,9 +27,13 @@ def main():
     parser.add_argument('--el2', action='store_true')
     parser.add_argument('--raw-image', action='store_true', help='boot the relocated arm64 Image (make arm64-image)')
     parser.add_argument('--nmi', action='store_true', help='inject an amd64 NMI and verify the shell remains responsive')
+    parser.add_argument('--no-firmware-seed', action='store_true', help='disable QEMU arm64 DT seed properties')
+    parser.add_argument('--net', action='store_true', help='attach virtio networking for queue regressions')
+    parser.add_argument('--rng', action='store_true', help='attach a host-backed virtio entropy device')
     parser.add_argument('--require', action='append', default=[])
     args = parser.parse_args()
     if args.uefi and args.arch != 'amd64': parser.error('--uefi requires amd64')
+    if args.no_firmware_seed and args.arch != 'arm64': parser.error('--no-firmware-seed requires arm64')
     if args.el2 and args.arch != 'arm64': parser.error('--el2 requires arm64')
     if args.raw_image and args.arch != 'arm64': parser.error('--raw-image requires arm64')
     if args.nmi and args.arch != 'amd64': parser.error('--nmi requires amd64')
@@ -43,7 +47,7 @@ def main():
             if args.uefi:
                 command += ['-bios', '/usr/share/ovmf/OVMF.fd']
         else:
-            command = ['qemu-system-aarch64', '-machine', 'virt,gic-version=3' + (',virtualization=on' if args.el2 else ''),
+            command = ['qemu-system-aarch64', '-machine', 'virt,gic-version=3' + (',virtualization=on' if args.el2 else '') + (',dtb-randomness=off' if args.no_firmware_seed else ''),
                        '-cpu', args.cpu or 'cortex-a72', '-nographic', '-monitor', 'none',
                        '-kernel', str(ROOT / ('target/mmurtl-rs-arm64.Image' if args.raw_image else 'target/aarch64-unknown-none-softfloat/release/mmurtl-rs'))]
         if args.cpu and args.arch == 'amd64': command += ['-cpu', args.cpu]
@@ -56,6 +60,10 @@ def main():
                 command += ['-fw_cfg', f'name=opt/mmurtl/bootargs,file={bootargs_path}']
             else:
                 command += ['-append', args.bootargs]
+        if args.net:
+            net_device = 'virtio-net-pci' if args.arch == 'amd64' else 'virtio-net-device'
+            command += ['-netdev', 'user,id=net0', '-device', net_device + ',netdev=net0']
+        if args.rng: command += ['-device', 'virtio-rng-pci' if args.arch == 'amd64' else 'virtio-rng-device']
         command += ['-m', '256M', '-smp', str(args.cpus)]
         proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         output = bytearray()

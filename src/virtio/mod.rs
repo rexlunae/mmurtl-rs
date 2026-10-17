@@ -10,6 +10,8 @@
 pub mod blk;
 pub mod net;
 pub mod pci;
+pub mod rng;
+mod ownership;
 
 use alloc::boxed::Box;
 use core::sync::atomic::{fence, Ordering};
@@ -57,6 +59,7 @@ pub fn attach(device_id: u32, transport: Box<dyn Transport>) {
     match device_id {
         1 => net::init(transport),
         2 => blk::init(transport),
+        4 => rng::init(transport),
         other => {
             crate::serial::write_str("[VIRTIO] Unhandled virtio device type ");
             crate::serial::write_dec(other as u64);
@@ -126,9 +129,7 @@ pub struct Virtqueue {
     avail_ring: *mut u16,
     used_idx: *const u16, // used: flags, idx, ring[size] of {id u32, len u32}
     used_ring: *const [u32; 2],
-    /// Head of the free-descriptor list (chained via Desc::next)
-    free_head: u16,
-    num_free: u16,
+    ownership: ownership::Ownership,
     last_used: u16,
     /// Physical address of the ring memory (descriptor table first)
     pub ring_phys: u64,
@@ -153,10 +154,6 @@ impl Virtqueue {
 
         unsafe {
             let desc = base as *mut Desc;
-            // Chain all descriptors into the free list
-            for i in 0..size {
-                (*desc.add(i as usize)).next = i + 1;
-            }
 
             let avail = base.add(desc_bytes) as *mut u16;
             let used = base.add(used_offset) as *mut u16;
@@ -169,8 +166,7 @@ impl Virtqueue {
                 avail_ring: avail.add(2),
                 used_idx: used.add(1),
                 used_ring: used.add(2) as *const [u32; 2],
-                free_head: 0,
-                num_free: size,
+                ownership: ownership::Ownership::new(size),
                 last_used: 0,
                 ring_phys: region.phys,
                 avail_offset: desc_bytes as u64,
@@ -178,6 +174,8 @@ impl Virtqueue {
             }
         }
     }
+
+    pub fn is_broken(&self) -> bool { self.ownership.broken() }
 
     /// Number of entries
     pub fn size(&self) -> u16 {
@@ -198,11 +196,7 @@ impl Virtqueue {
     /// Returns the chain's head descriptor index, or None if out of
     /// descriptors. Caller must `notify()` the device afterwards.
     pub fn submit(&mut self, bufs: &[QueueBuf]) -> Option<u16> {
-        if bufs.is_empty() || (bufs.len() as u16) > self.num_free {
-            return None;
-        }
-
-        let head = self.free_head;
+        let head = self.ownership.reserve(bufs.len())?;
         let mut idx = head;
         unsafe {
             for (i, &(addr, len, device_writes)) in bufs.iter().enumerate() {
@@ -212,14 +206,13 @@ impl Virtqueue {
                 d.flags = if device_writes { DESC_F_WRITE } else { 0 };
                 if i + 1 < bufs.len() {
                     d.flags |= DESC_F_NEXT;
-                    idx = d.next;
+                    let next = self.ownership.next(idx);
+                    d.next = next;
+                    idx = next;
                 } else {
-                    let next_free = d.next;
                     d.next = 0;
-                    self.free_head = next_free;
                 }
             }
-            self.num_free -= bufs.len() as u16;
 
             // Publish: write ring entry, fence, then bump avail idx
             let avail = self.avail_idx.read_volatile();
@@ -236,8 +229,18 @@ impl Virtqueue {
     /// Reap one completion from the used ring, returning the chain head
     /// index and the number of bytes the device wrote.
     pub fn pop_used(&mut self, chain_len: u16) -> Option<(u16, u32)> {
+        self.pop_used_checked(chain_len, None)
+    }
+
+    /// Validate the completion head before touching descriptor memory.
+    pub fn pop_used_checked(&mut self, chain_len: u16, expected: Option<u16>) -> Option<(u16, u32)> {
         unsafe {
-            if self.last_used == self.used_idx.read_volatile() {
+            if self.ownership.broken() { return None; }
+            let used = self.used_idx.read_volatile();
+            if used.wrapping_sub(self.last_used) > self.size {
+                self.ownership.poison(); return None;
+            }
+            if self.last_used == used {
                 return None;
             }
             fence(Ordering::SeqCst);
@@ -245,15 +248,7 @@ impl Virtqueue {
             let [id, len] = self.used_ring.add(slot).read_volatile();
             self.last_used = self.last_used.wrapping_add(1);
 
-            // Return the chain to the free list
-            let head = id as u16;
-            let mut tail = head;
-            for _ in 1..chain_len {
-                tail = (*self.desc.add(tail as usize)).next;
-            }
-            (*self.desc.add(tail as usize)).next = self.free_head;
-            self.free_head = head;
-            self.num_free += chain_len;
+            let head = self.ownership.complete(id, chain_len, expected)?;
 
             Some((head, len))
         }
@@ -262,6 +257,7 @@ impl Virtqueue {
     /// Busy-wait for a completion, with a rough timeout in milliseconds
     pub fn wait_used(&mut self, chain_len: u16, timeout_ms: u32) -> Option<(u16, u32)> {
         for _ in 0..timeout_ms {
+            if self.ownership.broken() { return None; }
             if let Some(r) = self.pop_used(chain_len) {
                 return Some(r);
             }
