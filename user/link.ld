@@ -1,17 +1,27 @@
-/* User programs are linked into the kernel's user window
- * (memory::user::USER_BASE = 0x6400_0000_0000), 48 MiB in. Every program
- * runs in its own address space, so they can all use the same range. */
+/* Static PIE: offsets are rebased by the kernel, never fixed user VAs. */
 ENTRY(_start)
-
-SECTIONS
-{
-    . = 0x640003000000;
-    /* Each output section starts on its own page, so every segment gets
-     * exactly its own permissions (the loader enforces W^X per page).
-     * The .l* inputs come from x86_64's large code model. */
-    .text : ALIGN(4096) { *(.text._start) *(.text .text.*) *(.ltext .ltext.*) }
-    .rodata : ALIGN(4096) { *(.rodata .rodata.*) *(.lrodata .lrodata.*) }
-    .data : ALIGN(4096) { *(.data .data.*) *(.ldata .ldata.*) *(.got .got.*) }
-    .bss : ALIGN(4096) { *(.bss .bss.*) *(.lbss .lbss.*) *(COMMON) }
+PHDRS {
+    text PT_LOAD FLAGS(5);
+    rodata PT_LOAD FLAGS(4);
+    data PT_LOAD FLAGS(6);
+    dynamic PT_DYNAMIC FLAGS(6);
+    relro PT_GNU_RELRO FLAGS(4);
+}
+SECTIONS {
+    . = 0x1000;
+    .text : { *(.text._start) *(.text .text.*) } :text
+    . = ALIGN(4096);
+    .rodata : { *(.rodata .rodata.*) } :rodata
+    .dynsym : { *(.dynsym) } :rodata
+    .dynstr : { *(.dynstr) } :rodata
+    .gnu.hash : { *(.gnu.hash) } :rodata
+    .hash : { *(.hash) } :rodata
+    .rela.dyn : { *(.rela.dyn .rela.*) } :rodata
+    . = ALIGN(4096);
+    .data.rel.ro : { *(.data.rel.ro .data.rel.ro.*) } :data :relro
+    .dynamic : { *(.dynamic) } :data :dynamic :relro
+    .got : { *(.got .got.*) . = ALIGN(4096); } :data :relro
+    .data : { *(.data .data.*) } :data
+    .bss : { *(.bss .bss.*) *(COMMON) } :data
     /DISCARD/ : { *(.comment) *(.eh_frame*) *(.note*) }
 }

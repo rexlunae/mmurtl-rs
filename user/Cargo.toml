@@ -8,6 +8,17 @@ description = "MMURTL/RS user programs: ELF binaries loaded from the exFAT disk"
 name = "mmurtl"
 path = "src/lib.rs"
 
+[features]
+runtime-tests = []
+[[bin]]
+name = "canary"
+path = "src/bin/canary.rs"
+required-features = ["runtime-tests"]
+[[bin]]
+name = "relro"
+path = "src/bin/relro.rs"
+required-features = ["runtime-tests"]
+
 [profile.release]
 panic = "abort"
 opt-level = "s"

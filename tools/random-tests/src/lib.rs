@@ -1,4 +1,7 @@
 #![allow(dead_code)]
+#[path = "../../../src/memory/elf.rs"] mod elf;
+#[path = "../../../src/memory/user_layout.rs"] mod user_layout;
+#[cfg(test)] mod elf_tests;
 mod scheduler { pub const MAX_CPUS: usize = 2; }
 mod arch {
     pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R { f() }
