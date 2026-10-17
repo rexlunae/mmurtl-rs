@@ -54,6 +54,8 @@ pub fn report() {
     }
     let mut line: heapless::String<180> = heapless::String::new();
     let _ = write!(line, "[SMP] topology: {} known core groups, {} logical CPUs, up to {} discovered threads/core, {} unknown\n", known_cores, logical, max_threads, unknown);
+    crate::serial::write_str(&line);
+    line.clear();
     if state.disable_smt { let _ = write!(line, "[SMP] nosmt: {} sibling threads left offline; {} unknown CPUs parked\n", siblings, unknown_offline); }
     else { let _ = line.push_str("[SMP] SMT allowed by policy: simultaneous cross-thread isolation disabled\n"); }
     crate::serial::write_str(&line);
