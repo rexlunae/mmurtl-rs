@@ -73,6 +73,8 @@ static TID_SPIN: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_READ: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PRIV: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PTR: AtomicU32 = AtomicU32::new(0);
+static TID_ROGUE_SIMD: AtomicU32 = AtomicU32::new(0);
+static TID_ROGUE_FP: AtomicU32 = AtomicU32::new(0);
 static TID_ROGUE_PEEK: AtomicU32 = AtomicU32::new(0);
 /// ELF programs loaded from /BIN on the exFAT disk
 static ELF_TIDS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
@@ -129,6 +131,8 @@ pub fn demo() {
     // address spaces those pages simply aren't mapped for it
     TID_ROGUE_PEEK.store(spawn("rogue_peek", prog::rogue_read(), uecho_code), Ordering::SeqCst);
 
+    TID_ROGUE_SIMD.store(spawn("rogue_simd", prog::rogue_simd(), 0), Ordering::SeqCst);
+    TID_ROGUE_FP.store(spawn("rogue_fp", prog::rogue_fp(), 0), Ordering::SeqCst);
     spawn_elf_programs();
 }
 
@@ -335,6 +339,8 @@ extern "C" fn user_check_task() -> ! {
             && exited(&TID_ROGUE_PRIV)
             && exited(&TID_ROGUE_PTR)
             && exited(&TID_ROGUE_PEEK)
+            && exited(&TID_ROGUE_FP)
+            && exited(&TID_ROGUE_SIMD)
     });
 
     crate::serial::write_str("[USER] Userspace checks:\n");
@@ -345,6 +351,8 @@ extern "C" fn user_check_task() -> ! {
     pass &= report("rogue_priv killed, kernel alive", killed(&TID_ROGUE_PRIV));
     pass &= report("rogue_ptr refused, exited", exited(&TID_ROGUE_PTR) && !killed(&TID_ROGUE_PTR));
     pass &= report("rogue_peek can't see uecho's pages", killed(&TID_ROGUE_PEEK));
+    pass &= report("rogue_fp killed, kernel alive", killed(&TID_ROGUE_FP));
+    pass &= report("rogue_simd killed, kernel alive", killed(&TID_ROGUE_SIMD));
     pass &= all_done;
 
     // A user-mode service exiting mid-request fails it with Aborted

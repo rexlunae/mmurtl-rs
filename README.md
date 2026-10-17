@@ -638,6 +638,12 @@ requires the entry point to be in an executable segment — all before
 mapping anything. Segments are mapped with exactly their permissions,
 zero-filled past their file data (`.bss`).
 
+FP/SIMD instructions are deliberately disabled on every CPU until the
+scheduler implements eager per-task FP state save/restore. The policy is
+set explicitly on BIOS/UEFI amd64 and on arm64 entry/secondary paths,
+including inherited firmware settings. User FP/SIMD attempts are killed
+and checked at boot as `rogue_fp` and `rogue_simd`; kernel FP use is a bug.
+
 Limitations: the kernel heap is a bump allocator, so small kernel-side
 task metadata is not recycled; no ASIDs on arm64 (each address-space
 switch flushes the local TLB); ELF programs are static executables (no
@@ -796,3 +802,11 @@ capability-based transport).
 ## License
 
 MMURTL's original license is included in the [bproctor/MMURTL](https://github.com/bproctor/MMURTL) repo.
+
+Security boot regression configurations (build images/kernels first):
+
+```bash
+python3 tools/test-security.py --arch amd64 --cpus 4
+python3 tools/test-security.py --arch amd64 --uefi --cpus 4  # needs OVMF
+python3 tools/test-security.py --arch arm64 --cpu max --el2 --cpus 4
+```

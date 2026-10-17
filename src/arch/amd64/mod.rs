@@ -10,6 +10,7 @@ pub mod apic;
 pub mod boot;
 pub mod context;
 pub mod gdt;
+pub mod fpu;
 pub mod interrupts;
 pub mod memory;
 pub mod page_table;

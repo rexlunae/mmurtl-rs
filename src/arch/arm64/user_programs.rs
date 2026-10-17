@@ -232,6 +232,20 @@ user_exit_start:
     .globl user_exit_end
 user_exit_end:
 
+    .globl user_rogue_fp_start
+user_rogue_fp_start:
+    .inst 0x1e6e1000 // fmov d0, #1.0 (intentional FP in soft-float kernel)
+    brk #0
+    .globl user_rogue_fp_end
+user_rogue_fp_end:
+
+    .globl user_rogue_simd_start
+user_rogue_simd_start:
+    .inst 0x4f00e400 // movi v0.16b, #0
+    brk #0
+    .globl user_rogue_simd_end
+user_rogue_simd_end:
+
     .popsection
     "#
 );
@@ -249,6 +263,10 @@ extern "C" {
     static user_rogue_priv_end: u8;
     static user_rogue_ptr_start: u8;
     static user_rogue_ptr_end: u8;
+    static user_rogue_fp_start: u8;
+    static user_rogue_fp_end: u8;
+    static user_rogue_simd_start: u8;
+    static user_rogue_simd_end: u8;
     static user_exit_start: u8;
     static user_exit_end: u8;
 }
@@ -273,3 +291,7 @@ program!(rogue_read, user_rogue_read_start, user_rogue_read_end);
 program!(rogue_priv, user_rogue_priv_start, user_rogue_priv_end);
 program!(rogue_ptr, user_rogue_ptr_start, user_rogue_ptr_end);
 program!(exit_only, user_exit_start, user_exit_end);
+
+program!(rogue_fp, user_rogue_fp_start, user_rogue_fp_end);
+
+program!(rogue_simd, user_rogue_simd_start, user_rogue_simd_end);

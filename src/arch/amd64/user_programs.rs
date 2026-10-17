@@ -242,6 +242,20 @@ user_exit_start:
     .globl user_exit_end
 user_exit_end:
 
+    .globl user_rogue_fp_start
+user_rogue_fp_start:
+    fninit
+    ud2
+    .globl user_rogue_fp_end
+user_rogue_fp_end:
+
+    .globl user_rogue_simd_start
+user_rogue_simd_start:
+    .byte 0x66, 0x0f, 0xef, 0xc0 // pxor xmm0, xmm0
+    ud2
+    .globl user_rogue_simd_end
+user_rogue_simd_end:
+
     .popsection
     "#,
     options(att_syntax)
@@ -260,6 +274,10 @@ extern "C" {
     static user_rogue_priv_end: u8;
     static user_rogue_ptr_start: u8;
     static user_rogue_ptr_end: u8;
+    static user_rogue_fp_start: u8;
+    static user_rogue_fp_end: u8;
+    static user_rogue_simd_start: u8;
+    static user_rogue_simd_end: u8;
     static user_exit_start: u8;
     static user_exit_end: u8;
 }
@@ -285,3 +303,7 @@ program!(rogue_read, user_rogue_read_start, user_rogue_read_end);
 program!(rogue_priv, user_rogue_priv_start, user_rogue_priv_end);
 program!(rogue_ptr, user_rogue_ptr_start, user_rogue_ptr_end);
 program!(exit_only, user_exit_start, user_exit_end);
+
+program!(rogue_fp, user_rogue_fp_start, user_rogue_fp_end);
+
+program!(rogue_simd, user_rogue_simd_start, user_rogue_simd_end);
