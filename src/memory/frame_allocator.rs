@@ -31,6 +31,8 @@ pub struct PhysRange {
 pub struct FrameAllocator {
     /// Bitmap: 1 bit per frame (1 = allocated/used, 0 = free)
     bitmap: &'static mut [u32; BITMAP_ENTRIES],
+    /// Free frames already scrubbed. Allocated frames always clear this bit.
+    zeroed: &'static mut [u32; BITMAP_ENTRIES],
     /// Number of frames covered by usable RAM (scan limit)
     total_frames: usize,
     /// Number of free frames
@@ -71,20 +73,31 @@ impl FrameAllocator {
         let total_frames = (top / FRAME_SIZE) as usize;
 
         let bitmap_bytes = BITMAP_ENTRIES as u64 * 4;
-        let reserved_frames = 1 + (bitmap_bytes + FRAME_SIZE - 1) / FRAME_SIZE; // header + bitmap
+        let reserved_frames = 1 + (2 * bitmap_bytes + FRAME_SIZE - 1) / FRAME_SIZE; // header + bitmap
         let reserved_bytes = reserved_frames * FRAME_SIZE;
 
         let header_addr = usable
             .iter()
             .find_map(|r| {
-                let start = (r.start.max(min_addr) + FRAME_SIZE - 1) & !(FRAME_SIZE - 1);
-                (start + reserved_bytes <= r.end).then_some(start)
+                let mut start = (r.start.max(min_addr) + FRAME_SIZE - 1) & !(FRAME_SIZE - 1);
+                loop {
+                    let end = start.checked_add(reserved_bytes)?;
+                    if end > r.end.min(MAX_PHYSICAL_MEMORY) { return None; }
+                    if let Some(overlap) = reserved.iter().find(|x| start < x.end && end > x.start) {
+                        start = (overlap.end.checked_add(FRAME_SIZE - 1)?) & !(FRAME_SIZE - 1);
+                    } else { return Some(start); }
+                }
             })
             .expect("No usable region large enough for the frame bitmap");
 
+        // Clear padding in the metadata reservation too, before creating references.
+        scrub(header_addr, reserved_bytes);
         let bitmap_addr = header_addr + FRAME_SIZE;
         let bitmap: &'static mut [u32; BITMAP_ENTRIES] =
             unsafe { &mut *(virt(bitmap_addr) as *mut [u32; BITMAP_ENTRIES]) };
+
+        let zeroed: &'static mut [u32; BITMAP_ENTRIES] =
+            unsafe { &mut *(virt(bitmap_addr + bitmap_bytes) as *mut [u32; BITMAP_ENTRIES]) };
 
         // Everything starts used; only usable ranges are freed
         bitmap.fill(u32::MAX);
@@ -111,10 +124,12 @@ impl FrameAllocator {
         crate::serial::write_dec((free_count as u64 * FRAME_SIZE) / (1024 * 1024));
         crate::serial::write_str(" MiB)\n");
 
+        crate::serial::write_line("[MEM] free memory scrubbed on release");
         let header = virt(header_addr) as *mut FrameAllocator;
         unsafe {
             header.write(FrameAllocator {
                 bitmap,
+                zeroed,
                 total_frames,
                 free_frames: free_count,
                 last_search: 0,
@@ -128,11 +143,15 @@ impl FrameAllocator {
     }
 
     fn mark(&mut self, idx: usize) {
+        if self.zeroed[idx / 32] & (1 << (idx % 32)) == 0 {
+            scrub(idx as u64 * FRAME_SIZE, FRAME_SIZE);
+        }
+        self.zeroed[idx / 32] &= !(1 << (idx % 32));
         self.bitmap[idx / 32] |= 1 << (idx % 32);
     }
 
-    /// Allocate a single physical frame; returns its physical address
-    pub fn allocate_frame(&mut self) -> Option<u64> {
+    /// Allocate a zeroed physical frame; returns its physical address
+    pub fn allocate_zeroed_frame(&mut self) -> Option<u64> {
         let total = self.total_frames;
         let start = self.last_search;
         for i in 0..total {
@@ -150,7 +169,7 @@ impl FrameAllocator {
 
     /// Allocate `count` physically contiguous frames (for DMA rings,
     /// buffers, and the arm64 heap). Returns the first frame's address.
-    pub fn allocate_contiguous(&mut self, count: usize) -> Option<u64> {
+    pub fn allocate_zeroed_contiguous(&mut self, count: usize) -> Option<u64> {
         if count == 0 {
             return None;
         }
@@ -182,8 +201,9 @@ impl FrameAllocator {
     /// place). All-or-nothing.
     #[allow(dead_code)]
     pub fn claim_range(&mut self, start: u64, count: usize) -> bool {
+        if start % FRAME_SIZE != 0 { return false; }
         let first = (start / FRAME_SIZE) as usize;
-        if first + count > self.total_frames || !(first..first + count).all(|i| self.is_free(i)) {
+        if first > self.total_frames || count > self.total_frames.saturating_sub(first) || !(first..first + count).all(|i| self.is_free(i)) {
             return false;
         }
         for i in first..first + count {
@@ -196,11 +216,41 @@ impl FrameAllocator {
     /// Free a previously allocated frame
     #[allow(dead_code)]
     pub fn deallocate_frame(&mut self, phys: u64) {
+        assert!(phys % FRAME_SIZE == 0, "unaligned frame release");
         let idx = (phys / FRAME_SIZE) as usize;
+        assert!(idx < self.total_frames, "frame release outside RAM");
         if !self.is_free(idx) {
+            // Keep ownership until the entire frame is erased. The caller
+            // must have removed mappings and stopped all CPU/DMA users.
+            scrub(phys, FRAME_SIZE);
+            self.zeroed[idx / 32] |= 1 << (idx % 32);
             self.bitmap[idx / 32] &= !(1 << (idx % 32));
             self.free_frames += 1;
         }
+    }
+
+    /// Best-effort shutdown hook: scrub all free RAM, including untouched
+    /// firmware pages. Call only after CPUs/devices are quiesced. Live heap,
+    /// stacks, page tables and other allocated frames must be wiped separately
+    /// once their owners stop using them; never erase them under a running OS.
+    #[allow(dead_code)]
+    pub fn scrub_free_memory(&mut self) {
+        for i in 0..self.total_frames {
+            if self.is_free(i) {
+                scrub(i as u64 * FRAME_SIZE, FRAME_SIZE);
+                self.zeroed[i / 32] |= 1 << (i % 32);
+            }
+        }
+    }
+
+    /// Debug check of frames scrubbed on release. Firmware's untouched free
+    /// frames are zeroed lazily on first allocation and excluded here.
+    pub fn released_frames_are_zero(&self) -> bool {
+        (0..self.total_frames).filter(|&i| self.is_free(i)
+            && self.zeroed[i / 32] & (1 << (i % 32)) != 0).all(|i| {
+                let ptr = virt(i as u64 * FRAME_SIZE) as *const u64;
+                (0..FRAME_SIZE as usize / 8).all(|n| unsafe { ptr.add(n).read_volatile() == 0 })
+            })
     }
 
     /// Number of free frames remaining
@@ -213,4 +263,14 @@ impl FrameAllocator {
     pub fn total_count(&self) -> usize {
         self.total_frames
     }
+}
+
+/// Volatile stores prevent dead-store removal when erasing released secrets.
+/// All callers supply aligned, exclusively owned RAM through the physmap.
+fn scrub(phys: u64, bytes: u64) {
+    let ptr = virt(phys) as *mut u64;
+    for n in 0..bytes as usize / 8 {
+        unsafe { ptr.add(n).write_volatile(0); }
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }

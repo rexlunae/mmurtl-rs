@@ -31,7 +31,7 @@ impl BumpFrameAllocator {
 
 unsafe impl FrameAllocator<x86_64::structures::paging::Size4KiB> for BumpFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<x86_64::structures::paging::Size4KiB>> {
-        let pa = unsafe { (*self.inner).allocate_frame()? };
+        let pa = unsafe { (*self.inner).allocate_zeroed_frame()? };
         Some(PhysFrame::containing_address(PhysAddr::new(pa)))
     }
 }

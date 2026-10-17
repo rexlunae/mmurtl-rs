@@ -402,6 +402,8 @@ extern "C" fn user_check_task() -> ! {
     let mut what: heapless::String<64> = heapless::String::new();
     let _ = write!(what, "{} churn tasks reclaimed ({} frames)", ran, frames);
     pass &= report(&what, ran == 16 && frames > 0 && leaked <= 0);
+    pass &= report("released frames contain no secrets",
+        crate::memory::heap::with_frame_allocator(|fa| fa.released_frames_are_zero()).unwrap_or(false));
     if leaked > 0 {
         let mut line: heapless::String<64> = heapless::String::new();
         let _ = write!(line, "[USER]     {} frames leaked\n", leaked);

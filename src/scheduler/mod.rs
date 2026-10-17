@@ -610,11 +610,10 @@ pub fn current_task_name() -> &'static str {
 /// Allocate a task stack from the kernel heap
 fn alloc_stack() -> KernelStack {
     let pages = TASK_STACK_SIZE / 4096;
-    let phys = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_contiguous(pages))
+    let phys = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_zeroed_contiguous(pages))
         .flatten()
         .expect("OOM allocating task stack");
     let virt = crate::arch::phys_to_virt(phys);
-    unsafe { core::ptr::write_bytes(virt, 0, TASK_STACK_SIZE) };
     KernelStack { virt: virt as u64, phys, size: TASK_STACK_SIZE as u64 }
 }
 

@@ -236,6 +236,10 @@ user_rogue_ptr_end:
     # ---------------------------------------------------------------
     .globl user_exit_start
 user_exit_start:
+    leaq -16384(%rsp), %rdi
+    movl $2048, %ecx
+    movabsq $0x6d6d7572746c5345, %rax
+    rep stosq
     xorl %eax, %eax
     int $0x80
     ud2
