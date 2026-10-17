@@ -278,6 +278,10 @@ unsafe extern "C" fn arm64_exception(kind: u64, frame: *mut TaskContext) -> u64 
         // Kernel sync: `svc` is a voluntary yield; anything else is a bug
         4 => {
             let esr = esr();
+            if esr >> 26 == EC_BRK && esr & 0xffe0 == 0x8220 {
+                let register=(esr & 31) as usize;
+                crate::cfi::fatal(b"KCFI",(*frame).elr,(*frame).x.get(register).copied());
+            }
             if esr >> 26 == EC_SVC64 {
                 return crate::scheduler::yield_and_switch(sp);
             }

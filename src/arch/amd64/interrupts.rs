@@ -234,6 +234,9 @@ fn invalid_opcode_handler(stack_frame: &mut InterruptStackFrame) {
     if from_user(&stack_frame) {
         kill_user_task(&stack_frame, "#UD invalid opcode", None);
     }
+    if super::cfi::is_kcfi_trap(stack_frame.instruction_pointer.as_u64()) {
+        crate::cfi::fatal(b"KCFI",stack_frame.instruction_pointer.as_u64(),super::cfi::kcfi_target(stack_frame));
+    }
     panic!("INVALID OPCODE\n{:#?}", stack_frame);
 }
 

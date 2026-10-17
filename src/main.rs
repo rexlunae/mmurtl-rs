@@ -14,6 +14,7 @@ extern crate alloc;
 
 mod arch;
 mod topology;
+mod cfi;
 mod serial;
 mod memory;
 mod scheduler;
@@ -56,6 +57,8 @@ pub fn print_banner() {
 pub fn kernel_run() -> ! {
     kptr::init();
     random::report();
+    #[cfg(feature="test-cfi")]
+    cfi::test_mismatch();
     #[cfg(feature = "test-stack-overflow")]
     memory::stacks::test_overflow();
     #[cfg(all(target_arch = "x86_64", feature = "test-machine-check"))]

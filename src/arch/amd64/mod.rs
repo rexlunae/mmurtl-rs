@@ -16,6 +16,7 @@ pub mod memory;
 pub mod page_table;
 pub mod serial;
 pub mod smp;
+pub mod cfi;
 pub mod stacks;
 pub mod syscall;
 pub mod usb;
