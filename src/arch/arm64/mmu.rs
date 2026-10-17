@@ -509,6 +509,7 @@ pub fn switch_address_space(cpu: usize, root: u64) {
         apply_asid_width();
         super::pan::apply_current();
         if ACTIVE_ROOT[cpu].load(Ordering::Acquire) == root { return; }
+        super::predictor::on_switch(cpu, root);
         let mut pool = ASIDS.lock();
         let (tag, flush) = pool.activate(cpu, root);
         if flush { flush_all(); }

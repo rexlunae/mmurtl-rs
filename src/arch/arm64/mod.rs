@@ -164,3 +164,5 @@ pub mod wx;
 mod asid_pool;
 
 pub mod pan;
+
+pub mod predictor;

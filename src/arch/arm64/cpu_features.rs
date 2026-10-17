@@ -8,6 +8,8 @@ static CONDUIT: AtomicU8 = AtomicU8::new(0);
 pub fn set_conduit(conduit: PsciConduit) {
     CONDUIT.store(match conduit { PsciConduit::None => 0, PsciConduit::Hvc => 1, PsciConduit::Smc => 2 }, Ordering::Release);
 }
+pub fn has_conduit() -> bool { CONDUIT.load(Ordering::Acquire) != 0 }
+pub fn hvc_conduit() -> bool { CONDUIT.load(Ordering::Acquire) == 1 }
 pub fn smccc(function: u64, argument: u64) -> i64 {
     let mut result = function;
     unsafe {
@@ -31,7 +33,7 @@ pub fn enumerate(cpu: usize) {
         asm!("mrs {}, id_aa64pfr1_el1", out(reg) caps.raw[1], options(nomem, nostack));
         asm!("mrs {}, id_aa64mmfr1_el1", out(reg) caps.raw[2], options(nomem, nostack));
         asm!("mrs {}, id_aa64isar2_el1", out(reg) caps.raw[3], options(nomem, nostack));
-        asm!("mrs {}, id_aa64mmfr2_el1", out(reg) caps.raw[4], options(nomem, nostack));
+        asm!("mrs {}, id_aa64mmfr2_el1", out(reg) caps.raw[9], options(nomem, nostack));
     }
     caps.vendor = *b"ARM         ";
     let csv2 = (caps.raw[0] >> 56) & 15;
@@ -44,7 +46,7 @@ pub fn enumerate(cpu: usize) {
     if (caps.raw[1] >> 4) & 15 == 2 { caps.features |= F::SSBS2; }
     if (caps.raw[2] >> 60) & 15 == 1 { caps.features |= F::ECBHB; }
     if (caps.raw[3] >> 28) & 15 == 1 { caps.features |= F::CLRBHB; }
-    caps.features |= crate::security::arm_pan::features(caps.raw[2], caps.raw[4]);
+    caps.features |= crate::security::arm_pan::features(caps.raw[2], caps.raw[9]);
     // Core tables are deliberately small and conservative. Unknown cores
     // remain unknown unless architectural immunity is advertised.
     if caps.identity >> 24 & 255 == 0x41 {
@@ -67,6 +69,7 @@ pub fn enumerate(cpu: usize) {
         }
     }
     crate::security::record(cpu, caps);
+    super::predictor::configure(cpu, caps);
 }
 
 pub fn applicable(family: V) -> bool {
