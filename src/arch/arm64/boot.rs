@@ -440,6 +440,7 @@ extern "C" fn arm64_high_main(state: *const BootState) -> ! {
     super::smp::boot_secondaries(&info);
     crate::security::finalize();
     super::mmu::finalize_asids();
+    super::pan::init();
     super::store_bypass::init();
     crate::security::report();
 

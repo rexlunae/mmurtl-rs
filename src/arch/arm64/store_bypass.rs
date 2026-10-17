@@ -57,6 +57,7 @@ pub unsafe extern "C" fn arm64_user_return_policy(frame: *mut super::TaskContext
         let task = crate::scheduler::current_store_bypass_flag();
         prepare_task(task, &mut *frame);
     }
+    super::pan::prepare_return(&mut *frame);
 }
 pub fn testable_ssbs() -> bool {
     plan().backend == Backend::Ssbs && crate::security::common().features & crate::security::feature::SSBS2 != 0

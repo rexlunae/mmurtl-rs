@@ -101,6 +101,24 @@ exception_common:
     mrs x2, spsr_el1
     stp x1, x2, [sp, #256]
 
+    // All original registers and PSTATE are saved. Close user access
+    // before any Rust dispatch, including faults inside a copy window.
+    adrp x1, ARM64_PAN_MODE
+    add x1, x1, :lo12:ARM64_PAN_MODE
+    ldarb w1, [x1]
+    cmp w1, #1
+    b.eq .Lpan_hardware
+    cmp w1, #2
+    b.ne .Lpan_closed
+    adrp x1, ARM64_EMPTY_TTBR0
+    ldr x1, [x1, :lo12:ARM64_EMPTY_TTBR0]
+    msr ttbr0_el1, x1
+    isb
+    b .Lpan_closed
+.Lpan_hardware:
+    .inst 0xd500419f             // PSTATE.PAN=1 (feature-gated)
+    isb
+.Lpan_closed:
     mov x1, sp
     bl arm64_exception          // x0 = kind, x1 = frame -> x0 = frame to resume
     mov sp, x0
@@ -178,6 +196,7 @@ fn far() -> u64 {
 #[no_mangle]
 unsafe extern "C" fn arm64_exception(kind: u64, frame: *mut TaskContext) -> u64 {
     let sp = frame as u64;
+    super::pan::assert_closed();
     match kind {
         // Kernel sync: `svc` is a voluntary yield; anything else is a bug
         4 => {
@@ -190,6 +209,9 @@ unsafe extern "C" fn arm64_exception(kind: u64, frame: *mut TaskContext) -> u64 
                     (*frame).elr = fixup;
                     return sp;
                 }
+            }
+            if let Some(fixup) = super::pan::test_fixup(esr, (*frame).elr, far()) {
+                (*frame).elr = fixup; return sp;
             }
             if let Some(fixup) = super::wx::fixup(esr, (*frame).elr, far()) {
                 (*frame).elr = fixup;

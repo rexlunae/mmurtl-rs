@@ -390,7 +390,8 @@ pub fn map_user_page(root: u64, va: u64, pa: u64, writable: bool, executable: bo
 pub fn query_page(va: u64) -> Option<(bool, bool)> {
     let root: u64;
     unsafe {
-        asm!("mrs {}, ttbr0_el1", out(reg) root);
+        let logical = ACTIVE_ROOT[super::cpu_index()].load(core::sync::atomic::Ordering::Acquire);
+        root = if logical == 0 { empty_root() } else { logical };
         let mut table = table_pointer(root & ADDR_MASK);
         let mut user = true;
         let mut writable = true;
@@ -449,13 +450,16 @@ pub fn switch_address_space(cpu: usize, root: u64) {
     use core::sync::atomic::Ordering;
     crate::arch::without_interrupts(|| {
         apply_asid_width();
+        super::pan::apply_current();
         if ACTIVE_ROOT[cpu].load(Ordering::Acquire) == root { return; }
         let mut pool = ASIDS.lock();
         let (tag, flush) = pool.activate(cpu, root);
         if flush { flush_all(); }
         let tag = tag.expect("no ASIDs available for active CPUs");
         let target = (if root == 0 { empty_root() } else { root }) | ((tag as u64) << 48);
-        unsafe { asm!("msr ttbr0_el1, {}", "isb", in(reg) target); }
+        SAVED_TTBR0[cpu].store(target, Ordering::Release);
+        let actual = if super::pan::software() { empty_root() } else { target };
+        unsafe { asm!("msr ttbr0_el1, {}", "isb", in(reg) actual); }
         ACTIVE_ROOT[cpu].store(root, Ordering::Release);
     });
 }
@@ -483,6 +487,7 @@ fn empty_root() -> u64 { super::memory::virt_to_phys(core::ptr::addr_of!(EMPTY_L
 /// Called first after each physical trampoline has branched high.
 pub fn retire_identity() {
     let root = empty_root();
+    SAVED_TTBR0[super::cpu_index()].store(root, core::sync::atomic::Ordering::Release);
     unsafe { asm!("msr ttbr0_el1, {}", "isb", "tlbi aside1is, {}", "dsb ish", "isb", in(reg) root, in(reg) 255u64 << 48); }
 }
 
@@ -617,4 +622,18 @@ fn audit_bootstrap() {
     let text = super::memory::virt_to_phys(core::ptr::addr_of!(__text_start) as u64)
         ..super::memory::virt_to_phys(core::ptr::addr_of!(__text_end) as u64);
     unsafe { walk(boot_root(), 0, &text); }
+}
+
+static SAVED_TTBR0: [core::sync::atomic::AtomicU64; crate::scheduler::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::scheduler::MAX_CPUS];
+pub fn saved_user_ttbr0() -> u64 { SAVED_TTBR0[super::cpu_index()].load(core::sync::atomic::Ordering::Acquire) }
+pub fn empty_user_root() -> u64 { empty_root() }
+
+/// Boot test only: a private inactive-on-other-CPUs code page becomes XOM.
+pub unsafe fn make_test_execute_only(root: u64, va: u64) {
+    let entry = walk(root, va, false).expect("execute-only test page");
+    let d = entry.read_volatile();
+    assert!(d & (VALID | AP_RO_BIT | PXN) == VALID | AP_RO_BIT | PXN && d & UXN == 0);
+    entry.write_volatile(d & !AP_EL0_BIT);
+    invalidate_space(root);
 }

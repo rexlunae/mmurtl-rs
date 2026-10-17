@@ -59,6 +59,7 @@ pub mod feature {
     pub const LASS: u64 = 1 << 24; pub const IBPB: u64 = 1 << 25;
     pub const DOITM: u64 = 1 << 26; pub const DIT: u64 = 1 << 27;
     pub const SSBS2: u64 = 1 << 30;
+    pub const PAN: u64 = 1 << 31; pub const EPAN: u64 = 1 << 32; pub const UAO: u64 = 1 << 33;
     pub const RFDS_CLEAR: u64 = 1 << 28; pub const GDS_CTRL: u64 = 1 << 29;
 }
 #[derive(Clone, Copy, Default)]

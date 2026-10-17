@@ -60,9 +60,9 @@ pub fn heap_extend(end: u64, needed: u64, fa: &mut FrameAllocator) -> Option<u64
     fa.claim_range(virt_to_phys(end), (grow / FRAME_SIZE) as usize).then_some(grow)
 }
 
-/// The kernel may touch user memory directly (PAN is not enabled)
-pub fn user_access_begin() {}
-pub fn user_access_end() {}
+/// IRQ-masked, non-nested user access windows (normally use uaccess wrappers).
+pub fn user_access_begin() { super::pan::begin(); }
+pub fn user_access_end() { super::pan::end(); }
 
 /// 48-bit upper translation regime, independent of the physical image address.
 pub const PHYS_OFFSET: u64 = 0xffff_0000_0000_0000;

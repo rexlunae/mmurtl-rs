@@ -31,6 +31,7 @@ pub fn enumerate(cpu: usize) {
         asm!("mrs {}, id_aa64pfr1_el1", out(reg) caps.raw[1], options(nomem, nostack));
         asm!("mrs {}, id_aa64mmfr1_el1", out(reg) caps.raw[2], options(nomem, nostack));
         asm!("mrs {}, id_aa64isar2_el1", out(reg) caps.raw[3], options(nomem, nostack));
+        asm!("mrs {}, id_aa64mmfr2_el1", out(reg) caps.raw[4], options(nomem, nostack));
     }
     caps.vendor = *b"ARM         ";
     let csv2 = (caps.raw[0] >> 56) & 15;
@@ -43,6 +44,7 @@ pub fn enumerate(cpu: usize) {
     if (caps.raw[1] >> 4) & 15 == 2 { caps.features |= F::SSBS2; }
     if (caps.raw[2] >> 60) & 15 == 1 { caps.features |= F::ECBHB; }
     if (caps.raw[3] >> 28) & 15 == 1 { caps.features |= F::CLRBHB; }
+    caps.features |= crate::security::arm_pan::features(caps.raw[2], caps.raw[4]);
     // Core tables are deliberately small and conservative. Unknown cores
     // remain unknown unless architectural immunity is advertised.
     if caps.identity >> 24 & 255 == 0x41 {

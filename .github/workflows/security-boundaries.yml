@@ -42,3 +42,7 @@ jobs:
         run: |
           rustc --edition=2021 tools/tests/asids.rs -o /tmp/mmurtl-asid-test
           /tmp/mmurtl-asid-test
+      - name: Verify ARM PAN capabilities and return flags
+        run: |
+          rustc --edition=2021 tools/tests/arm_pan.rs -o /tmp/mmurtl-pan-test
+          /tmp/mmurtl-pan-test

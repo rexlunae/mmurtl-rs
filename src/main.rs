@@ -102,7 +102,7 @@ pub fn kernel_run() -> ! {
     }
 
     #[cfg(target_arch = "aarch64")]
-    { arch::mmu::audit_kernel_wx(); arch::wx::self_test(); arch::mmu::asid_self_test(); }
+    { arch::mmu::audit_kernel_wx(); arch::wx::self_test(); arch::mmu::asid_self_test(); arch::pan::self_test(); }
     memory::user::uaccess_self_test();
     #[cfg(target_arch = "x86_64")]
     { arch::wx::audit_kernel_wx(); arch::protection::self_test(); }
