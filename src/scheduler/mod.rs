@@ -571,6 +571,21 @@ pub fn create_user_task(
     tid
 }
 
+/// Copy task information for PS without printing or allocating under the
+/// scheduler lock.
+pub fn task_snapshot() -> Vec<(u32, &'static str, TaskState, bool)> {
+    let count = with_scheduler(|sched| sched.tasks.len());
+    let mut tasks = Vec::with_capacity(count);
+    with_scheduler(|sched| {
+        // Newly added tasks can appear in the next snapshot; never grow
+        // the allocation while holding the scheduler lock.
+        tasks.extend(sched.tasks.iter().take(count)
+            .filter(|t| t.state != TaskState::Exited)
+            .map(|t| (t.id, t.name, t.state, t.user)));
+    });
+    tasks
+}
+
 /// State of a task by ID (None if no such task)
 pub fn task_state(tid: u32) -> Option<TaskState> {
     with_scheduler(|s| s.tasks.iter().find(|t| t.id == tid).map(|t| t.state))

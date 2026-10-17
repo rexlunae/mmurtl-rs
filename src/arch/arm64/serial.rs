@@ -1,7 +1,7 @@
 //! arm64 console UART: ARM PL011 (address from the device tree; QEMU
 //! `virt` puts it at 0x0900_0000). Transmit is polled; receive is
 //! interrupt-driven and feeds the console input queue (`crate::keyboard`),
-//! so the same echo task works on both ports.
+//! so the CLI can consume input on both ports.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -70,7 +70,8 @@ pub fn enable_rx_irq() {
 pub fn handle_rx_irq() {
     while rd(FR) & FR_RXFE == 0 {
         let c = (rd(DR) & 0xFF) as u8;
-        crate::keyboard::push_char(if c == b'\r' { b'\n' } else { c });
+        // Preserve CR/LF so the CLI can treat CRLF as a single Enter.
+        crate::keyboard::push_char(c);
     }
     wr(ICR, INT_RX | INT_RT);
 }

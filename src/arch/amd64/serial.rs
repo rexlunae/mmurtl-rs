@@ -20,5 +20,16 @@ pub fn putc(byte: u8) {
     }
 }
 
+/// Poll COM1 without waiting. Only the CLI consumes serial RX; transmit
+/// uses separate UART registers and remains serialized by crate::serial.
+pub fn try_read() -> Option<u8> {
+    use x86_64::instructions::port::Port;
+    unsafe {
+        let mut status = Port::<u8>::new(0x3FD);
+        if status.read() & 1 == 0 { return None; }
+        Some(Port::<u8>::new(0x3F8).read())
+    }
+}
+
 /// Human-readable name for the boot log
 pub const NAME: &str = "COM1 (16550) at 115200 8N1";

@@ -3,7 +3,7 @@
 A Rust rewrite of MMURTL (Message-Passing Multi-User Real-Time Kernel),
 running on **amd64** (x86_64 long mode) and **arm64** (AArch64).
 
-## Status: roadmap finished ✅ — now on two architectures
+## Status: kernel roadmap complete — interactive CLI on two architectures
 
 Both ports run the same kernel: the scheduler, blocking RQB IPC, memory
 management, virtio drivers, exFAT, syscalls, and userspace are shared
@@ -77,6 +77,76 @@ system emulator for the selected architecture. amd64 uses BIOS boot;
 arm64 uses the kernel ELF directly. Set `ARM64_SMP` and `ARM64_GIC` to
 customize the arm64 defaults (4 CPUs and GICv3). Relative paths in extra
 QEMU arguments resolve from the directory where you invoke the launcher.
+
+### Interactive shell
+
+After the boot checks finish, the demo workers stop and the CLI displays
+`/> ` in the **serial terminal where QEMU was launched**. Type `HELP` for
+commands. The amd64 graphical window still displays the bootloader's last
+message: there is no framebuffer console yet. Hide that window with
+`./tools/run-qemu.sh -- -display none`. amd64 accepts input from either
+the serial terminal or QEMU's PS/2 keyboard; arm64 uses its serial UART.
+
+The CLI is a Rust adaptation of the original
+[MMURTL CLI](https://github.com/bproctor/MMURTL/blob/master/MSAMPLES/CLI/CLI.C),
+currently running as a kernel task. Commands are case insensitive and
+paths may use `/` or `\`; quote arguments containing spaces. Backspace
+edits the input, and Ctrl-C/Ctrl-U in the serial terminal cancel the line.
+
+```text
+/> HELP
+/> VER
+/> MEM
+/> PS
+/> DIR
+/> MD notes
+/> PATH notes
+/notes> WRITE greeting.txt "Hello from MMURTL"
+/notes> TYPE greeting.txt
+/notes> COPY greeting.txt backup.txt
+/notes> DUMP backup.txt
+/notes> DEL backup.txt
+/notes> CD /
+/> RUN hello
+```
+
+File commands require an attached exFAT disk. To run the Rust programs,
+build a disk with `make disk` (amd64) or `make disk-arm64`, then attach it:
+
+```bash
+./tools/run-qemu.sh --amd64 -- \
+    -drive format=raw,file=disk-amd64.img,if=virtio
+./tools/run-qemu.sh --arm64 -- \
+    -drive if=none,format=raw,file=disk-arm64.img,id=hd0 \
+    -device virtio-blk-device,drive=hd0
+```
+
+`RUN` loads a native ELF program, waits for it to exit, and returns to the
+prompt. A bare program name works too: `hello` searches the current
+directory and then `/BIN`, adding `.ELF` when no extension is given.
+Programs in `/BIN` also continue to run once during the existing boot
+tests. `RD` removes empty directories; `CLS` clears an ANSI terminal.
+Aliases include `LS`, `CD`, `PWD`, `CAT`, `RM`, `MKDIR`, and `RMDIR`.
+
+This is an initial CLI port: legacy `.RUN` binaries, program arguments,
+batch files, wildcards, history, `REN`, and the original monitor/debugger
+commands are not implemented. Ctrl-C cancels input; it does not interrupt
+a running program. There is one mounted volume, with no drive letters.
+File reads are limited to 1 MiB per command; the current kernel bump
+allocator does not reclaim filesystem allocations, so long shell sessions
+consume memory. Moving the CLI to userspace requires console and filesystem
+syscalls that are not yet implemented.
+
+Shell validation (requires QEMU and exfatprogs; uses disposable test disks):
+
+```bash
+rustc --edition=2021 --test src/shell/parse.rs -o /tmp/mmurtl-shell-tests
+/tmp/mmurtl-shell-tests
+make bios user
+python3 tools/test-shell.py --arch amd64 --cpus 4
+make arm64 user-arm64
+python3 tools/test-shell.py --arch arm64 --cpus 4
+```
 
 ### arm64
 

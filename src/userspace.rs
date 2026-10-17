@@ -99,9 +99,17 @@ fn spawn(name: &'static str, code: &'static [u8], arg: u64) -> u32 {
     spawn_at(name, code, arg).0
 }
 
-/// Start the kernel-side service and checker, then the user programs
+// The CLI waits until the checks (including frame reclamation) finish.
+static CHECKS_FINISHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn checks_finished() -> bool {
+    CHECKS_FINISHED.load(Ordering::Acquire)
+}
+
+/// Start the kernel-side service and checker, then the user programs.
 pub fn demo() {
     if !crate::memory::user::init() {
+        CHECKS_FINISHED.store(true, Ordering::Release);
         return;
     }
     // A kernel address for the rogue programs to aim at
@@ -378,5 +386,6 @@ extern "C" fn user_check_task() -> ! {
     } else {
         "[USER] ✗ Userspace checks FAILED\n"
     });
+    CHECKS_FINISHED.store(true, Ordering::Release);
     scheduler::exit_current();
 }

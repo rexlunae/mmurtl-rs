@@ -6,14 +6,17 @@
 //! PL011 UART's RX interrupt pushes characters directly. Either way, tasks
 //! consume them with `pop_char`.
 
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 // ========================================================================
 // Character ring buffer (single producer: IRQ handler on the BSP;
 // consumers pop with a CAS loop)
 // ========================================================================
 
-const QUEUE_SIZE: usize = 64; // power of two
+// Hold several complete shell lines when the UART delivers a pasted
+// command in a single interrupt, before the CLI next gets scheduled.
+const QUEUE_SIZE: usize = 1024; // power of two
+static OVERFLOW: AtomicBool = AtomicBool::new(false);
 
 static QUEUE: [AtomicU8; QUEUE_SIZE] = {
     const ZERO: AtomicU8 = AtomicU8::new(0);
@@ -28,10 +31,17 @@ pub fn push_char(c: u8) {
     let head = HEAD.load(Ordering::Relaxed);
     let tail = TAIL.load(Ordering::Acquire);
     if head.wrapping_sub(tail) >= QUEUE_SIZE {
+        OVERFLOW.store(true, Ordering::Release);
         return; // full — drop
     }
     QUEUE[head % QUEUE_SIZE].store(c, Ordering::Relaxed);
     HEAD.store(head.wrapping_add(1), Ordering::Release);
+}
+
+/// Lost input must invalidate a shell line, never execute a truncated
+/// command (which could otherwise name a different file).
+pub fn take_overflow() -> bool {
+    OVERFLOW.swap(false, Ordering::AcqRel)
 }
 
 /// Pop one character from the keyboard queue (any task, any CPU)
