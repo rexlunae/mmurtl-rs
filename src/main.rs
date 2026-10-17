@@ -96,6 +96,8 @@ pub fn kernel_run() -> ! {
         serial::write_str("[TEST] Heap allocation OK!\n");
     }
 
+    memory::user::uaccess_self_test();
+
     // Create demo tasks — idle CPUs are kicked with a reschedule IPI and
     // start running these immediately, even before the BSP enables
     // interrupts for itself

@@ -41,3 +41,10 @@ pub fn fixup(pc: u64) -> Option<u64> {
         (pc == fault).then_some(fixup)
     }
 }
+
+/// Boot self-test only: remove a page from the private, active test space.
+/// Its frame remains owned by the caller until explicitly released.
+pub unsafe fn remove_test_page(_root: u64, va: u64) -> u64 {
+    super::page_table::unmap_page(x86_64::structures::paging::Page::containing_address(
+        x86_64::VirtAddr::new(va))).expect("unmap uaccess test page").start_address().as_u64()
+}

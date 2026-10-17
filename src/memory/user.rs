@@ -111,12 +111,11 @@ pub fn map_fresh(
     writable: bool,
     executable: bool,
 ) -> Result<(), &'static str> {
-    let pa = heap::with_frame_allocator(|fa| fa.allocate_frame())
+    let pa = heap::with_frame_allocator(|fa| fa.allocate_zeroed_frame())
         .ok_or("frame allocator not initialized")?
         .ok_or("out of memory")?;
     let kva = crate::arch::phys_to_virt(pa);
     unsafe {
-        core::ptr::write_bytes(kva, 0, PAGE as usize);
         let n = data.len().min(PAGE as usize - offset.min(PAGE as usize));
         core::ptr::copy_nonoverlapping(data.as_ptr(), kva.add(offset), n);
     }
@@ -404,4 +403,38 @@ pub fn load_elf(img: &[u8]) -> Result<UserImage, &'static str> {
 /// Validate an ELF image without loading it (for tests)
 pub fn check_elf(img: &[u8]) -> Result<(), &'static str> {
     parse_elf(img).map(|_| ())
+}
+
+/// Deterministic check-then-unmap test, before any user tasks are started.
+/// The private space is never runnable on another CPU. No scheduler or
+/// frame lock is held across a copy that deliberately takes a fault.
+pub fn uaccess_self_test() {
+    let img = load_program(&[0x5a]).expect("uaccess test image");
+    let mut pass = true;
+    let mut removed = 0;
+    crate::arch::without_interrupts(|| {
+        let cpu = crate::arch::cpu_index();
+        crate::arch::switch_address_space(cpu, img.space);
+        let mut byte = [0u8; 1];
+        pass &= copy_from_user(&mut byte, img.entry) && byte == [0x5a];
+        pass &= !copy_to_user(img.entry, &[1]); // read-only code page
+        let boundary = img.stack_top - 8;
+        pass &= copy_to_user(boundary, &[0x33; 8]);
+        let mut partial = [0u8; 16];
+        pass &= !copy_from_user(&mut partial, boundary); // prefix then guard fault
+        pass &= partial[..8] == [0x33; 8];
+        pass &= !copy_to_user(boundary, &[0x44; 16]);
+        let page = img.stack_top - PAGE;
+        pass &= range_ok(page, 8, true);
+        removed = unsafe { crate::arch::uaccess::remove_test_page(img.space, page) };
+        pass &= !copy_from_user(&mut byte, page); // stale validation, actual fault
+        pass &= !copy_to_user(page, &[1]);
+        pass &= !copy_from_user(&mut byte, u64::MAX);
+        pass &= !copy_to_user(USER_END, &[1]);
+        crate::arch::switch_address_space(cpu, 0);
+    });
+    heap::with_frame_allocator(|fa| fa.deallocate_frame(removed));
+    release(img.space, img.slot);
+    assert!(pass, "fault-tolerant user-copy checks failed");
+    crate::serial::write_line("[TEST] user-copy fixups: read-only, guard, stale validation recovered");
 }

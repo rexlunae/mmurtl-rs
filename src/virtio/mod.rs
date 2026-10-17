@@ -84,13 +84,12 @@ unsafe impl Send for DmaRegion {}
 
 /// Allocate `pages` physically contiguous, zeroed pages for device DMA
 pub fn dma_alloc(pages: usize) -> DmaRegion {
-    let phys = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_contiguous(pages))
+    let phys = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_zeroed_contiguous(pages))
         .expect("Frame allocator not initialized")
         .expect("OOM allocating DMA region");
 
     let virt = crate::arch::phys_to_virt(phys);
     let size = pages * 4096;
-    unsafe { core::ptr::write_bytes(virt, 0, size) };
 
     DmaRegion { phys, virt, size }
 }

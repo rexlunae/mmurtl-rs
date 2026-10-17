@@ -49,7 +49,7 @@ pub fn phys_to_virt(phys: u64) -> *mut u8 {
 /// Carve the initial heap from contiguous physical frames
 pub fn heap_init(fa: &mut FrameAllocator) -> (u64, u64) {
     let pa = fa
-        .allocate_contiguous((HEAP_INITIAL / FRAME_SIZE) as usize)
+        .allocate_zeroed_contiguous((HEAP_INITIAL / FRAME_SIZE) as usize)
         .expect("no contiguous RAM for the kernel heap");
     (pa, pa + HEAP_INITIAL)
 }

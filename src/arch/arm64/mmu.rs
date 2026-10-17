@@ -263,8 +263,7 @@ fn kernel_root() -> u64 {
 }
 
 fn alloc_zeroed_frame() -> Option<u64> {
-    let pa = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_frame())??;
-    unsafe { core::ptr::write_bytes(pa as *mut u8, 0, 4096) };
+    let pa = crate::memory::heap::with_frame_allocator(|fa| fa.allocate_zeroed_frame())??;
     Some(pa)
 }
 
@@ -338,12 +337,20 @@ pub fn query_page(va: u64) -> Option<(bool, bool)> {
     let root: u64;
     unsafe {
         asm!("mrs {}, ttbr0_el1", out(reg) root);
-        let e = walk(root & ADDR_MASK, va, false)?;
-        let d = core::ptr::read_volatile(e);
-        if d & VALID == 0 {
-            return None;
+        let mut table = (root & ADDR_MASK) as *const u64;
+        let mut user = true;
+        let mut writable = true;
+        for level in 0..4 {
+            let desc = table.add(index(va, level)).read_volatile();
+            if desc & VALID == 0 || desc & TABLE == 0 { return None; }
+            if level == 3 {
+                return Some((user && desc & AP_EL0_BIT != 0, writable && desc & AP_RO_BIT == 0));
+            }
+            user &= desc & (1 << 61) == 0; // APTable[0]: no EL0
+            writable &= desc & (1 << 62) == 0; // APTable[1]: read-only
+            table = (desc & ADDR_MASK) as *const u64;
         }
-        Some((d & AP_EL0_BIT != 0, d & AP_RO_BIT == 0))
+        None
     }
 }
 
@@ -396,4 +403,15 @@ pub fn switch_address_space(cpu: usize, root: u64) {
         );
     }
     ACTIVE_ROOT[cpu].store(target, Ordering::Relaxed);
+}
+
+/// Boot self-test only: caller owns this inactive-on-other-CPUs space.
+/// Remove one user page while retaining ownership of its physical frame.
+pub unsafe fn remove_test_page(root: u64, va: u64) -> u64 {
+    let entry = walk(root, va, false).expect("missing test page tables");
+    let desc = entry.read_volatile();
+    assert!(desc & VALID != 0 && desc & AP_EL0_BIT != 0);
+    entry.write_volatile(0);
+    asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb");
+    desc & ADDR_MASK
 }

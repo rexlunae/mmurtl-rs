@@ -227,6 +227,15 @@ user_rogue_ptr_end:
     .balign 16
     .globl user_exit_start
 user_exit_start:
+    sub x0, sp, #4, lsl #12
+    mov x1, #2048
+    mov x2, #0x5345
+    movk x2, #0x746c, lsl #16
+    movk x2, #0x7572, lsl #32
+    movk x2, #0x6d6d, lsl #48
+1:  str x2, [x0], #8
+    subs x1, x1, #1
+    b.ne 1b
     EXIT
     brk #0
     .globl user_exit_end
@@ -301,11 +310,34 @@ user_time_denied_start:
     .globl user_time_denied_end
 user_time_denied_end:
 
+    .globl user_uaccess_start
+user_uaccess_start:
+    adr x0, user_uaccess_start
+    add x0, x0, #1, lsl #12
+    mov x1, #16
+    mov x8, #1
+    svc #0
+    cmn x0, #1
+    b.ne 1f
+    sub x0, sp, #8
+    mov x1, #16
+    mov x8, #1
+    svc #0
+    cmn x0, #1
+    b.ne 1f
+    mov x8, #0
+    svc #0
+1:  brk #0
+    .globl user_uaccess_end
+user_uaccess_end:
+
     .popsection
     "#
 );
 
 extern "C" {
+    static user_uaccess_start: u8;
+    static user_uaccess_end: u8;
     static user_time_denied_start: u8;
     static user_time_denied_end: u8;
     static user_time_start: u8;
@@ -367,3 +399,5 @@ program!(pmu, user_pmu_start, user_pmu_end);
 program!(coarse, user_coarse_start, user_coarse_end);
 
 program!(time_denied, user_time_denied_start, user_time_denied_end);
+
+program!(uaccess, user_uaccess_start, user_uaccess_end);

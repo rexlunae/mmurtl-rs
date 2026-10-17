@@ -62,3 +62,5 @@ pub fn fixup(pc: u64) -> Option<u64> {
         None
     }
 }
+
+pub use super::mmu::remove_test_page;

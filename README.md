@@ -659,6 +659,40 @@ The alignment probe uses mapped unaligned memory with AC set, followed by
 UD2 so QEMU TCG versions that omit alignment checking still terminate it.
 Actual #MF/#XM delivery remains unavailable while FP/SIMD is disabled.
 
+User copies use registered exception-table fixups: amd64 `rep movsb`
+inside the SMAP access window, and arm64 `ldtrb`/`sttrb` with EL0 permissions.
+Only faults at those exact instructions recover; unrelated kernel faults
+still panic. A cheap overflow-safe window check replaces the per-page
+validation walk for copies. On failure, copies may have changed a prefix;
+RQBs and log buffers are consumed only after the complete copy succeeds.
+IPC retains its initial writable-buffer validation so invalid destinations
+do not dequeue requests, but revalidates by fault-tolerant copying after
+blocking. Remaining page queries include ancestor permission restrictions.
+Boot tests cover read-only destinations, partial guard-page faults, stale
+validation after deterministic unmapping, and live syscalls returning
+EFAULT while the task continues. This does not introduce shared address
+spaces or mapping mutations from user mode.
+
+Physical frames are scrubbed with volatile stores before being published
+free. All allocation APIs return zeroed frames, including contiguous DMA
+buffers and heap-growth claims. A bitmap tracks already-scrubbed free
+frames so reuse avoids a redundant erase; untouched firmware RAM is cleared
+on first allocation. Allocator metadata and its reservation padding are
+also initialized. Scrubbing stays under the frame lock until ownership is
+released, preventing reuse races. The boot churn test fills user stacks
+with a marker and scans scrubbed free frames after reaping.
+
+Memory encryption remains a boot/firmware integration project: AMD SME
+requires consistent C-bit mappings from the bootloader onward; Intel TME
+must be configured by firmware. amd64 reports its TME activation/lock/bypass
+status when CPUID advertises the MSR, and reports SME support without
+changing encryption configuration. Neither is enabled by this kernel.
+There is currently no OS shutdown/reboot service. The allocator provides
+`scrub_free_memory()` for a future orderly shutdown after CPUs and DMA
+are quiesced; that service must also wipe live heap/stack allocations
+before transferring control. Scrub-on-free does not erase live allocations
+or defeat physical access to running memory.
+
 FP/SIMD instructions are deliberately disabled on every CPU until the
 scheduler implements eager per-task FP state save/restore. The policy is
 set explicitly on BIOS/UEFI amd64 and on arm64 entry/secondary paths,
@@ -830,4 +864,10 @@ Security boot regression configurations (build images/kernels first):
 python3 tools/test-security.py --arch amd64 --cpus 4 --nmi
 python3 tools/test-security.py --arch amd64 --uefi --cpus 4  # needs OVMF
 python3 tools/test-security.py --arch arm64 --cpu max --el2 --cpus 4
+```
+
+Frame allocator host regression (dirty simulated RAM and released-frame checks):
+```sh
+rustc --edition=2021 tools/tests/frame_allocator.rs -o /tmp/mmurtl-frame-test
+/tmp/mmurtl-frame-test
 ```

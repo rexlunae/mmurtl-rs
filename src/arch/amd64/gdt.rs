@@ -161,9 +161,8 @@ fn install_guarded_stacks(cpu: usize, tss: *mut TaskStateSegment) {
             let guard = BASE + (cpu as u64 * 4 + slot as u64) * (PAGES + 1) * 4096;
             assert!(page_table::query_page(VirtAddr::new(guard)).is_none());
             for page in 1..=PAGES {
-                let pa = fa.allocate_frame().expect("OOM: emergency stack");
+                let pa = fa.allocate_zeroed_frame().expect("OOM: emergency stack");
                 unsafe {
-                    core::ptr::write_bytes(super::phys_to_virt(pa), 0, 4096);
                     page_table::map_page(Page::containing_address(VirtAddr::new(guard + page * 4096)),
                         PhysFrame::containing_address(PhysAddr::new(pa)), F::WRITABLE | F::NO_EXECUTE,
                         &mut adapter).expect("map emergency stack");

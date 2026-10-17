@@ -31,10 +31,8 @@ pub use memory::{
 /// Architecture name for the boot log
 pub const NAME: &str = "amd64";
 
-// ========================================================================
-// PCI configuration space + I/O ports
-// ========================================================================
-
+// =================================================================// PCI configuration space + I/O ports
+// =================================================================
 /// PCI config read through CONFIG_ADDRESS/CONFIG_DATA (0xCF8/0xCFC)
 pub fn pci_config_read(bus: u8, device: u8, function: u8, register: u8) -> u32 {
     use x86_64::instructions::port::Port;
@@ -92,10 +90,8 @@ pub const ELF_MACHINE: u16 = 0x3E;
 /// How user code enters the kernel
 pub const SYSCALL_MECHANISM: &str = "int 0x80 gate (DPL 3)";
 
-// ========================================================================
-// Interrupts
-// ========================================================================
-
+// =================================================================// Interrupts
+// =================================================================
 /// Run `f` with interrupts disabled on this CPU
 pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
     x86_64::instructions::interrupts::without_interrupts(f)
@@ -111,10 +107,8 @@ pub fn halt() {
     x86_64::instructions::hlt();
 }
 
-// ========================================================================
-// CPU identity + IPIs
-// ========================================================================
-
+// =================================================================// CPU identity + IPIs
+// =================================================================
 /// APIC ID → CPU index, written at CPU registration, read lock-free on
 /// every timer tick. Index by APIC ID (xAPIC IDs are < 256).
 static APIC_TO_CPU: [AtomicU32; 256] = {
@@ -161,10 +155,8 @@ pub fn cpus_online() -> usize {
     smp::cpus_online()
 }
 
-// ========================================================================
-// Time
-// ========================================================================
-
+// =================================================================// Time
+// =================================================================
 /// Start the calling CPU's scheduler tick: the LAPIC timer in APIC mode,
 /// or (boot CPU only) the PIT through the legacy PIC
 pub fn start_tick(hz: u32, boot_cpu: bool) {
@@ -225,3 +217,4 @@ pub fn set_user_counter_access(high_res_time: bool) {
 }
 
 pub mod uaccess;
+pub mod memory_encryption;
