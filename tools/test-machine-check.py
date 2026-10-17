@@ -30,11 +30,16 @@ def main():
         text = output.decode(errors='replace')
         assert '[MCE] CPU halted' in text, text[-3000:]
         fatal = text[text.index('[MCE] fatal'):]
+        banks = re.findall(r'\[MCE\] bank=0x0000000000000000 status=0x8c00000000000000 addr=(\S+) misc=(\S+)',fatal)
+        assert len(banks) == 1, 'expected exactly the synthetic bank-zero record: ' + fatal
+        address, misc = banks[0]
         if args.debug:
+            injected = re.search(r'\[MCE TEST\] injected=(0xffff[0-9a-f]{12})',text)
+            assert injected, 'missing diagnostic injection pointer'
+            assert address == misc == injected[1], (injected[1], address, misc)
             assert re.search(r'check at 0xffff[0-9a-f]{12}',fatal),fatal
-            assert ' addr=0xffff' in fatal and ' misc=0xffff' in fatal,fatal
         else:
-            assert 'check at (ptr)' in fatal and ' addr=(ptr)' in fatal and ' misc=(restricted)' in fatal,fatal
+            assert 'check at (ptr)' in fatal and address == '(ptr)' and misc == '(restricted)',fatal
             assert not re.search(r'0xffff[0-9a-f]{12}',fatal),fatal
         print('machine-check guarded IST logging: ' + ('explicit raw diagnostics' if args.debug else 'default redaction') + ' passed')
     finally:
