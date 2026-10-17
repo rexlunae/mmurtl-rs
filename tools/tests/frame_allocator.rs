@@ -6,6 +6,7 @@ mod arch {
         unsafe { super::RAM.load(super::Ordering::Relaxed).add(pa as usize) }
     }
 }
+mod kptr { pub fn write(_: u64) {} }
 mod serial {
     pub fn write_str(_: &str) {}
     pub fn write_line(_: &str) {}
