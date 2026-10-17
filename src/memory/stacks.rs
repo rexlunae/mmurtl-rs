@@ -11,6 +11,20 @@ static FIRST: AtomicU64 = AtomicU64::new(BASE + STRIDE);
 // stack publication. In particular ARM break-before-make must finish before
 // a later stack recreates a detached table covering another VA in the region.
 static MAPPINGS: spin::Mutex<()> = spin::Mutex::new(());
+/// Keep the owner non-preemptible, but let contenders service shootdown
+/// IPIs between failed attempts. Spinning with IRQs masked while another
+/// CPU waits for our TLB acknowledgment would deadlock.
+fn with_mappings<R>(f: impl FnOnce() -> R) -> R {
+    let mut operation = Some(f);
+    loop {
+        let result = crate::arch::without_interrupts(|| {
+            let _mapping = MAPPINGS.try_lock()?;
+            Some(operation.take().unwrap()())
+        });
+        if let Some(value) = result { return value; }
+        core::hint::spin_loop();
+    }
+}
 static TASKS: [core::sync::atomic::AtomicU32; crate::scheduler::MAX_CPUS] =
     [const { core::sync::atomic::AtomicU32::new(0) }; crate::scheduler::MAX_CPUS];
 pub fn set_current_task(cpu: usize, task: u32) { TASKS[cpu].store(task, Ordering::Relaxed); }
@@ -80,7 +94,7 @@ pub fn init() {
 }
 pub fn allocate() -> crate::scheduler::KernelStack {
     assert!(!crate::scheduler::running() || crate::arch::stacks::interrupts_enabled(), "runtime stack allocation requires IRQs enabled");
-    let _mapping = MAPPINGS.lock();
+    with_mappings(|| {
     let guard = NEXT.fetch_update(Ordering::AcqRel, Ordering::Acquire,
         |old| old.checked_add(STRIDE).filter(|end| *end <= LIMIT))
         .expect("kernel stack virtual space exhausted");
@@ -97,6 +111,7 @@ pub fn allocate() -> crate::scheduler::KernelStack {
         first.unwrap()
     }).expect("stack allocator");
     crate::scheduler::KernelStack { virt, phys, size: SIZE }
+    })
 }
 
 /// Fatal diagnostics avoid scheduler, allocator and serial locks: overflow
@@ -122,7 +137,7 @@ pub extern "C" fn kernel_stack_fatal() -> ! {
 }
 pub fn release(virt: u64, phys: u64) -> u64 {
     assert!(crate::arch::stacks::interrupts_enabled(), "stack reclamation requires IRQs enabled");
-    let _mapping = MAPPINGS.lock();
+    with_mappings(|| {
     assert!(virt >= BASE + 2 * PAGE && virt + SIZE < LIMIT);
     let mut pages = [0; (SIZE / PAGE) as usize];
     let retired = with_frame_allocator(|_| {
@@ -138,6 +153,7 @@ pub fn release(virt: u64, phys: u64) -> u64 {
         for pa in retired { if pa != 0 { fa.deallocate_frame(pa); } }
     }).expect("stack allocator");
     SIZE / PAGE + retired.iter().filter(|pa| **pa != 0).count() as u64
+    })
 }
 /// Abandon the bootstrap stack before ordinary kernel execution begins.
 pub fn enter_main() -> ! {

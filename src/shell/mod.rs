@@ -11,6 +11,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use parse::{Command, Path, MAX_LINE};
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+// The CLI is the only caller. Keep its bounded PS snapshot off-stack and
+// reuse it instead of leaking one heap allocation per command.
+static PS_SNAPSHOT: spin::Mutex<[(u32, &'static str, scheduler::TaskState, bool);
+    scheduler::MAX_TASKS + scheduler::MAX_CPUS]> = spin::Mutex::new(
+        [(0, "", scheduler::TaskState::Exited, false); scheduler::MAX_TASKS + scheduler::MAX_CPUS]);
 pub fn active() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
@@ -294,9 +299,8 @@ fn execute(line: &str, cwd: &mut Path) -> Result<(), &'static str> {
             scheduler::jiffies() * 1000 / scheduler::SCHEDULER_FREQUENCY_HZ as u64
         ),
         "PS" if count == 0 => {
-            let mut tasks = alloc::vec![(0, "", scheduler::TaskState::Exited, false);
-                scheduler::MAX_TASKS + scheduler::MAX_CPUS];
-            let (count, truncated) = scheduler::task_snapshot(&mut tasks);
+            let mut tasks = PS_SNAPSHOT.lock();
+            let (count, truncated) = scheduler::task_snapshot(&mut *tasks);
             for &(id, name, state, user) in &tasks[..count] {
                 out!(
                     "{:>4} {:<16} {:?} {}\n",
