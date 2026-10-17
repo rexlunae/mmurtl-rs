@@ -167,6 +167,9 @@ extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame)
 
 static DEBUG_EVENTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static NMI_EVENTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static CPU_NMIS: [core::sync::atomic::AtomicU64; crate::scheduler::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::scheduler::MAX_CPUS];
+pub fn current_nmi_count() -> u64 { CPU_NMIS[super::cpu_index()].load(core::sync::atomic::Ordering::Relaxed) }
 
 extern "x86-interrupt" fn debug_handler(mut stack_frame: InterruptStackFrame) {
     super::protection::clear_access();
@@ -205,6 +208,7 @@ extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
     // NMI can interrupt a serial writer or allocator while it holds a
     // lock. Count it without printing, allocating, or entering the scheduler.
     NMI_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    CPU_NMIS[super::cpu_index()].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {

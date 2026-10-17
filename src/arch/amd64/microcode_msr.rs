@@ -61,26 +61,6 @@ pub fn fixup(pc: u64) -> Option<u64> {
     None
 }
 
-extern "x86-interrupt" fn early_gp(mut frame: x86_64::structures::idt::InterruptStackFrame, error: u64) {
-    if let Some(pc) = fixup(frame.instruction_pointer.as_u64()) {
-        unsafe { frame.as_mut().update(|f| f.instruction_pointer = x86_64::VirtAddr::new(pc)); }
-        return;
-    }
-    panic!("Unexpected early microcode #GP: {} at {:?}", error, frame.instruction_pointer);
-}
-/// APs have not installed their kernel GDT/IDT yet. The temporary gate uses
-/// their current trampoline CS and stack; restore IDTR before leaving boot.
-pub fn with_ap_fixups<R>(cpu: usize, f: impl FnOnce() -> R) -> R {
-    if cpu == 0 { return f(); }
-    let old = x86_64::instructions::tables::sidt();
-    let mut idt = x86_64::structures::idt::InterruptDescriptorTable::new();
-    idt.general_protection_fault.set_handler_fn(early_gp);
-    unsafe { idt.load_unsafe(); }
-    let result = f();
-    unsafe { x86_64::instructions::tables::lidt(&old); }
-    result
-}
-
 pub fn self_test() {
     assert_eq!(unsafe { ucode_gp_probe() }, 1, "boot #GP fixup gate failed");
 }

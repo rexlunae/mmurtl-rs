@@ -16,7 +16,7 @@ fn sum(b: &[u8]) -> Result<u32, Error> {
     Ok(b.chunks_exact(4).fold(0u32, |s, x| s.wrapping_add(u32::from_le_bytes(x.try_into().unwrap()))))
 }
 fn matches(sig: u32, platforms: u32, cpu: u32, platform: u32) -> bool {
-    sig == cpu && ((platforms == 0 && platform == 0) || platforms & platform != 0)
+    sig == cpu && (platforms == 0 || platforms & platform != 0)
 }
 /// Validate the entire concatenation before returning the newest usable patch.
 pub fn intel(mut blob: &[u8], cpu: u32, platform: u32, current: u32) -> Result<Option<Patch<'_>>, Error> {
@@ -47,8 +47,7 @@ pub fn intel(mut blob: &[u8], cpu: u32, platform: u32, current: u32) -> Result<O
                 applies |= matches(esig, epf, cpu, platform);
             }
         }
-        let minimum = u32_at(header, 40)?;
-        if applies && revision > current && revision & (1 << 31) == 0 && current >= minimum
+        if applies && revision > current && revision & (1 << 31) == 0
             && selected.map_or(true, |p| revision > p.revision) {
             selected = Some(Patch { bytes: patch, revision, data_offset: 48 });
         }
@@ -62,7 +61,10 @@ fn zen_signature(revision: u32) -> u32 {
     ((revision >> 8) & 0xff) | 0xf00 | ((revision >> 4) & 0xf0000) | ((revision >> 4) & 0xff00000)
 }
 /// AMD concatenated containers: magic, equivalence table, patch sections.
-pub fn amd(mut blob: &[u8], cpu: u32, current: u32) -> Result<Option<Patch<'_>>, Error> {
+pub fn amd(blob: &[u8], cpu: u32, current: u32) -> Result<Option<Patch<'_>>, Error> {
+    amd_eligible(blob, cpu, current, |_| true)
+}
+pub fn amd_eligible<'a>(mut blob: &'a [u8], cpu: u32, current: u32, mut eligible: impl FnMut(Patch<'a>) -> bool) -> Result<Option<Patch<'a>>, Error> {
     let fam = family(cpu);
     let mut selected: Option<Patch<'_>> = None;
     while !blob.is_empty() {
@@ -93,7 +95,8 @@ pub fn amd(mut blob: &[u8], cpu: u32, current: u32) -> Result<Option<Patch<'_>>,
             let family_matches = 0xf + (processor as u32 >> 12) == fam;
             let size_ok = match fam { 0x10..=0x12 => size <= 2048, 0x14 => size <= 1824, 0x15.. => true, _ => false };
             if applies && family_matches && size_ok && u32_at(patch, 16)? == 0 && u32_at(patch, 20)? == 0
-                && revision > current && selected.map_or(true, |p| revision > p.revision) {
+                && revision > current && selected.map_or(true, |p| revision > p.revision)
+                && eligible(Patch { bytes: patch, revision, data_offset: 0 }) {
                 selected = Some(Patch { bytes: patch, revision, data_offset: 0 });
             }
             blob = &blob[end..];

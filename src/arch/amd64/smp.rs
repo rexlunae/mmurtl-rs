@@ -316,16 +316,18 @@ fn wait_for_ap(timeout_ms: u32) -> bool {
 /// First Rust code an AP executes. `cpu_num` comes from the mailbox.
 #[no_mangle]
 pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
-    if !crate::arch::microcode::apply(cpu_num as usize) {
-        loop { unsafe { core::arch::asm!("cli", "hlt", options(nomem, nostack)); } }
-    }
-    crate::arch::fpu::init();
-    crate::arch::protection::enumerate(cpu_num as usize);
-    crate::arch::set_user_counter_access(false);
-    if !crate::arch::protection::admit_ap(cpu_num as usize, || {
-        crate::arch::gdt::init_ap(cpu_num as usize);
-        crate::arch::interrupts::init_ap();
-        crate::arch::apic::enable_current_cpu();
+    if !crate::security::admit_cpu_prepared(cpu_num as usize, || {
+        if !crate::arch::microcode::apply(cpu_num as usize, || {
+            crate::arch::set_cpu_index(cpu_num as usize);
+            crate::arch::fpu::init();
+            crate::arch::gdt::init_ap(cpu_num as usize);
+            crate::arch::interrupts::init_ap();
+            crate::arch::apic::enable_current_cpu();
+        }) { return false; }
+        crate::arch::protection::enumerate(cpu_num as usize);
+        crate::arch::set_user_counter_access(false);
+        true
+    }, || {
         crate::scheduler::register_ap(cpu_num as usize);
         CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
     }) {

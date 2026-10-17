@@ -1057,12 +1057,15 @@ started APs spin with interrupts masked until the update phase closes. A
 serialized boot seal rejects late AP update attempts before userspace starts.
 Virtual machines skip all microcode MSRs and retain host-managed revisions.
 On hardware, matching includes Intel signature/platform flags, extended
-signature checksums and minimum prerequisite revisions; AMD uses legacy
+signature checksums (the runtime-minimum field does not constrain early loading); AMD uses legacy
 equivalence tables or exact Zen family/model/stepping encoded in patch IDs.
 Updates must be newer. AMD patches additionally require a pinned SHA-256 hash
 of vendor-published bytes, and cannot cross a known firmware signing boundary.
 Aligned WB update buffers are erased and freed after revision verification.
 Recoverable RDMSR/WRMSR #GP fixups handle unavailable or firmware-locked MSRs.
+APs install their normal guarded-stack GDT/IDT before handling microcode, under
+the CPU-admission seal. Each AP delivers a self-NMI during update preparation
+to verify its non-maskable emergency gate while the boot locks are held.
 
 The AMD digest reference is linux-firmware commit
 `12dfe670ce7c5987a60fab36d974c4a7d2a6eeeb`, containing 46 patch hashes. The

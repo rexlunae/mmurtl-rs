@@ -38,14 +38,26 @@ fn trusted_amd(patch: Patch<'_>) -> bool {
 }
 
 /// Returns false for a late AP: it must park, without updating any CPU.
-pub fn apply(cpu: usize) -> bool {
+pub fn apply(cpu: usize, initialize: impl FnOnce()) -> bool {
     assert!(!x86_64::instructions::interrupts::are_enabled());
     let state = STATE.lock(); // serialize BSP/AP updates and the boot seal
     if state.closed { return false; }
-    msr::with_ap_fixups(cpu, || apply_locked(cpu, &state))
+    initialize();
+    apply_locked(cpu, &state)
 }
 fn apply_locked(cpu: usize, state: &State) -> bool {
     msr::self_test();
+    if cpu != 0 {
+        let before = super::interrupts::current_nmi_count();
+        super::apic::send_nmi(super::apic::local_apic_id());
+        for _ in 0..1_000_000 {
+            if super::interrupts::current_nmi_count() != before { break; }
+            core::hint::spin_loop();
+        }
+        assert_ne!(super::interrupts::current_nmi_count(), before, "boot NMI gate failed");
+        crate::serial::write_str("[UCODE] CPU"); crate::serial::write_dec(cpu as u64);
+        crate::serial::write_line(" emergency-stack NMI gate verified during update preparation");
+    }
     if unsafe { core::arch::x86_64::__cpuid(1).ecx & (1 << 31) != 0 } {
         crate::serial::write_str("[UCODE] CPU"); crate::serial::write_dec(cpu as u64);
         crate::serial::write_line(" hypervisor: host owns microcode (no update MSRs)"); return true;
@@ -65,13 +77,12 @@ fn apply_locked(cpu: usize, state: &State) -> bool {
         if intel {
             let platform = match msr::read(0x17) { Some(v) => 1u32 << ((v >> 50) & 7), None => return Ok(None) };
             format::intel(blob, signature, platform, before)
-        } else { format::amd(blob, signature, before) }
+        } else { format::amd_eligible(blob, signature, before, |p| trusted_amd(p) && format::amd_policy::transition_allowed(before, p.revision)) }
     });
     let selected = match patch {
-        Some(Ok(Some(p))) if !amd || (trusted_amd(p) && format::amd_policy::transition_allowed(before, p.revision)) => Some(p),
-        Some(Ok(Some(_))) => { crate::serial::write_line("[UCODE] AMD digest/signing transition is not trusted; update refused"); None },
+        Some(Ok(selected)) => selected,
         Some(Err(_)) => { crate::serial::write_line("[UCODE] Malformed vendor container; update refused"); None },
-        _ => None,
+        None => None,
     };
     if let Some(patch) = selected {
         let pages = (patch.bytes.len() + 4095) / 4096;
