@@ -137,7 +137,7 @@ pub extern "C" fn kernel_stack_fatal() -> ! {
     loop { crate::arch::halt(); }
 }
 pub fn release(virt: u64, phys: u64) -> u64 {
-    assert!(crate::arch::stacks::interrupts_enabled(), "stack reclamation requires IRQs enabled");
+    assert!(!crate::scheduler::running() || crate::arch::stacks::interrupts_enabled(), "runtime stack reclamation requires IRQs enabled");
     with_mappings(|| {
     assert!(virt >= BASE + 2 * PAGE && virt + SIZE < LIMIT);
     let mut pages = [0; (SIZE / PAGE) as usize];
@@ -160,12 +160,15 @@ pub fn release(virt: u64, phys: u64) -> u64 {
 pub fn enter_main() -> ! {
     let stack = allocate();
     let top = stack.virt + stack.size;
+    #[cfg(target_arch = "aarch64")]
+    let shadow = allocate();
     #[cfg(target_arch = "x86_64")]
     unsafe { core::arch::asm!("mov rsp, {top}", "sub rsp, 8", "mov qword ptr [rsp], 0", "jmp {entry}", "int3",
         top = in(reg) top, entry = in(reg) crate::kernel_run as *const (), options(noreturn)); }
     #[cfg(target_arch = "aarch64")]
-    unsafe { core::arch::asm!("mov sp, {top}", "br x16", "dsb nsh", "isb",
-        top = in(reg) top, in("x16") crate::kernel_run as *const (), options(noreturn)); }
+    unsafe { core::arch::asm!("mov sp, {top}", "mov x18, {shadow}", "bl arm64_enable_boot_pac", "br x16", "dsb nsh", "isb",
+        top = in(reg) top, shadow = in(reg) shadow.virt,
+        in("x16") crate::kernel_run as *const (), options(noreturn)); }
 }
 #[cfg(feature = "test-stack-overflow")]
 pub fn test_overflow() -> ! {

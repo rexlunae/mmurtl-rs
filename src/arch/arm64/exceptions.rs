@@ -48,6 +48,31 @@ global_asm!(
     r#"
     .section .text.vectors, "ax"
 
+.macro LOAD_KERNEL_SCS
+    ldr x1, [sp, #264]
+    and x1, x1, #15
+    cbnz x1, .Lscs_kernel\@
+    mrs x1, tpidr_el1
+    adrp x2, ARM64_USER_SCS
+    add x2, x2, :lo12:ARM64_USER_SCS
+    ldr x18, [x2, x1, lsl #3]
+    b .Lscs_loaded\@
+.Lscs_kernel\@:
+    ldr x18, [sp, #144]
+.Lscs_loaded\@:
+    // A shadow-stack guard fault cannot call instrumented Rust using the
+    // exhausted x18. Divert to independent emergency stacks first.
+    ubfx x1, x18, #39, #9
+    cmp x1, #448
+    b.ne .Lscs_valid\@
+    and x1, x18, #65535
+    cmp x1, #4096
+    b.lo arm64_stack_overflow
+    cmp x1, #9, lsl #12
+    b.hs arm64_stack_overflow
+.Lscs_valid\@:
+.endm
+
     .macro VENTRY kind
     .balign 0x80
     bti jc
@@ -140,6 +165,8 @@ exception_common:
     .inst 0xd500419f             // PSTATE.PAN=1 (feature-gated)
     isb
 .Lpan_closed:
+    bl arm64_restore_kernel_pac
+    LOAD_KERNEL_SCS
     mov x2, xzr
     mov x3, xzr
     mov x4, xzr
@@ -156,7 +183,6 @@ exception_common:
     mov x15, xzr
     mov x16, xzr
     mov x17, xzr
-    mov x18, xzr
     mov x19, xzr
     mov x20, xzr
     mov x21, xzr
@@ -182,6 +208,7 @@ exception_common:
     mov x1, x20
     bl arm64_exception          // x0 = kind, x1 = frame -> x0 = frame to resume
     mov sp, x0
+    LOAD_KERNEL_SCS
     bl scheduler_unlock         // releases the lock only if we switched
     mov x0, sp
     ldr x1, [sp, #264]
@@ -200,6 +227,21 @@ exception_common:
     cmp x0, x1
     b.lo .Lstack_erase
 .Lstack_erased:
+    cbz x19, .Lshadow_erased
+    // All protected Rust frames have returned, so x18 is at this user
+    // task's shadow base. Erase stale return pointers before EL0 resumes.
+    mov x1, x18
+    add x2, x18, #8, lsl #12
+.Lshadow_erase:
+    str xzr, [x1], #8
+    cmp x1, x2
+    b.lo .Lshadow_erase
+.Lshadow_erased:
+    ldr x1, [sp, #264]
+    and x1, x1, #15
+    cbnz x1, .Lpac_return_ready
+    bl arm64_clear_user_pac
+.Lpac_return_ready:
 
     ldp x1, x2, [sp, #256]
     msr elr_el1, x1
@@ -280,6 +322,7 @@ unsafe extern "C" fn arm64_exception(kind: u64, frame: *mut TaskContext) -> u64 
         // Kernel sync: `svc` is a voluntary yield; anything else is a bug
         4 => {
             let esr = esr();
+            if esr >> 26 == 0x1c {crate::cfi::fatal(b"PAC authentication",(*frame).elr,None);}
             if esr >> 26 == 0x0d {crate::cfi::fatal(b"BTI",(*frame).elr,Some((*frame).elr));}
             if esr >> 26 == EC_BRK && esr & 0xffe0 == 0x8220 {
                 let register=(esr & 31) as usize;

@@ -16,7 +16,7 @@ ROOT=Path(__file__).resolve().parent.parent
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--arch',choices=['amd64','arm64'],required=True)
-    parser.add_argument('--kind',choices=['kcfi','bti','ibt'],default='kcfi')
+    parser.add_argument('--kind',choices=['kcfi','bti','ibt','canary','pac'],default='kcfi')
     parser.add_argument('--allow-unavailable',action='store_true')
     parser.add_argument('--cpu')
     args=parser.parse_args()
@@ -24,7 +24,7 @@ def main():
     if args.arch=='amd64':
         command=['qemu-system-x86_64','-cpu',args.cpu or 'max','-drive',f'format=raw,file={ROOT/"target/mmurtl-rs-bios.img"}','-snapshot']
     else:
-        command=['qemu-system-aarch64','-machine','virt,gic-version=3','-cpu',args.cpu or ('max' if args.kind=='bti' else 'cortex-a72'),'-kernel',str(ROOT/'target/aarch64-unknown-none-softfloat/release/mmurtl-rs')]
+        command=['qemu-system-aarch64','-machine','virt,gic-version=3','-cpu',args.cpu or ('max' if args.kind in ['bti','pac'] else 'cortex-a72'),'-kernel',str(ROOT/'target/aarch64-unknown-none-softfloat/release/mmurtl-rs')]
     proc=subprocess.Popen(command+['-smp','4','-m','256M','-display','none','-serial','stdio','-monitor','none','-no-reboot'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     output=bytearray()
     try:
@@ -37,8 +37,9 @@ def main():
         if 'positive test skipped' in text:
             assert args.kind!='kcfi' and args.allow_unavailable,text[-4000:]
             print(args.arch+': '+args.kind+' unavailable; positive enforcement test explicitly skipped');return
-        kind={'kcfi':'KCFI','bti':'BTI','ibt':'CET-IBT/#CP'}[args.kind]
-        assert f'[CFI] fatal {kind} at (ptr) target (ptr); CPU halted' in text,text[-4000:]
+        kind={'kcfi':'KCFI','bti':'BTI','ibt':'CET-IBT/#CP','canary':'stack canary','pac':'PAC authentication'}[args.kind]
+        target='(unknown)' if args.kind in ['canary','pac'] else '(ptr)'
+        assert f'[CFI] fatal {kind} at (ptr) target {target}; CPU halted' in text,text[-4000:]
         assert '[CFI TEST] ERROR' not in text,text[-4000:]
         print(args.arch+': '+args.kind+' violation trapped before target execution, PC/target diagnostics restricted')
     finally:

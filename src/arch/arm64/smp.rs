@@ -41,6 +41,7 @@ struct ApBoot {
     ttbr1: u64,
     sctlr: u64,
     kernel_offset: u64,
+    shadow_base: u64,
 }
 
 const _: () = assert!(core::mem::offset_of!(ApBoot, kernel_offset) == 56);
@@ -103,7 +104,10 @@ pub fn boot_secondaries(info: &MachineInfo) {
             continue;
         }
         if next_cpu as usize >= crate::scheduler::MAX_CPUS { break; }
+        #[cfg(feature="test-psci-failure")]
+        let free_before=crate::memory::heap::free_frames();
         let stack = crate::memory::stacks::allocate();
+        let shadow = crate::memory::stacks::allocate();
         let boot = Box::leak(Box::new(ApBoot {
             stack_top: stack.virt + stack.size,
             cpu: next_cpu,
@@ -113,6 +117,7 @@ pub fn boot_secondaries(info: &MachineInfo) {
             ttbr1: regs.ttbr1,
             sctlr: regs.sctlr,
             kernel_offset: regs.kernel_offset,
+            shadow_base: shadow.virt,
         }));
         clean_dcache(boot as *const ApBoot as u64, core::mem::size_of::<ApBoot>());
 
@@ -128,17 +133,33 @@ pub fn boot_secondaries(info: &MachineInfo) {
             clean_dcache(super::memory::phys_to_virt(release) as u64, 8);
             unsafe { asm!("sev") };
         } else {
-            let r = psci_call(
+            #[cfg(feature="test-psci-failure")]
+            static INJECTED:AtomicBool=AtomicBool::new(false);
+            #[cfg(feature="test-psci-failure")]
+            let inject=!INJECTED.swap(true,Ordering::Relaxed);
+            #[cfg(not(feature="test-psci-failure"))]
+            let inject=false;
+            let r = if inject {-3} else {psci_call(
                 info.psci,
                 PSCI_CPU_ON,
                 target,
                 super::memory::virt_to_phys(secondary_start as *const () as u64),
                 super::memory::virt_to_phys(boot as *const ApBoot as u64),
-            );
+            )};
             if r != 0 {
                 crate::serial::write_str("[SMP] PSCI CPU_ON failed for MPIDR 0x");
                 crate::serial::write_hex(target);
                 crate::serial::write_str("\n");
+                // An immediate error did not accept this context. A
+                // successful release that times out must retain its stacks.
+                crate::memory::stacks::release(shadow.virt,shadow.phys);
+                crate::memory::stacks::release(stack.virt,stack.phys);
+                unsafe {drop(Box::from_raw(boot as *mut ApBoot));}
+                #[cfg(feature="test-psci-failure")]
+                if inject {
+                    assert!(crate::memory::heap::free_frames()>=free_before,"failed launch leaked stack frames");
+                    crate::serial::write_line("[RETURN TEST] rejected CPU launch reclaimed both stacks");
+                }
                 continue;
             }
         }
@@ -168,6 +189,7 @@ pub fn boot_secondaries(info: &MachineInfo) {
 extern "C" fn arm64_secondary_main(cpu: u64) -> ! {
     super::mmu::retire_identity();
     if !crate::security::admit_cpu_prepared(cpu as usize, || {
+        if !super::pac::compatible(cpu as usize) { return false; }
         if !crate::topology::admit(cpu as usize) { return false; }
         super::cpu_features::enumerate(cpu as usize);
         true

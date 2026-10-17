@@ -167,6 +167,10 @@ impl Scheduler {
                     kstack_virt: t.kernel_stack_bottom,
                     space: core::mem::take(&mut t.address_space),
                     slot: t.user_slot.take(),
+                    #[cfg(target_arch="aarch64")]
+                    shadow_virt: t.shadow_virt,
+                    #[cfg(target_arch="aarch64")]
+                    shadow_phys: core::mem::take(&mut t.shadow_phys),
                 });
             }
         }
@@ -242,6 +246,8 @@ impl Scheduler {
         unsafe { crate::arch::store_bypass::prepare_task(t.spec_store_bypass_disable,
             &mut *(t.context_ptr as *mut TaskContext)); }
         if t.user {
+            #[cfg(target_arch="aarch64")]
+            crate::arch::shadow::prepare(cpu, t.shadow_virt);
             // Traps from user mode must land on this task's own kernel stack
             crate::arch::on_switch_to_user(cpu, t.kernel_stack_top);
         }
@@ -670,6 +676,10 @@ fn alloc_stack() -> KernelStack {
 
 /// Resources of an exited task, handed to the reaper
 struct Reapable {
+    #[cfg(target_arch="aarch64")]
+    shadow_virt: u64,
+    #[cfg(target_arch="aarch64")]
+    shadow_phys: u64,
     kstack_phys: u64,
     kstack_virt: u64,
     space: u64,
@@ -709,6 +719,10 @@ extern "C" fn reaper_task() -> ! {
             let mut frames = 0u64;
             if r.kstack_phys != 0 {
                 frames += crate::memory::stacks::release(r.kstack_virt, r.kstack_phys);
+            }
+            #[cfg(target_arch="aarch64")]
+            if r.shadow_phys != 0 {
+                frames += crate::memory::stacks::release(r.shadow_virt, r.shadow_phys);
             }
             if let Some(slot) = r.slot {
                 frames += crate::memory::user::release(r.space, slot) as u64;

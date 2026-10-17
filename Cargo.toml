@@ -38,3 +38,9 @@ test-cfi = []
 # Regression images: attempt a non-landing-pad branch when hardware exists.
 test-bti = []
 test-ibt = []
+test-kernel-canary = []
+test-pac = []
+test-shadow-overflow = []
+# Regression only: treat all entropy sources as uncredited.
+test-weak-entropy = []
+test-psci-failure = []

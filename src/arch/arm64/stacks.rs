@@ -12,10 +12,14 @@ pub fn on_emergency_stack() -> bool {
 }
 #[no_mangle]
 static mut ARM64_STACK_EMERGENCY: [u64; crate::scheduler::MAX_CPUS] = [0; crate::scheduler::MAX_CPUS];
+#[no_mangle]
+static mut ARM64_SCS_EMERGENCY: [u64; crate::scheduler::MAX_CPUS] = [0; crate::scheduler::MAX_CPUS];
 pub fn init_emergency() {
     for cpu in 0..crate::scheduler::MAX_CPUS {
         let stack = crate::memory::stacks::allocate();
         unsafe { ARM64_STACK_EMERGENCY[cpu] = stack.virt + stack.size; }
+        let shadow = crate::memory::stacks::allocate();
+        unsafe { ARM64_SCS_EMERGENCY[cpu] = shadow.virt; }
     }
 }
 pub fn emergency_byte(byte: u8) { super::serial::emergency_byte(byte); }
@@ -30,6 +34,9 @@ arm64_stack_overflow:
     add x1, x1, :lo12:ARM64_STACK_EMERGENCY
     ldr x1, [x1, x0, lsl #3]
     mov sp, x1
+    adrp x1, ARM64_SCS_EMERGENCY
+    add x1, x1, :lo12:ARM64_SCS_EMERGENCY
+    ldr x18, [x1, x0, lsl #3]
     adrp x1, ARM64_PAN_MODE
     add x1, x1, :lo12:ARM64_PAN_MODE
     ldarb w1, [x1]
@@ -46,5 +53,6 @@ arm64_stack_overflow:
     .inst 0xd500419f
     isb
 .Loverflow_pan_closed:
+    bl arm64_restore_kernel_pac
     b kernel_stack_fatal
 "#);

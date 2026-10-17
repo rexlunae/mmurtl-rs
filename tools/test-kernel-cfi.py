@@ -54,7 +54,9 @@ def main():
             assert len(functions)>300,'missing ARM type hashes'
             for name,address in functions:
                 if address in relocation_targets or any(part in name for part in ['worker_task','kernel_run','shell_task','reaper_task']):
-                    assert instructions[address][0]=='bti',(name,'indirect target lacks BTI landing pad')
+                    # PACIASP is an implicit BTI c landing instruction; BT1
+                    # preserves call compatibility while rejecting jump BTYPE.
+                    assert instructions[address][0] in ['bti','paciasp'],(name,'indirect target lacks BTI landing pad')
             assert sum(op=='bti' for op,_ in instructions.values())>50,'missing compiler landing pads'
             for name in ['exception_common','user_copy_from','user_copy_to','arm64_stack_overflow','arm64_enter_high','secondary_start','secondary_spin_entry','pan_read_probe','pan_write_probe','wx_write','wx_execute','wx_text']:
                 assert raw(symbols[name],4)==bytes.fromhex('df2403d5'),(name,'ASM entry lacks BTI jc')
