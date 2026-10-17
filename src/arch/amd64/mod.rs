@@ -235,4 +235,5 @@ pub mod nospec;
 pub mod spec_ctrl;
 pub mod store_bypass;
 
+pub mod entropy;
 pub mod wx;

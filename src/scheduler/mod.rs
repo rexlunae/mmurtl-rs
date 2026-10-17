@@ -482,6 +482,7 @@ pub unsafe fn switch_from_interrupt(current_sp: u64, timer: bool) -> u64 {
     let cpu = current_cpu();
     let mut sched = SCHEDULER.lock();
     crate::arch::nospec::barrier_nospec();
+    if timer { crate::random::interrupt_sample(); }
     let new_sp = sched.on_tick(cpu, current_sp, timer);
     // Keep holding the lock across the stack switch (see scheduler_unlock)
     core::mem::forget(sched);

@@ -21,6 +21,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .unwrap_or(option_env!("MMURTL_BOOTARGS").unwrap_or(""));
     crate::security::init(args.trim_end_matches('\0'));
     crate::print_banner();
+    crate::random::init();
     crate::serial::write_line("[TIME] user high-resolution counters: per-task (default off)");
 
     // Log boot info — memory regions

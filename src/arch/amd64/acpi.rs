@@ -176,6 +176,7 @@ unsafe fn find_table(sdt_phys: u64, entry_size: usize, sig: &[u8; 4]) -> Option<
 /// Parse the MADT: local APIC base, CPU list, I/O APIC, IRQ overrides
 unsafe fn parse_madt(madt_phys: u64) -> bool {
     let (ptr, len) = sdt_at(madt_phys);
+    crate::random::mix(b"public ACPI MADT", core::slice::from_raw_parts(ptr, len.min(4096)), 0);
 
     let mut info = MadtInfo {
         lapic_base: (ptr.add(36) as *const u32).read_unaligned() as u64,

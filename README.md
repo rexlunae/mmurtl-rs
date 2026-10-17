@@ -1004,3 +1004,40 @@ test, without exposing a syscall that executes arbitrary kernel pointers.
 arm64 also probes rodata and RELRO writes. Run `make arm64-image` and
 `python3 tools/test-security.py --arch arm64 --raw-image --cpus 4` to check the
 relocated raw Image path as well as the usual ELF boot.
+
+### Kernel randomness
+
+`random::fill` and `random::u64` return an error until at least 128 bits of
+conditional source credit are available. `early_u64` works without a heap but
+can be predictable; callers must check `ready()` before claiming ASLR or key
+security. There is no silent fallback to weak security randomness.
+
+A BLAKE2s pool derives distinct per-CPU ChaCha20 keys. Each 32-byte output
+refill replaces its key using the unreturned half of a ChaCha20 block. CPU-local
+output runs with IRQs masked and takes no global lock after initialization,
+unless a newly mixed seed requires reseeding. NMIs must never call RNG APIs.
+Retained keys and temporary output blocks are erased with volatile stores;
+RustCrypto's ChaCha state uses zeroize-on-drop. Scalar backends are forced
+because kernel FP/SIMD context switching is not yet implemented.
+
+Boot mixes bounded, health-checked RDSEED/RDRAND or RNDRRS/RNDR, discovered
+SMCCC TRNG_RND64, firmware DT seeds, and an optional virtio-rng host source.
+DT seed properties and completed DMA seed samples are erased after consumption.
+Virtqueue free lists and in-flight chain lengths live in CPU-owned metadata;
+invalid/duplicate completion IDs or ring-index jumps poison the queue until
+reset. Network RX marks the device failed rather than gradually losing posted
+buffers. The virtio-rng DMA allocations remain reserved even on timeout, so late DMA
+cannot hit recycled memory. Timestamps, normal interrupt timing, and public
+ACPI/DT machine data are supplements with **zero entropy credit**. This is not
+a validated jitterentropy implementation. Credits are conditional on trusting
+the CPU, firmware or VM host RNG; health checks detect simple failures and
+cannot prove entropy or repair SRBDS/microcode defects. Credits use the largest
+individual source estimate rather than adding potentially correlated sources.
+The log reports weak/ready state and a hash of a discarded output, never the
+seed or random output itself. Real machines without a trustworthy source stay
+weak until one is supplied; future ASLR/canary/PAC users must honor that state.
+
+Run `python3 tools/test-random.py` after building both kernels for cryptographic
+known-answer, failure-policy, per-CPU/reseed and scalar-code regressions.
+`tools/test-security.py --rng` attaches host entropy; on arm64,
+`--no-firmware-seed` disables QEMU's DT seeds for failure-path tests.

@@ -182,6 +182,7 @@ pub fn init(devices: &[crate::pci::PciDevice]) {
         let device_type = match dev.device_id {
             0x1000 => 1, // network
             0x1001 => 2, // block
+            0x1005 => 4, // entropy
             other => {
                 crate::serial::write_str("[VIRTIO] Unhandled virtio-pci device 0x");
                 crate::serial::write_hex(other as u64);
