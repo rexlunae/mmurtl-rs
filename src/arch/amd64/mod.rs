@@ -236,3 +236,7 @@ pub mod spec_ctrl;
 pub mod store_bypass;
 
 pub mod wx;
+
+pub mod microcode;
+
+pub mod microcode_msr;

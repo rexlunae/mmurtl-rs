@@ -1,0 +1,44 @@
+// Signing-boundary revision data from upstream Linux microcode/amd.c.
+// Do not cross a firmware signing-format boundary with an OS-loaded patch.
+const CUTOFFS: &[(u32, u32)] = &[
+    (0x80012, 0x8001277),
+    (0x80082, 0x800820f),
+    (0x83010, 0x830107c),
+    (0x86001, 0x860010e),
+    (0x86081, 0x8608108),
+    (0x87010, 0x8701034),
+    (0x8a000, 0x8a0000a),
+    (0xa0010, 0xa00107a),
+    (0xa0011, 0xa0011da),
+    (0xa0012, 0xa001243),
+    (0xa0082, 0xa00820e),
+    (0xa1011, 0xa101153),
+    (0xa1012, 0xa10124e),
+    (0xa1081, 0xa108109),
+    (0xa2010, 0xa20102f),
+    (0xa2012, 0xa201212),
+    (0xa4041, 0xa404109),
+    (0xa5000, 0xa500013),
+    (0xa6012, 0xa60120a),
+    (0xa7041, 0xa704109),
+    (0xa7052, 0xa705208),
+    (0xa7080, 0xa708009),
+    (0xa70c0, 0xa70C009),
+    (0xaa001, 0xaa00116),
+    (0xaa002, 0xaa00218),
+    (0xb0021, 0xb002146),
+    (0xb0081, 0xb008111),
+    (0xb1010, 0xb101046),
+    (0xb2040, 0xb204031),
+    (0xb4040, 0xb404031),
+    (0xb4041, 0xb404101),
+    (0xb6000, 0xb600031),
+    (0xb6080, 0xb608031),
+    (0xb7000, 0xb700031),
+];
+pub fn transition_allowed(current: u32, target: u32) -> bool {
+    match CUTOFFS.iter().find(|(prefix, _)| *prefix == current >> 8) {
+        Some((_, cutoff)) => (current <= *cutoff) == (target <= *cutoff),
+        None => true,
+    }
+}

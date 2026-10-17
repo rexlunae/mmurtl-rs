@@ -11,7 +11,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     use crate::serial;
     // Initialize serial early for debugging, then the banner
     super::fpu::init();
-    super::protection::enumerate(0);
     super::set_user_counter_access(false);
     serial::init();
     serial::write_line("[FPU] user FP/SIMD disabled on every CPU (no context switching yet)");
@@ -78,6 +77,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         Optional::None => None,
     };
     super::memory::init(&boot_info.memory_regions, phys_offset);
+    let module = match boot_info.ramdisk_addr { Optional::Some(a) => Some(a), Optional::None => None };
+    super::microcode::init(module, boot_info.ramdisk_len);
+    assert!(super::microcode::apply(0));
+    super::protection::enumerate(0);
     super::memory::protect_image_aliases(boot_info.kernel_addr, boot_info.kernel_len, boot_info.kernel_image_offset);
     super::gdt::protect_bsp_stacks();
     crate::scheduler::debug_lock_self_test();
@@ -99,6 +102,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Boot the application processors — each joins the scheduler
     serial::write_str("[INIT] SMP...\n");
     super::smp::boot_aps();
+    super::microcode::seal();
     super::protection::finalize();
     super::smp::finalize_trampoline();
     crate::security::finalize();

@@ -83,7 +83,7 @@ pub fn amd(mut blob: &[u8], cpu: u32, current: u32) -> Result<Option<Patch<'_>>,
         while !blob.is_empty() && u32_at(blob, 0)? != 0x00414d44 {
             if u32_at(blob, 0)? != 1 { return Err(Error::Format); }
             let size = u32_at(blob, 4)? as usize;
-            if size < 64 || size > 128 * 1024 || size % 4 != 0 { return Err(Error::Format); }
+            if size < 64 || size > 128 * 1024 { return Err(Error::Format); }
             let end = 8usize.checked_add(size).ok_or(Error::Overflow)?;
             let patch = blob.get(8..end).ok_or(Error::Truncated)?;
             let revision = u32_at(patch, 4)?;
@@ -103,3 +103,5 @@ pub fn amd(mut blob: &[u8], cpu: u32, current: u32) -> Result<Option<Patch<'_>>,
 }
 
 pub mod amd_digests;
+
+pub mod amd_policy;

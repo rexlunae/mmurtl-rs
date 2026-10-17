@@ -274,12 +274,16 @@ extern "x86-interrupt" fn stack_segment_handler(
 }
 
 extern "x86-interrupt" fn general_protection_handler(
-    stack_frame: InterruptStackFrame,
+    mut stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
     super::protection::clear_access();
     if from_user(&stack_frame) {
         kill_user_task(&stack_frame, "#GP general protection fault", None);
+    }
+    if let Some(pc) = super::microcode_msr::fixup(stack_frame.instruction_pointer.as_u64()) {
+        unsafe { stack_frame.as_mut().update(|f| f.instruction_pointer = x86_64::VirtAddr::new(pc)); }
+        return;
     }
     panic!("GENERAL PROTECTION FAULT error_code={:#x}\n{:#?}", error_code, stack_frame);
 }

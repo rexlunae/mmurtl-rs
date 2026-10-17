@@ -25,6 +25,8 @@ mod syscall;
 mod userspace;
 mod shell;
 mod security;
+#[cfg(target_arch = "x86_64")]
+mod microcode;
 
 use core::panic::PanicInfo;
 
