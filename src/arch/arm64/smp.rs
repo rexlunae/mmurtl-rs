@@ -150,6 +150,7 @@ pub fn boot_secondaries(info: &MachineInfo) {
             next_cpu += 1;
         } else {
             crate::serial::write_line("[SMP] CPU did not come online");
+            break; // do not reuse a timed-out CPU index/mailbox
         }
     }
     crate::serial::write_str("[SMP] ");
@@ -160,11 +161,16 @@ pub fn boot_secondaries(info: &MachineInfo) {
 /// First Rust code on a secondary CPU (MMU on, SP = its boot stack)
 #[no_mangle]
 extern "C" fn arm64_secondary_main(cpu: u64) -> ! {
-    super::exceptions::init();
-    super::init_user_counter_policy();
-    super::irq::init_cpu();
-    crate::scheduler::register_ap(cpu as usize);
-    CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
+    super::cpu_features::enumerate(cpu as usize);
+    if !crate::security::admit_cpu(cpu as usize, || {
+        super::exceptions::init();
+        super::init_user_counter_policy();
+        super::irq::init_cpu();
+        crate::scheduler::register_ap(cpu as usize);
+        CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
+    }) {
+        loop { unsafe { asm!("msr daifset, #0xf", "wfi", options(nomem, nostack)); } }
+    }
 
     use core::fmt::Write;
     let mut line: heapless::String<64> = heapless::String::new();

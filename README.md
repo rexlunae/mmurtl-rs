@@ -678,6 +678,48 @@ validation remains outstanding. An uncontended host CAS-lock benchmark
 (`tools/tests/nospec_lock_bench.rs`) measured median 3.7 ns without the
 barrier and 24.1 ns with CPUID here; these are host measurements, not kernel
 or contested-lock latency guarantees.
+CPU vulnerability reporting records capabilities on every admitted CPU.
+amd64 captures gated CPUID leaves 7.0/7.1/7.2, AMD 80000008/80000021, and
+IA32_ARCH_CAPABILITIES only when its CPUID gate is present. arm64 records
+MIDR, CSV2/CSV3, SSBS, ECBHB, CLRBHB, and probes SMCCC ARCH_FEATURES for
+WA1/WA2/WA3 through the device tree's PSCI conduit. SMC32 return values are
+sign-extended from the low 32 bits. A small conservative Arm core table
+covers the A35/A53/A55 and known Meltdown-unaffected A57/A72/A73/A76;
+unknown cores stay unknown unless architectural immunity is advertised.
+Spectre-v2 and BHB are reported separately. Controls being advertised
+never causes the report to claim they are installed.
+
+The shared policy uses the intersection of features and immunity across
+admitted CPUs; late CPUs are parked after finalization. `PatchSite`
+provides runtime-selected trusted implementations, with a checked selector
+that requires common features, an enabled policy, and an affected family.
+Disabled sites make no indirect call. Other mitigation issues add actual
+control setup and register installed behavior with the status reporter.
+
+Default policy is `mitigations=auto`. Overrides are `mitigations=off`,
+`mitigations=auto,nosmt`, and `<family>=auto|on|off` using the names printed
+in the SPEC table (for example `spectre_v2=on ssb=off`). Malformed recognized
+settings fall back to auto. Baseline pointer validation, bounds masks,
+access protection, and timer restrictions remain enforced with off.
+`auto,nosmt` records the request; SMT topology enforcement is still pending
+in #42 and the boot log explicitly says so.
+
+arm64 reads `/chosen/bootargs` (QEMU `-append`); amd64 QEMU reads the bounded
+read-only `opt/mmurtl/bootargs` fw_cfg file. Both use `MMURTL_BOOTARGS` at
+build time as the embedded fallback for other boot environments. Examples:
+```sh
+python3 tools/test-security.py --arch amd64 --bootargs 'mitigations=off spectre_v2=on'
+python3 tools/test-security.py --arch arm64 --bootargs 'mitigations=auto,nosmt'
+MMURTL_BOOTARGS='mitigations=auto' make bios
+rustc --edition=2021 tools/tests/cpu_policy.rs -o /tmp/mmurtl-cpu-policy
+/tmp/mmurtl-cpu-policy
+```
+The host regression checks mixed-CPU intersections, missing-capability
+fallback, MSR-read gating, policy overrides, SMCCC status widths, and
+alternative selection. TCG strips unsupported ARCH_CAPABILITIES requests;
+positive MSR decoding is covered with injected host inputs, not claimed as
+real-hardware validation. Raw per-CPU words remain available in the log.
+
 amd64 intersects SMEP, SMAP, and UMIP support across online CPUs, then
 applies that common policy and CR0.WP before each CPU runs scheduled tasks.
 CPU admission is serialized with policy publication; late starters are

@@ -292,6 +292,10 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
     super::serial::set_base(info.uart);
     crate::serial::init();
     crate::serial::write_line("[FPU] user FP/SIMD/SVE/SME disabled on every CPU (no context switching yet)");
+    let args = core::str::from_utf8(&info.bootargs[..info.bootargs_len]).unwrap_or("");
+    crate::security::init(if args.is_empty() { option_env!("MMURTL_BOOTARGS").unwrap_or("") } else { args });
+    super::cpu_features::set_conduit(info.psci);
+    super::cpu_features::enumerate(0);
     crate::print_banner();
     crate::serial::write_line("[TIME] user high-resolution counters: per-task (default off)");
     super::exceptions::init();
@@ -348,6 +352,7 @@ extern "C" fn arm64_boot_main(dtb_arg: u64, load_addr: u64, relocs: u64) -> ! {
 
     crate::serial::write_str("[INIT] SMP...\n");
     super::smp::boot_secondaries(&info);
+    crate::security::report();
 
     crate::serial::write_str("[INIT] Virtio drivers...\n");
     super::virtio_mmio::probe(&info.virtio[..info.virtio_count]);

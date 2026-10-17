@@ -6,8 +6,6 @@ const LASS: u64 = 1 << 27;
 const UMIP: u64 = 1 << 11;
 static CAPS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
 static APPLIED: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
-static ADMISSION: spin::Mutex<()> = spin::Mutex::new(());
-static ADMITTED: AtomicU64 = AtomicU64::new(1); // BSP
 static READY: AtomicBool = AtomicBool::new(false);
 static COMMON: AtomicU64 = AtomicU64::new(0);
 /// Assembly entries read this byte without clobbering any incoming register.
@@ -16,15 +14,12 @@ static COMMON: AtomicU64 = AtomicU64::new(0);
 pub static SMAP_ENTRY_ENABLED: AtomicU8 = AtomicU8::new(0);
 
 pub fn enumerate(cpu: usize) {
+    super::cpu_features::enumerate(cpu);
+    let features = crate::security::caps(cpu).expect("missing CPU capabilities").features;
+    use crate::security::feature as F;
     let mut caps = 0;
-    unsafe {
-        if core::arch::x86_64::__cpuid(0).eax >= 7 {
-            let leaf = core::arch::x86_64::__cpuid_count(7, 0);
-            if leaf.ebx & (1 << 7) != 0 { caps |= SMEP; }
-            if leaf.ebx & (1 << 20) != 0 { caps |= SMAP; }
-            if leaf.ecx & (1 << 2) != 0 { caps |= UMIP; }
-            if leaf.eax >= 1 && core::arch::x86_64::__cpuid_count(7, 1).eax & (1 << 6) != 0 { caps |= LASS; }
-        }
+    for (feature, flag) in [(F::SMEP, SMEP), (F::SMAP, SMAP), (F::UMIP, UMIP), (F::LASS, LASS)] {
+        if features & feature != 0 { caps |= flag; }
     }
     unsafe {
         let mut cr4: u64;
@@ -37,8 +32,7 @@ pub fn enumerate(cpu: usize) {
 }
 
 pub fn finalize() {
-    let admission = ADMISSION.lock();
-    let admitted = ADMITTED.load(Ordering::Acquire);
+    let admitted = crate::security::freeze();
     let mut common = SMEP | SMAP | UMIP;
     for cpu in 0..64 {
         if admitted & (1 << cpu) != 0 { common &= CAPS[cpu].load(Ordering::Acquire); }
@@ -46,7 +40,6 @@ pub fn finalize() {
     COMMON.store(common, Ordering::Release);
     SMAP_ENTRY_ENABLED.store(u8::from(common & SMAP != 0), Ordering::Release);
     READY.store(true, Ordering::Release);
-    drop(admission);
     apply_current(0);
     assert!(!admit_ap(63, || panic!("late AP admitted after finalization")));
     crate::serial::write_line("[TEST] finalized CPU admission rejects late starters");
@@ -66,11 +59,7 @@ pub fn finalize() {
 /// loading the shared IDT, whose CLAC policy might be unsupported there.
 /// CPU indices need not be contiguous; only admitted CPUs are intersected.
 pub fn admit_ap(cpu: usize, initialize: impl FnOnce()) -> bool {
-    let _admission = ADMISSION.lock();
-    if READY.load(Ordering::Acquire) { return false; }
-    initialize();
-    ADMITTED.fetch_or(1 << cpu, Ordering::Release);
-    true
+    crate::security::admit_cpu(cpu, initialize)
 }
 
 /// Called with interrupts disabled before choosing a task's page tables.

@@ -20,3 +20,7 @@ jobs:
         run: |
           rustc --edition=2021 tools/tests/frame_allocator.rs -o /tmp/mmurtl-frame-test
           /tmp/mmurtl-frame-test
+      - name: Verify CPU policy and heterogeneous capability intersection
+        run: |
+          rustc --edition=2021 tools/tests/cpu_policy.rs -o /tmp/mmurtl-cpu-policy
+          /tmp/mmurtl-cpu-policy

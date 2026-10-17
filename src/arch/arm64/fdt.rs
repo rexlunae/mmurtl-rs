@@ -45,6 +45,8 @@ pub enum IrqChip {
 
 /// What the kernel learns from the device tree
 pub struct MachineInfo {
+    pub bootargs: [u8; 512],
+    pub bootargs_len: usize,
     pub ram: [(u64, u64); MAX_RAM], // (base, size)
     pub ram_count: usize,
     /// /memreserve/ entries: firmware structures, spin tables, ...
@@ -95,6 +97,8 @@ impl MachineInfo {
     /// QEMU `virt` defaults, used for anything the tree doesn't say
     const fn qemu_virt_defaults() -> Self {
         Self {
+            bootargs: [0; 512],
+            bootargs_len: 0,
             ram: [(0, 0); MAX_RAM],
             ram_count: 0,
             reserved: [(0, 0); MAX_RESERVED],
@@ -169,6 +173,7 @@ struct Node {
     child_addr_cells: u32,
     child_size_cells: u32,
     is_cpu: bool,
+    is_chosen: bool,
     is_memory: bool,
     is_gic: bool,
     is_gicv3: bool,
@@ -202,6 +207,7 @@ impl Node {
             child_addr_cells: 2,
             child_size_cells: 1,
             is_cpu: false,
+            is_chosen: false,
             is_memory: false,
             is_gic: false,
             is_gicv3: false,
@@ -310,6 +316,7 @@ pub fn parse(addr: u64) -> MachineInfo {
                 p = (p + name.len() + 1 + 3) & !3;
                 if depth < DEPTH {
                     let mut n = Node::new();
+                    n.is_chosen = depth == 1 && name == b"chosen";
                     n.is_memory = name.starts_with(b"memory");
                     n.is_cpu = name.starts_with(b"cpu@");
                     stack[depth] = n;
@@ -428,6 +435,13 @@ pub fn parse(addr: u64) -> MachineInfo {
                 let n = &mut stack[depth - 1];
                 let v = &b[val..val + len];
                 match name {
+                    b"bootargs" if n.is_chosen => {
+                        let len = v.iter().position(|b| *b == 0).unwrap_or(v.len());
+                        if len <= info.bootargs.len() {
+                            info.bootargs[..len].copy_from_slice(&v[..len]);
+                            info.bootargs_len = len;
+                        }
+                    }
                     b"#address-cells" if len == 4 => n.child_addr_cells = be32(b, val),
                     b"#size-cells" if len == 4 => n.child_size_cells = be32(b, val),
                     b"reg" => {
