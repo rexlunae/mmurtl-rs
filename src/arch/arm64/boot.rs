@@ -5,15 +5,17 @@
 //! QEMU `virt` loads it at its link address, a Raspberry Pi's firmware
 //! near the start of RAM at 0. `_start` applies its own
 //! R_AARCH64_RELATIVE relocations before any code can read an absolute
-//! address, then everything runs identity-mapped at the load address.
+//! address. A second relative-relocation pass rebases absolute references into
+//! the high TTBR1 window just before enabling translation and branching high.
 //!
 //! CPU 0 enters `_start` with the MMU off, at EL3, EL2, or EL1 (we drop to
 //! EL1). Secondary CPUs are started later, by PSCI `CPU_ON` at
 //! `secondary_start` or by a spin-table release at `secondary_spin_entry`
 //! (see `smp.rs`).
 //!
-//! Boot CPU sequence: relocate → device tree (MMU still off) → identity
-//! map + MMU on → console → vectors → memory → interrupt controller +
+//! Boot CPU sequence: relocate → device tree (MMU off) → tables → high
+//! relocation/MMU handoff → retire bootstrap TTBR0 → console → vectors →
+//! memory → interrupt controller +
 //! timer → scheduler → secondary CPUs → devices → `crate::kernel_run()`.
 
 use core::arch::global_asm;

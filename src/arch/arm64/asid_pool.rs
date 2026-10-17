@@ -16,6 +16,7 @@ impl<const S: usize, const C: usize> Asids<S, C> {
     pub const fn new(bits: u8) -> Self {
         assert!(bits > 0 && bits <= 16);
         let mut used = [0; WORDS]; used[0] = 1; // ASID 0 is the empty kernel TTBR0
+        used[255 / 64] |= 1 << (255 % 64); // bootstrap identity map, never a user tag
         Self { spaces: [EMPTY; S], active: [(0, 0); C], used, limit: (1u32 << bits) - 1, next: 1, generation: 1 }
     }
     pub fn configure(&mut self, bits: u8) {
@@ -39,7 +40,7 @@ impl<const S: usize, const C: usize> Asids<S, C> {
     }
     fn rollover(&mut self) {
         self.generation = self.generation.checked_add(1).expect("ASID generation exhausted");
-        self.used.fill(0); self.mark(0); self.next = 1;
+        self.used.fill(0); self.mark(0); self.mark(255); self.next = 1;
         // Preserve every currently loaded tag. Other CPUs may still execute
         // with it until their next switch; it cannot be reassigned meanwhile.
         for cpu in 0..C {

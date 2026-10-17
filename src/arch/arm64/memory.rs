@@ -1,5 +1,4 @@
-//! arm64 memory glue: device-tree RAM → frame allocator, the identity
-//! physical→virtual translation, and the kernel heap.
+//! arm64 memory glue: device-tree RAM, the high TTBR1 physical window and heap.
 
 use crate::memory::frame_allocator::{FrameAllocator, PhysRange, FRAME_SIZE};
 

@@ -13,13 +13,20 @@ fn main() {
     p.activate(0,0);p.release(1);assert!(p.register(7));
     let mut q=Asids::<2, 1>::new(8);q.configure(16);
     for i in 0..70000 {
-        assert!(q.register(10));let (tag,_) = q.activate(0,10);assert_ne!(tag.unwrap(),0);
+        assert!(q.register(10));let (tag,_) = q.activate(0,10);assert_ne!(tag.unwrap(),0);assert_ne!(tag.unwrap(),255);
         q.activate(0,0);q.release(10);
-        if i==65534 { assert_eq!(q.generation(),1); }
+        if i==65533 { assert_eq!(q.generation(),1); }
     }
     assert!(q.generation()>1);
     let mut q=Asids::<2, 1>::new(8);
     for _ in 0..1000 { assert!(q.register(10));q.activate(0,10);q.activate(0,0);q.release(10); }
     assert!(q.generation()>1);
+    let mut stress=Asids::<16,4>::new(3);for root in 1..=8 { assert!(stress.register(root)); }
+    let mut live=[(0u64,0u16);4];
+    for step in 0..10000 {
+        let cpu=step%4;let root=1+((step*7+step/9)%8) as u64;
+        let tag=stress.activate(cpu,root).0.unwrap();live[cpu]=(root,tag);assert_eq!(stress.tag(root),Some(tag));
+        for (a,ta) in live { for (b,tb) in live { if a!=0 && b!=0 && a!=b { assert_ne!(ta,tb); } } }
+    }
     println!("ASIDs: 8/16-bit rollover, live CPU reservations, exhaustion and root reuse passed");
 }
