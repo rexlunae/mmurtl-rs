@@ -678,6 +678,22 @@ validation remains outstanding. An uncontended host CAS-lock benchmark
 (`tools/tests/nospec_lock_bench.rs`) measured median 3.7 ns without the
 barrier and 24.1 ns with CPUID here; these are host measurements, not kernel
 or contested-lock latency guarantees.
+amd64 intersects SMEP, SMAP, and UMIP support across online CPUs, then
+applies that common policy and CR0.WP before each CPU runs scheduled tasks.
+CPU admission is serialized with policy publication; late starters are
+parked before loading the shared IDT. AP startup stops on timeout so its
+shared low-memory mailbox is never reused while a late CPU may read it.
+Loaded read-only image pages (including RELRO) also have read-only NX
+physmap aliases, protected before AP startup by splitting huge mappings.
+The boot test verifies writes through a text alias fault.
+SMAP access decisions are cached; syscall/timer/yield assembly entries
+conditionally clear AC before saving registers, and every Rust exception
+or IRQ handler clears it before its body. STAC/CLAC include compiler memory
+barriers around deliberate user copies. Boot probes verify inherited AC
+cannot bypass SMAP, supervisor execution of user pages is denied by SMEP,
+and user SIDT is denied where UMIP is supported. Unsupported CPUs use the
+baseline user page permissions. LASS support is detected but enabling it
+requires moving current lower-half kernel mappings into the higher half.
 
 User copies use registered exception-table fixups: amd64 `rep movsb`
 inside the SMAP access window, and arm64 `ldtrb`/`sttrb` with EL0 permissions.

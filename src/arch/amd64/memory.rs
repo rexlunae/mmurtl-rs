@@ -207,6 +207,7 @@ fn free_frame(pa: u64) {
 /// isn't loaded already. Kernel mappings are identical in every space, so
 /// this is safe from kernel code at any point.
 pub fn switch_address_space(cpu: usize, root: u64) {
+    super::protection::apply_current(cpu);
     use core::sync::atomic::Ordering;
     let target = if root == 0 { kernel_root() } else { root };
     if ACTIVE_ROOT[cpu].load(Ordering::Relaxed) == target {
@@ -233,22 +234,17 @@ pub fn query_page(va: u64) -> Option<(bool, bool)> {
 /// If the CPU enforces SMAP (CR4.SMAP), deliberate kernel accesses to user
 /// pages must be bracketed by STAC/CLAC. Without SMAP these instructions
 /// would #UD, so they are only issued when the feature is on.
-fn smap_enabled() -> bool {
-    use x86_64::registers::control::{Cr4, Cr4Flags};
-    Cr4::read().contains(Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION)
-}
-
 /// Open a window for the kernel to touch user memory
 pub fn user_access_begin() {
-    if smap_enabled() {
-        unsafe { core::arch::asm!("stac", options(nomem, nostack)) };
+    if super::protection::smap_enabled() {
+        unsafe { core::arch::asm!("stac", options(nostack)) };
     }
 }
 
 /// Close the user-memory window
 pub fn user_access_end() {
-    if smap_enabled() {
-        unsafe { core::arch::asm!("clac", options(nomem, nostack)) };
+    if super::protection::smap_enabled() {
+        unsafe { core::arch::asm!("clac", options(nostack)) };
     }
 }
 
@@ -350,4 +346,42 @@ pub fn identity_map_executable(phys: u64) {
         }
     })
     .expect("Frame allocator not initialized");
+}
+
+/// Mirror the loaded image's effective read-only permissions into its
+/// physical-memory aliases, including RELRO. Run before any AP starts.
+pub fn protect_image_aliases(elf_phys: u64, elf_len: u64, image_offset: u64) {
+    let elf = unsafe { core::slice::from_raw_parts(phys_to_virt(elf_phys), elf_len as usize) };
+    let read64 = |offset: usize| u64::from_le_bytes(elf[offset..offset + 8].try_into().unwrap());
+    let read16 = |offset: usize| u16::from_le_bytes(elf[offset..offset + 2].try_into().unwrap()) as usize;
+    assert!(elf.len() >= 64 && &elf[..4] == b"\x7fELF");
+    let headers = read64(32) as usize;
+    let size = read16(54);
+    let count = read16(56);
+    assert!(size >= 56 && headers.checked_add(size.checked_mul(count).unwrap()).unwrap() <= elf.len());
+    let mut protected = 0;
+    crate::memory::heap::with_frame_allocator(|fa| {
+        let mut adapter = page_table::BumpFrameAllocator::new(fa);
+        for index in 0..count {
+            let header = headers + index * size;
+            if u32::from_le_bytes(elf[header..header + 4].try_into().unwrap()) != 1 { continue; }
+            let start = read64(header + 16).checked_add(image_offset).expect("image address overflow");
+            let end = start.checked_add(read64(header + 40)).expect("image size overflow");
+            let mut page = start & !4095;
+            while page < end {
+                let va = VirtAddr::new(page);
+                if !page_table::query_page(va).expect("missing image mapping").contains(Flags::WRITABLE) {
+                    let pa = page_table::translate_virtual(va).expect("missing image frame");
+                    let alias = page_table::phys_to_virt(pa);
+                    unsafe { page_table::set_page_readonly(alias, &mut adapter).expect("protect image physmap alias"); }
+                    assert!(!page_table::query_page(alias).unwrap().contains(Flags::WRITABLE));
+                    protected += 1;
+                }
+                page += 4096;
+            }
+        }
+    }).expect("frame allocator not initialized");
+    crate::serial::write_str("[CPU] read-only kernel physmap aliases: ");
+    crate::serial::write_dec(protected);
+    crate::serial::write_str(" pages protected\n");
 }

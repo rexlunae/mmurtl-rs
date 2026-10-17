@@ -23,6 +23,10 @@ pub const SYSCALL_VECTOR: u8 = 0x80;
 core::arch::global_asm!(
     ".globl syscall_int_entry",
     "syscall_int_entry:",
+    "cmp byte ptr [rip + SMAP_ENTRY_ENABLED], 0",
+    "je 2f",
+    "clac",
+    "2:",
     // Same register frame as the timer path (TaskContext layout)
     "push rax",
     "push rcx",
@@ -75,6 +79,7 @@ pub fn entry_address() -> u64 {
 /// Decode the saved registers and run the portable dispatcher
 #[no_mangle]
 extern "C" fn syscall_dispatch(frame: &mut TaskContext) {
+    super::protection::assert_syscall_entry();
     let privilege = match frame.cs & 3 {
         3 => "CPL3",
         _ => "CPL0",
