@@ -24,6 +24,9 @@ pub const AP_STACK_SIZE: usize = 64 * 1024;
 static CPUS_ONLINE: AtomicUsize = AtomicUsize::new(1);
 
 /// Handshake flag: set by an AP once it is fully online
+static TRAMP_INSTALLED: AtomicBool = AtomicBool::new(false);
+static POSSIBLE_LATE_AP: AtomicBool = AtomicBool::new(false);
+
 static AP_READY: AtomicBool = AtomicBool::new(false);
 
 pub fn cpus_online() -> usize {
@@ -113,9 +116,9 @@ ap_tramp_lm64:
 .balign 16
 ap_tramp_gdt:
     .quad 0                     # null
-    .quad 0x00CF9A000000FFFF    # 0x08: 32-bit code, base 0, limit 4G
-    .quad 0x00CF92000000FFFF    # 0x10: data
-    .quad 0x00AF9A000000FFFF    # 0x18: 64-bit code
+    .quad 0x00CF9B000000FFFF    # 0x08: 32-bit code, base 0, limit 4G
+    .quad 0x00CF93000000FFFF    # 0x10: data
+    .quad 0x00AF9B000000FFFF    # 0x18: 64-bit code
 ap_tramp_gdt_ptr:
     .word ap_tramp_gdt_ptr - ap_tramp_gdt - 1
     .long ap_tramp_gdt - ap_trampoline_start + 0x8000
@@ -223,6 +226,7 @@ pub fn boot_aps() {
 
     unsafe {
         install_trampoline();
+        TRAMP_INSTALLED.store(true, Ordering::Release);
     }
 
     let mut cpu_num = 1u64; // BSP is CPU 0
@@ -231,6 +235,7 @@ pub fn boot_aps() {
             continue;
         }
         if !boot_one_ap(apic_id, cpu_num) {
+            POSSIBLE_LATE_AP.store(true, Ordering::Release);
             // The low-memory mailbox/stack fields are shared. Never reuse
             // them after a timeout while the old AP might still read them.
             break;
@@ -337,4 +342,8 @@ pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
     loop {
         x86_64::instructions::hlt();
     }
+}
+
+pub fn finalize_trampoline() {
+    super::wx::finalize_trampoline(TRAMP_INSTALLED.load(Ordering::Acquire), POSSIBLE_LATE_AP.load(Ordering::Acquire));
 }

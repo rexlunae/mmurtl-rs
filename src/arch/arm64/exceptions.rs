@@ -191,6 +191,10 @@ unsafe extern "C" fn arm64_exception(kind: u64, frame: *mut TaskContext) -> u64 
                     return sp;
                 }
             }
+            if let Some(fixup) = super::wx::fixup(esr, (*frame).elr, far()) {
+                (*frame).elr = fixup;
+                return sp;
+            }
             kernel_fault("synchronous exception", esr, &*frame)
         }
         // IRQ from kernel or user code
