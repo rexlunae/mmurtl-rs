@@ -115,6 +115,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::security::finalize();
     crate::topology::report();
     super::store_bypass::init();
+    super::predictor::init();
     crate::cfi::init();
     crate::security::report();
 

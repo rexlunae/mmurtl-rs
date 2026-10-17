@@ -42,6 +42,8 @@ extern "C" fn kernel_stack_erase_bottom(frame: u64, user: u64) -> u64 {
 }
 #[no_mangle]
 extern "C" fn kernel_stack_offset(frame: u64, user: u64) -> u64 {
+    #[cfg(target_arch="x86_64")]
+    crate::arch::predictor::apply_current();
     crate::cfi::apply_current();
     if user == 0 || bottom(frame).is_none() { return 0; }
     let offset = crate::random::u64().unwrap_or_else(|_| crate::random::early_u64()) & 0x3f0;

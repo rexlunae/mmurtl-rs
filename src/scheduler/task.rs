@@ -59,7 +59,8 @@ pub const PRIORITY_IDLE: TaskPriority = 31;
 static NEXT_TASK_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
 fn next_task_id() -> u32 {
-    NEXT_TASK_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    NEXT_TASK_ID.fetch_update(core::sync::atomic::Ordering::Relaxed,core::sync::atomic::Ordering::Relaxed,
+        |next|next.checked_add(1)).expect("task identity space exhausted")
 }
 
 // ========================================================================

@@ -59,6 +59,8 @@ pub fn print_banner() {
 pub fn kernel_run() -> ! {
     kptr::init();
     random::report();
+    #[cfg(all(target_arch="x86_64",feature="test-retpoline-landing"))]
+    arch::predictor::test_landing();
     #[cfg(feature="test-heap-oom")]
     memory::heap::oom_self_test();
     #[cfg(feature="test-kfence")]
