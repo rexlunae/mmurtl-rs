@@ -43,3 +43,4 @@ test-pac = []
 test-shadow-overflow = []
 # Regression only: treat all entropy sources as uncredited.
 test-weak-entropy = []
+test-psci-failure = []

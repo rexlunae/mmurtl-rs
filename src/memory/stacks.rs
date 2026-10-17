@@ -137,7 +137,7 @@ pub extern "C" fn kernel_stack_fatal() -> ! {
     loop { crate::arch::halt(); }
 }
 pub fn release(virt: u64, phys: u64) -> u64 {
-    assert!(crate::arch::stacks::interrupts_enabled(), "stack reclamation requires IRQs enabled");
+    assert!(!crate::scheduler::running() || crate::arch::stacks::interrupts_enabled(), "runtime stack reclamation requires IRQs enabled");
     with_mappings(|| {
     assert!(virt >= BASE + 2 * PAGE && virt + SIZE < LIMIT);
     let mut pages = [0; (SIZE / PAGE) as usize];
