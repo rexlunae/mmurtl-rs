@@ -228,3 +228,5 @@ pub mod memory_encryption;
 
 pub mod protection;
 pub mod uaccess;
+
+pub mod cpu_features;

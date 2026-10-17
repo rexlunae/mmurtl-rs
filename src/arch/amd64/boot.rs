@@ -15,6 +15,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     super::set_user_counter_access(false);
     serial::init();
     serial::write_line("[FPU] user FP/SIMD disabled on every CPU (no context switching yet)");
+    let mut args = [0u8; 512];
+    let args_len = super::cpu_features::bootargs(&mut args);
+    let args = args_len.and_then(|len| core::str::from_utf8(&args[..len]).ok())
+        .unwrap_or(option_env!("MMURTL_BOOTARGS").unwrap_or(""));
+    crate::security::init(args.trim_end_matches('\0'));
     crate::print_banner();
     crate::serial::write_line("[TIME] user high-resolution counters: per-task (default off)");
 
@@ -95,6 +100,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::write_str("[INIT] SMP...\n");
     super::smp::boot_aps();
     super::protection::finalize();
+    crate::security::report();
 
     // Initialize PCI and USB
     serial::write_str("[INIT] PCI bus...\n");

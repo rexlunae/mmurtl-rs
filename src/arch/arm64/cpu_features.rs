@@ -1,0 +1,61 @@
+//! Architectural fields and firmware availability, without assuming that
+//! an advertised workaround has already been enabled.
+use core::arch::asm;
+use core::sync::atomic::{AtomicU8, Ordering};
+use crate::security::{SpecCaps, Vulnerability as V, feature as F};
+use super::fdt::PsciConduit;
+static CONDUIT: AtomicU8 = AtomicU8::new(0);
+pub fn set_conduit(conduit: PsciConduit) {
+    CONDUIT.store(match conduit { PsciConduit::None => 0, PsciConduit::Hvc => 1, PsciConduit::Smc => 2 }, Ordering::Release);
+}
+pub fn smccc(function: u64, argument: u64) -> i64 {
+    let mut result = function;
+    unsafe {
+        match CONDUIT.load(Ordering::Acquire) {
+            1 => asm!("hvc #0", inout("x0") result, inlateout("x1") argument => _,
+                inlateout("x2") 0u64 => _, inlateout("x3") 0u64 => _, clobber_abi("C")),
+            2 => asm!("smc #0", inout("x0") result, inlateout("x1") argument => _,
+                inlateout("x2") 0u64 => _, inlateout("x3") 0u64 => _, clobber_abi("C")),
+            _ => return -1,
+        }
+    }
+    result as i64
+}
+pub fn enumerate(cpu: usize) {
+    let mut caps = SpecCaps::default();
+    unsafe {
+        asm!("mrs {}, midr_el1", out(reg) caps.identity, options(nomem, nostack));
+        asm!("mrs {}, id_aa64pfr0_el1", out(reg) caps.raw[0], options(nomem, nostack));
+        asm!("mrs {}, id_aa64pfr1_el1", out(reg) caps.raw[1], options(nomem, nostack));
+        asm!("mrs {}, id_aa64mmfr1_el1", out(reg) caps.raw[2], options(nomem, nostack));
+        asm!("mrs {}, id_aa64isar2_el1", out(reg) caps.raw[3], options(nomem, nostack));
+    }
+    caps.vendor = *b"ARM         ";
+    let csv2 = (caps.raw[0] >> 56) & 15;
+    let csv3 = (caps.raw[0] >> 60) & 15;
+    if csv2 != 0 && csv2 != 15 { caps.not_affected |= V::SpectreV2.bit(); }
+    if csv3 != 0 && csv3 != 15 { caps.not_affected |= V::Meltdown.bit(); }
+    if (caps.raw[0] >> 48) & 15 == 1 { caps.features |= F::DIT; }
+    if matches!((caps.raw[1] >> 4) & 15, 1 | 2) { caps.features |= F::SSBS; }
+    if (caps.raw[2] >> 60) & 15 == 1 { caps.features |= F::ECBHB; }
+    if (caps.raw[3] >> 28) & 15 == 1 { caps.features |= F::CLRBHB; }
+    // Core tables are deliberately small and conservative. Unknown cores
+    // remain unknown unless architectural immunity is advertised.
+    if caps.identity >> 24 & 255 == 0x41 {
+        let part = (caps.identity >> 4) & 0xfff;
+        if matches!(part, 0xd03 | 0xd04 | 0xd05) { // Cortex-A53/A35/A55
+            caps.not_affected |= V::SpectreV2.bit() | V::Bhb.bit();
+        }
+        if matches!(part, 0xd03 | 0xd04 | 0xd05 | 0xd07 | 0xd08 | 0xd09 | 0xd0b) {
+            caps.not_affected |= V::Meltdown.bit(); // known unaffected cores; A75 excluded
+        }
+    }
+    let version = smccc(0x8000_0000, 0);
+    caps.raw[8] = version as u64;
+    for (index, function, feature) in [(4,0x8000_8000,F::WA1),(5,0x8000_7fff,F::WA2),(6,0x8000_3fff,F::WA3)] {
+        let status = if version >= 0x10001 { smccc(0x8000_0001, function) } else { -1 };
+        caps.raw[index] = status as u64;
+        if status >= 0 { caps.features |= feature; }
+    }
+    crate::security::record(cpu, caps);
+}

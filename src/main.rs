@@ -24,6 +24,7 @@ mod fs;
 mod syscall;
 mod userspace;
 mod shell;
+mod security;
 
 use core::panic::PanicInfo;
 
