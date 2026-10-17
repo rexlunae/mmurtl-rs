@@ -237,3 +237,7 @@ pub mod store_bypass;
 
 pub mod entropy;
 pub mod wx;
+
+pub mod microcode;
+
+pub mod microcode_msr;

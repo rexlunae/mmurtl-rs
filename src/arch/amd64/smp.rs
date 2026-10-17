@@ -27,6 +27,8 @@ static CPUS_ONLINE: AtomicUsize = AtomicUsize::new(1);
 static TRAMP_INSTALLED: AtomicBool = AtomicBool::new(false);
 static POSSIBLE_LATE_AP: AtomicBool = AtomicBool::new(false);
 
+static BOOT_RELEASE: AtomicBool = AtomicBool::new(false);
+
 static AP_READY: AtomicBool = AtomicBool::new(false);
 
 pub fn cpus_online() -> usize {
@@ -243,6 +245,8 @@ pub fn boot_aps() {
         cpu_num += 1;
     }
 
+    crate::arch::microcode::seal();
+    BOOT_RELEASE.store(true, Ordering::Release);
     crate::serial::write_str("[SMP] ");
     crate::serial::write_dec(cpus_online() as u64);
     crate::serial::write_str(" CPU(s) online\n");
@@ -312,13 +316,18 @@ fn wait_for_ap(timeout_ms: u32) -> bool {
 /// First Rust code an AP executes. `cpu_num` comes from the mailbox.
 #[no_mangle]
 pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
-    crate::arch::fpu::init();
-    crate::arch::protection::enumerate(cpu_num as usize);
-    crate::arch::set_user_counter_access(false);
-    if !crate::arch::protection::admit_ap(cpu_num as usize, || {
-        crate::arch::gdt::init_ap(cpu_num as usize);
-        crate::arch::interrupts::init_ap();
-        crate::arch::apic::enable_current_cpu();
+    if !crate::security::admit_cpu_prepared(cpu_num as usize, || {
+        if !crate::arch::microcode::apply(cpu_num as usize, || {
+            crate::arch::set_cpu_index(cpu_num as usize);
+            crate::arch::fpu::init();
+            crate::arch::gdt::init_ap(cpu_num as usize);
+            crate::arch::interrupts::init_ap();
+            crate::arch::apic::enable_current_cpu();
+        }) { return false; }
+        crate::arch::protection::enumerate(cpu_num as usize);
+        crate::arch::set_user_counter_access(false);
+        true
+    }, || {
         crate::scheduler::register_ap(cpu_num as usize);
         CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
     }) {
@@ -335,6 +344,7 @@ pub extern "C" fn ap_entry(cpu_num: u64) -> ! {
 
     // Signal the BSP that bring-up is complete
     AP_READY.store(true, Ordering::SeqCst);
+    while !BOOT_RELEASE.load(Ordering::Acquire) { core::hint::spin_loop(); }
 
     // Idle loop — the scheduler switches away from here whenever there is
     // work, and back whenever there isn't.

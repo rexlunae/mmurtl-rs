@@ -24,8 +24,14 @@ pub fn policy() -> Policy { POLICY.get().copied().unwrap_or(Policy::automatic())
 pub fn record(cpu: usize, caps: SpecCaps) { CAPS.lock()[cpu] = Some(caps); }
 pub fn caps(cpu: usize) -> Option<SpecCaps> { CAPS.lock()[cpu] }
 pub fn admit_cpu(cpu: usize, initialize: impl FnOnce()) -> bool {
+    admit_cpu_prepared(cpu, || true, initialize)
+}
+/// Prepare early CPU state under the same seal as final capability capture.
+/// A rejected late CPU cannot install feature-dependent exception gates.
+pub fn admit_cpu_prepared(cpu: usize, prepare: impl FnOnce() -> bool, initialize: impl FnOnce()) -> bool {
     let _guard = ADMISSION.lock();
     if SEALED.load(Ordering::Acquire) { return false; }
+    if !prepare() { return false; }
     assert!(caps(cpu).is_some(), "CPU admitted before capability enumeration");
     initialize();
     ADMITTED.fetch_or(1 << cpu, Ordering::Release);
