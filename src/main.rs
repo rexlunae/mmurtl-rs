@@ -55,6 +55,8 @@ pub fn print_banner() {
 pub fn kernel_run() -> ! {
     kptr::init();
     random::report();
+    #[cfg(all(target_arch = "x86_64", feature = "test-machine-check"))]
+    arch::interrupts::test_machine_check();
     // Driver proof-of-life: block device write/read/verify + ARP round trip
     serial::write_str("[TEST] Storage self-test...\n");
     virtio::blk::self_test();
