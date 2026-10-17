@@ -26,7 +26,7 @@ pub unsafe extern "C" fn seed_boot_guard() {
     #[cfg(target_arch="x86_64")]
     core::arch::naked_asm!(
         "endbr64", "push rbx", "call {draw}",
-        "mov [rip + __stack_chk_guard], rax", "pop rbx", "ret", "int3",
+        "mov [rip + __stack_chk_guard], rax", "pop rbx", "jmp __x86_return_thunk", "int3",
         draw=sym kernel_guard_draw,
     );
     #[cfg(target_arch="aarch64")]
@@ -47,7 +47,7 @@ kernel_smash_bytes:
     mov rcx, 128
     mov al, 0xa5
     rep stosb
-    ret
+    jmp __x86_return_thunk
     int3
 "#);
 #[cfg(all(feature="test-kernel-canary",target_arch="aarch64"))]

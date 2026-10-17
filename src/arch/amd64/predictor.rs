@@ -46,11 +46,13 @@ pub fn init() {
     crate::serial::write_str("[SPEC] indirect branches: compiler retpolines + landing checks; ");
     crate::serial::write_line(match p.mode {Mode::EnhancedIbrs=>"eIBRS",Mode::AutoIbrs=>"AMD AutoIBRS",Mode::LegacyIbrs=>"legacy IBRS entry/exit",Mode::Retpolines=>"hardware IBRS unavailable",Mode::Off=>"optional predictor controls off (compiler hardening retained)"});
     if crate::security::policy().enabled(V::SpectreV2) {
-        if p.sibling_safe {crate::security::installed(V::SpectreV2,"retpolines, RSB fill; STIBP or isolated siblings");}
-        else {crate::security::unavailable(V::SpectreV2,"retpolines active; SMT enabled without common STIBP");}
+        if p.sibling_safe&&p.ibpb {crate::security::installed(V::SpectreV2,"retpolines, RSB fill, user IBPB; STIBP or isolated siblings");}
+        else {crate::security::unavailable(V::SpectreV2,if !p.sibling_safe {"retpolines active; SMT enabled without common STIBP"} else {"kernel retpolines active; user-to-user IBPB unavailable"});}
     }
     if crate::security::policy().enabled(V::Bhi) {crate::security::installed(V::Bhi,if p.set&(1<<10)!=0 {"BHI_DIS_S + IBHF"} else if p.bhb_loop {"Intel long BHB clear + retpolines"} else {"retpolines; return predictor caveats reported separately"});}
+    if intel&&crate::security::policy().enabled(V::Its) {crate::security::installed(V::Its,"retpolines + all near RETs in upper cacheline halves; current microcode required for IBPB");}
     crate::serial::write_line(if p.ibpb {"[SPEC] IBPB: different user task identity on this CPU (root reuse cannot skip barrier)"} else {"[SPEC] IBPB unavailable or disabled; cross-task predictor isolation not guaranteed"});
+    super::returns::report(p);
 }
 pub fn apply_current() {
     let Some(p)=PLAN.get().copied() else {return;};
@@ -72,16 +74,36 @@ pub fn apply_current() {
 pub fn context_switch(cpu:usize,user:bool,task:u32) {
     let Some(p)=PLAN.get().copied() else {return;};
     if user&&LAST_USER[cpu].swap(task,Ordering::Relaxed)!=task&&p.ibpb {
-        unsafe {super::spec_ctrl::write_msr(0x49,1);}
+        unsafe {x86_user_barrier();}
         SWITCH_IBPB.fetch_add(1,Ordering::Relaxed);
         if p.bhb_loop {unsafe {x86_clear_bhb();}}
         if p.ibhf {unsafe {core::arch::asm!(".byte 0xf3,0x48,0x0f,0x1e,0xf8",options(nomem,nostack));}}
     }
     if p.rsb {unsafe {x86_fill_rsb();}SWITCH_RSB.fetch_add(1,Ordering::Relaxed);}
 }
-unsafe extern "C" {fn x86_clear_bhb();fn x86_fill_rsb();}
+unsafe extern "C" {fn x86_clear_bhb();fn x86_fill_rsb();fn x86_user_barrier();}
+pub fn verify_usage()->bool {
+    let Some(p)=PLAN.get() else {return false;};
+    let entry=X86_USER_RSB_COUNT.load(Ordering::Acquire);
+    let switches=SWITCH_RSB.load(Ordering::Acquire);
+    let ibpb=SWITCH_IBPB.load(Ordering::Acquire);
+    crate::serial::write_str("[SPEC TEST] entry RSB fills=");crate::serial::write_dec(entry);
+    crate::serial::write_str(", switch RSB fills=");crate::serial::write_dec(switches);
+    crate::serial::write_str(", user IBPB barriers=");crate::serial::write_dec(ibpb);crate::serial::write_str("\n");
+    (!p.rsb||entry>0&&switches>0)&&(!p.ibpb||ibpb>0)
+}
 core::arch::global_asm!(r#"
 .text
+.global x86_user_barrier
+x86_user_barrier:
+    endbr64
+    mov ecx, 0x49
+    mov eax, 1
+    xor edx, edx
+    wrmsr
+    // Restore the safe return predictor before the first post-IBPB RET.
+    call __x86_untrain_entry
+    jmp __x86_return_thunk
 .global x86_predictor_enter
 x86_predictor_enter:
     endbr64
@@ -119,6 +141,7 @@ x86_predictor_enter:
     or eax, (1 << 21)
     wrmsr
 .Lentry_auto_done:
+    call __x86_untrain_entry
     test esi, esi
     jz .Lentry_history_done
     cmp byte ptr [rip + X86_ENTRY_BHB], 0
@@ -134,7 +157,14 @@ x86_predictor_enter:
     call x86_fill_rsb
     lock inc qword ptr [rip + X86_USER_RSB_COUNT]
 .Lentry_history_done:
-    ret
+    // Resolve admission, CPL and optional-control branches before compiled
+    // kernel code can execute. CPUID is serializing even on older CPUs
+    // where LFENCE dispatch serialization is not guaranteed.
+    push rbx
+    xor eax, eax
+    cpuid
+    pop rbx
+    jmp __x86_return_thunk
     int3
 .global x86_clear_bhb
 x86_clear_bhb:
@@ -145,6 +175,7 @@ x86_clear_bhb:
     .balign 64
 .Lbhb_outer:
     call .Lbhb_inner
+    .balign 32, 0x90
     ret
     int3
     .balign 64
@@ -158,11 +189,12 @@ x86_clear_bhb:
     jnz .Lbhb_jump
     sub ecx, 1
     jnz .Lbhb_outer
+    .balign 32, 0x90
     ret
     int3
 .Lbhb_complete:
     lfence
-    ret
+    jmp __x86_return_thunk
     int3
 .global x86_fill_rsb
 x86_fill_rsb:
@@ -178,7 +210,7 @@ x86_fill_rsb:
     dec ecx
     jnz .Lrsb_push
     add rsp, 512
-    ret
+    jmp __x86_return_thunk
     int3
 "#);
 #[cfg(feature="test-retpoline-landing")]
@@ -220,7 +252,7 @@ __x86_indirect_thunk_\reg:
     jmp .Lprediction_sink\@
 .Linstall_target\@:
     mov [rsp], \reg
-    ret
+    jmp __x86_return_thunk
     int3
 .Llanding_bad\@:
     popfq

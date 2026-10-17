@@ -1240,6 +1240,68 @@ it does not add a task or expose a debug syscall. The x86 probe includes DF=1.
 These checks establish emitted instructions and architectural behavior in
 QEMU, rather than a hardware side-channel proof.
 
+### x86 predictor and return hardening
+
+Kernel/core/alloc use external retpolines and external return thunks on
+the pinned nightly. All ordinary assembly indirect transfers use the same
+gateways. The copied physical AP trampoline's trusted high-address jump
+is the sole boot-only indirect-branch exception. Each register retpoline
+checks the destination's ENDBR64 pad after CFI initialization, including
+on CPUs without CET: transferring through RET must not bypass architectural
+landing checks. The intentional SMEP negative probe uses a separate
+retpoline because SMAP prevents reading its user destination's landing pad.
+
+The admitted common capabilities select eIBRS, AMD AutoIBRS, or legacy
+Intel IBRS on entry/exit. Retpolines remain compiled in for every mode.
+SPEC_CTRL updates preserve SSBD, PSFD and other owners' controls. Each
+admitted CPU installs and reads back its controls before setup completes.
+Shared entries check admission before using MSRs, so parked SMT siblings
+with different capabilities can still receive NMI/MCE. Entry decisions
+end with serializing CPUID before the first Rust call/return. This avoids
+relying on dispatch-serializing LFENCE semantics on an unknown older CPU.
+
+BHI uses BHI_DIS_S plus IBHF when supported, otherwise Intel's long
+12-by-7 BHB clearing sequence on user entry. RSBs are filled on user
+entry and real context switches. IBPB runs when a CPU selects a different
+user task identity; intermediate kernel tasks and recycled address-space
+frames cannot cause the barrier to be skipped. Task IDs never wrap.
+Full IBPB is retained even when SBPB is available; the weaker barrier
+does not substitute for extended IBPB required by the SRSO policy.
+Default SMT isolation or common STIBP protects against sibling training.
+Missing IBPB or unsafe sibling configuration is explicitly reported.
+
+The BSP chooses return code before starting APs and sealing image aliases.
+AMD family 17h uses overlapping MOVABS/safe-RET instructions; family 19h
+uses a 2-MiB-aligned virtual alias with bits 2, 8, 14 and 20 arranged for
+untraining. Two independently allocated pages are filled while NX, their
+physical aliases are sealed RO/NX, then the code is mapped supervisor RX.
+Only then are aligned return gateways patched through their still-writable
+NX image aliases and serialized. APs with a different return class park.
+Every admitted entry and post-IBPB path untrains before its first return.
+Other CPUs retain a generic CALL/LFENCE safe return; CPU-specific guarantees
+remain unknown without the required hardware controls. Intel near RETs,
+including the two internal BHB-sequence returns, occupy upper cacheline
+halves for ITS. Retpolines and IPRED_DIS_S supplement that placement.
+
+Safe RET alone is **not** reported as complete SRSO protection without
+extended-IBPB microcode and sibling isolation. Firmware/microcode currency
+also matters for Intel cross-task IBPB and newer predictor errata. These
+choices follow [Intel's BHI guidance](https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/technical-documentation/branch-history-injection.html),
+[ITS guidance](https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/advisory-guidance/indirect-target-selection.html)
+and [the documented AMD safe-RET requirements](https://www.kernel.org/doc/html/latest/admin-guide/hw-vuln/srso.html).
+`mitigations=off` disables optional controls, fills, IBPB and selected return
+hardening; compiler retpolines, KCFI and landing checks remain baseline.
+
+Host tests cover capability intersection, overrides and return-code layouts.
+`tools/test-x86-predictor.py` checks optimized gateways, entry ordering,
+cacheline placement and the absence of ordinary bare indirect branches or
+returns. QEMU boots cover both AMD layouts, Intel fallback, SMP, SMT,
+UEFI, NMI and actual entry/switch hook counters. Deliberate landing-pad
+and canary corruption still trap. This TCG environment exposes no usable
+IBRS/IBPB/STIBP/AutoIBRS implementation and has no KVM: those hardware paths,
+attack efficacy and hardware syscall/IPC overhead require real-host testing.
+TCG timing cannot quantify the cost of MSRs it does not implement.
+
 ### ARM predictor hardening
 
 Each CPU selects its own VBAR table from its local capabilities and boot

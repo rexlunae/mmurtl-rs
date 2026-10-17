@@ -478,6 +478,8 @@ extern "C" fn user_check_task() -> ! {
         crate::serial::write_str(&line);
     }
 
+    #[cfg(target_arch="x86_64")]
+    {pass &= report("predictor entry/switch hooks executed",crate::arch::predictor::verify_usage());}
     crate::serial::write_str(if pass {
         "[USER] ✓ All userspace checks passed\n"
     } else {

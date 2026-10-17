@@ -87,6 +87,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     crate::kptr::init();
     crate::kptr::report(kernel_main as *const () as u64, super::page_table::physical_memory_offset());
     super::protection::enumerate(0);
+    super::returns::prepare_boot();
     super::memory::protect_image_aliases(boot_info.kernel_addr, boot_info.kernel_len, boot_info.kernel_image_offset);
     super::gdt::protect_bsp_stacks();
     crate::scheduler::debug_lock_self_test();

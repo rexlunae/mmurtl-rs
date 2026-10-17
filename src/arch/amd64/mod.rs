@@ -18,6 +18,7 @@ pub mod serial;
 pub mod smp;
 pub mod cfi;
 pub mod predictor;
+pub mod returns;
 pub mod stacks;
 pub mod syscall;
 pub mod usb;

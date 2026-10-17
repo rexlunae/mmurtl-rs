@@ -30,7 +30,12 @@ def main():
                     if addend in slots:slots[addend].add(destination)
             refs=lambda address:[(op,args) for _,op,args in insns if any(re.search(r'# 0x'+f'{slot:x}'+r'\b',args) for slot in slots[address])]
             assert len(refs(guard))>100,'missing global compiler canary loads'
-            assert sum(op.startswith('call') for op,_ in refs(failure))>100,'missing compiler failure calls'
+            failure_calls=sum(op.startswith('call') for op,_ in refs(failure))
+            for i,(_,op,args) in enumerate(insns):
+                if not op.startswith('mov') or not any(re.search(r'# 0x'+f'{slot:x}'+r'\b',args) for slot in slots[failure]):continue
+                register=re.search(r',\s*%(r\w+)\s*#',args)
+                if register and any(nextop.startswith('call') and '<__x86_indirect_thunk_'+register[1]+'>' in operands for _,nextop,operands in insns[i+1:i+4]):failure_calls+=1
+            assert failure_calls>100,'missing direct or retpoline compiler failure calls'
             assert '%fs:' not in dump,'unexpected uninitialized TLS guard'
         else:
             assert sum('__stack_chk_guard' in args for _,_,args in insns)>100

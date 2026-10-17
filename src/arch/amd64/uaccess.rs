@@ -11,7 +11,7 @@ user_copy_bytes:
     rep movsb
 .Lcopy_fixup:
     mov rax, rcx
-    ret
+    jmp __x86_return_thunk
     int3
     .pushsection .rodata.ex_table, "a"
     .balign 8

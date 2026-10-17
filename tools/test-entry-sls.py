@@ -39,6 +39,11 @@ def main():
                 assert sum(op in ['push','pushq'] for _,op,_ in body[:first])==15,name+' incomplete saved GPR frame'
             lo,hi=symbols['ap_trampoline_start'],symbols['ap_trampoline_end']
             for i,(address,op,args) in enumerate(insns):
+                # LLVM return-thunk lowering uses direct jumps. Their final
+                # RET is checked below; no indirect transfer occurs here.
+                if op in ['jmp','jmpq'] and '<__x86_return_thunk>' in args:
+                    checked+=1
+                    continue
                 transfer=op in ['ret','retq','iret','iretq','lret','lretq'] or op in ['jmp','jmpq'] and '*' in args
                 if not transfer: continue
                 if lo<=address<hi:

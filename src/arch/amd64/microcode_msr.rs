@@ -9,10 +9,10 @@ ucode_rdmsr:
     orq %rdx, %rax
     movq %rax, (%rsi)
     xorl %eax, %eax
-    retq
+    jmp __x86_return_thunk
     int3
 2:  movl $1, %eax
-    retq
+    jmp __x86_return_thunk
     int3
 ucode_wrmsr:
     movl %edi, %ecx
@@ -21,20 +21,20 @@ ucode_wrmsr:
     shrq $32, %rdx
 3:  wrmsr
     xorl %eax, %eax
-    retq
+    jmp __x86_return_thunk
     int3
 4:  movl $1, %eax
-    retq
+    jmp __x86_return_thunk
     int3
 .global ucode_gp_probe
 ucode_gp_probe:
     movw $0xfff8, %ax
 5:  movw %ax, %ds
     xorl %eax, %eax
-    retq
+    jmp __x86_return_thunk
     int3
 6:  movl $1, %eax
-    retq
+    jmp __x86_return_thunk
     int3
 .pushsection .rodata.ucode_ex_table, "a"
 .balign 8
