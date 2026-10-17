@@ -28,11 +28,11 @@ static BASE: AtomicU64 = AtomicU64::new(0x0900_0000);
 static RX_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
 fn rd(off: u64) -> u32 {
-    unsafe { core::ptr::read_volatile((BASE.load(Ordering::Relaxed) + off) as *const u32) }
+    unsafe { core::ptr::read_volatile(super::memory::phys_to_virt(BASE.load(Ordering::Relaxed) + off).cast::<u32>()) }
 }
 
 fn wr(off: u64, v: u32) {
-    unsafe { core::ptr::write_volatile((BASE.load(Ordering::Relaxed) + off) as *mut u32, v) }
+    unsafe { core::ptr::write_volatile(super::memory::phys_to_virt(BASE.load(Ordering::Relaxed) + off).cast::<u32>(), v) }
 }
 
 /// Use the PL011 at `base` (call before `crate::serial::init`)

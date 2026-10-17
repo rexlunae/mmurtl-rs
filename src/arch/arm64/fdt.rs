@@ -161,13 +161,13 @@ pub fn is_valid(addr: u64) -> bool {
     if addr == 0 || addr % 4 != 0 {
         return false;
     }
-    let hdr = unsafe { core::slice::from_raw_parts(addr as *const u8, 8) };
+    let hdr = unsafe { core::slice::from_raw_parts(super::memory::boot_pointer(addr) as *const u8, 8) };
     be32(hdr, 0) == FDT_MAGIC
 }
 
 /// Total size of the blob at `addr`
 pub fn total_size(addr: u64) -> u64 {
-    let hdr = unsafe { core::slice::from_raw_parts(addr as *const u8, 8) };
+    let hdr = unsafe { core::slice::from_raw_parts(super::memory::boot_pointer(addr) as *const u8, 8) };
     be32(hdr, 4) as u64
 }
 
@@ -289,7 +289,7 @@ fn translate(b: &[u8], stack: &[Node], depth: usize, mut addr: u64) -> u64 {
 pub fn parse(addr: u64) -> MachineInfo {
     let mut info = MachineInfo::qemu_virt_defaults();
     let size = total_size(addr) as usize;
-    let b = unsafe { core::slice::from_raw_parts(addr as *const u8, size) };
+    let b = unsafe { core::slice::from_raw_parts(super::memory::boot_pointer(addr) as *const u8, size) };
     let off_struct = be32(b, 8) as usize;
     let off_strings = be32(b, 12) as usize;
     let off_rsvmap = be32(b, 16) as usize;

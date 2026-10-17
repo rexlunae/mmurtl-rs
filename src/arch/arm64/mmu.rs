@@ -25,6 +25,7 @@ const ENTRIES: usize = 512;
 struct Table([u64; ENTRIES]);
 
 /// Level-0 table (512 GiB per entry)
+static mut EMPTY_L0: Table = Table([0; ENTRIES]);
 static mut L0: Table = Table([0; ENTRIES]);
 /// Level-1 table for VA [0, 512 GiB) (1 GiB per entry)
 static mut L1: Table = Table([0; ENTRIES]);
@@ -59,11 +60,13 @@ const MAIR: u64 = 0x00 | (0xFF << 8) | (0x44 << 16);
 const SCTLR: u64 = (1 << 19) | 0x30D0_0800 | (1 << 0) | (1 << 2) | (1 << 3) | (1 << 12);
 
 /// Register values every CPU loads to share the boot CPU's address space
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MmuRegs {
     pub mair: u64,
     pub tcr: u64,
     pub ttbr0: u64,
+    pub ttbr1: u64,
     pub sctlr: u64,
 }
 
@@ -77,7 +80,9 @@ fn tcr_value() -> u64 {
         | (0b11 << 12) // SH0: inner shareable
         | (0b00 << 14) // TG0: 4 KiB
         | (16 << 16) // T1SZ
-        | (1 << 23) // EPD1: no TTBR1 walks
+        | (0b01 << 24) // IRGN1: WB RA/WA
+        | (0b01 << 26) // ORGN1: WB RA/WA
+        | (0b11 << 28) // SH1: inner shareable
         | (0b10 << 30) // TG1: 4 KiB
         | (ips << 32)
 }
@@ -86,7 +91,8 @@ pub fn regs() -> MmuRegs {
     MmuRegs {
         mair: MAIR,
         tcr: tcr_value(),
-        ttbr0: core::ptr::addr_of!(L0) as u64,
+        ttbr0: kernel_root(), // boot-only identity alias
+        ttbr1: kernel_root(),
         sctlr: SCTLR,
     }
 }
@@ -99,7 +105,7 @@ unsafe fn l2_for(gib: u64) -> Option<*mut u64> {
     let l1 = &mut (*core::ptr::addr_of_mut!(L1)).0;
     let e = l1[gib as usize];
     if e & VALID != 0 {
-        return if e & TABLE != 0 { Some((e & ADDR_MASK) as *mut u64) } else { None };
+        return if e & TABLE != 0 { Some(table_pointer(e & ADDR_MASK)) } else { None };
     }
     let used = &mut *core::ptr::addr_of_mut!(L2_USED);
     if *used >= L2_POOL {
@@ -110,7 +116,7 @@ unsafe fn l2_for(gib: u64) -> Option<*mut u64> {
     for i in 0..ENTRIES {
         core::ptr::write_volatile(t.add(i), 0);
     }
-    core::ptr::write_volatile(&mut l1[gib as usize], t as u64 | TABLE | VALID);
+    core::ptr::write_volatile(&mut l1[gib as usize], super::memory::virt_to_phys(t as u64) | TABLE | VALID);
     Some(t)
 }
 
@@ -162,13 +168,13 @@ unsafe fn protect_kernel_image() {
             *used += 1;
             let base = pa & !(MIB2 - 1);
             for i in 0..ENTRIES { table.add(i).write_volatile((base + i as u64 * 4096) | RAM_ATTRS | TABLE); }
-            d = table as u64 | VALID | TABLE;
+            d = super::memory::virt_to_phys(table as u64) | VALID | TABLE;
             slot.write_volatile(d);
         }
         let mut attrs = RAM_ATTRS | TABLE;
         if text.contains(&pa) { attrs = (attrs | AP_RO_BIT) & !PXN; }
         else if ro.contains(&pa) || relro.contains(&pa) { attrs |= AP_RO_BIT; }
-        ((d & ADDR_MASK) as *mut u64).add(((pa >> 12) & 511) as usize).write_volatile(pa | attrs);
+        table_pointer(d & ADDR_MASK).add(((pa >> 12) & 511) as usize).write_volatile(pa | attrs);
     }
 }
 
@@ -176,7 +182,7 @@ unsafe fn protect_kernel_image() {
 pub fn audit_kernel_wx() {
     unsafe fn visit(table: u64, level: u32, read_only: bool, nx: bool) {
         for i in 0..ENTRIES {
-            let d = (table as *const u64).add(i).read_volatile();
+            let d = table_pointer(table).add(i).read_volatile();
             if d & VALID == 0 { continue; }
             if level < 3 && d & TABLE != 0 {
                 visit(d & ADDR_MASK, level + 1, read_only || d & (1 << 62) != 0, nx || d & (1 << 59) != 0);
@@ -204,7 +210,7 @@ pub fn audit_kernel_wx() {
 /// Once, on the boot CPU, with the MMU off.
 pub unsafe fn early_init(ram: &[(u64, u64)], devices: &[(u64, u64)]) -> heapless::Vec<(u64, u64), 8> {
     let l0 = &mut *core::ptr::addr_of_mut!(L0);
-    l0.0[0] = core::ptr::addr_of!(L1) as u64 | TABLE | VALID;
+    l0.0[0] = super::memory::virt_to_phys(core::ptr::addr_of!(L1) as u64) | TABLE | VALID;
 
     // Devices first: every block a region touches. A RAM range that
     // overlaps a peripheral block (a firmware-reported size covering the
@@ -234,7 +240,6 @@ pub unsafe fn early_init(ram: &[(u64, u64)], devices: &[(u64, u64)]) -> heapless
     }
 
     protect_kernel_image();
-    enable(&regs());
     mapped
 }
 
@@ -247,6 +252,7 @@ pub unsafe fn enable(r: &MmuRegs) {
         "msr mair_el1, {mair}",
         "msr tcr_el1, {tcr}",
         "msr ttbr0_el1, {ttbr0}",
+        "msr ttbr1_el1, {ttbr1}",
         "isb",
         "tlbi vmalle1",
         "dsb ish",
@@ -259,6 +265,7 @@ pub unsafe fn enable(r: &MmuRegs) {
         mair = in(reg) r.mair,
         tcr = in(reg) r.tcr,
         ttbr0 = in(reg) r.ttbr0,
+        ttbr1 = in(reg) r.ttbr1,
         sctlr = in(reg) r.sctlr,
     );
 }
@@ -323,7 +330,7 @@ static ACTIVE_ROOT: [core::sync::atomic::AtomicU64; crate::scheduler::MAX_CPUS] 
     [const { core::sync::atomic::AtomicU64::new(0) }; crate::scheduler::MAX_CPUS];
 
 fn kernel_root() -> u64 {
-    core::ptr::addr_of!(L0) as u64
+    super::memory::virt_to_phys(core::ptr::addr_of!(L0) as u64)
 }
 
 fn alloc_zeroed_frame() -> Option<u64> {
@@ -339,24 +346,13 @@ fn free_frame(pa: u64) {
 /// map (every slot but the user window's) with an empty user window.
 /// Returns the table's physical address.
 pub fn new_address_space() -> Result<u64, &'static str> {
-    let root = alloc_zeroed_frame().ok_or("out of memory for a page table")?;
-    unsafe {
-        let kernel = kernel_root() as *const u64;
-        let new = root as *mut u64;
-        for i in 0..ENTRIES {
-            if i != USER_L0_SLOT {
-                *new.add(i) = *kernel.add(i);
-            }
-        }
-        asm!("dsb ishst");
-    }
-    Ok(root)
+    alloc_zeroed_frame().ok_or("out of memory for a page table")
 }
 
 /// Walk `root` to the level-3 entry for `va`, allocating tables if
 /// `create`
 unsafe fn walk(root: u64, va: u64, create: bool) -> Option<*mut u64> {
-    let mut table = root as *mut u64;
+    let mut table = table_pointer(root);
     for level in 0..3 {
         let e = table.add(index(va, level));
         let d = core::ptr::read_volatile(e);
@@ -367,11 +363,11 @@ unsafe fn walk(root: u64, va: u64, create: bool) -> Option<*mut u64> {
             let pa = alloc_zeroed_frame()?;
             asm!("dsb ishst");
             core::ptr::write_volatile(e, pa | TABLE | VALID);
-            table = pa as *mut u64;
+            table = table_pointer(pa);
         } else if d & TABLE == 0 {
             return None; // a block mapping: not a user page
         } else {
-            table = (d & ADDR_MASK) as *mut u64;
+            table = table_pointer(d & ADDR_MASK);
         }
     }
     Some(table.add(index(va, 3)))
@@ -401,7 +397,7 @@ pub fn query_page(va: u64) -> Option<(bool, bool)> {
     let root: u64;
     unsafe {
         asm!("mrs {}, ttbr0_el1", out(reg) root);
-        let mut table = (root & ADDR_MASK) as *const u64;
+        let mut table = table_pointer(root & ADDR_MASK);
         let mut user = true;
         let mut writable = true;
         for level in 0..4 {
@@ -412,7 +408,7 @@ pub fn query_page(va: u64) -> Option<(bool, bool)> {
             }
             user &= desc & (1 << 61) == 0; // APTable[0]: no EL0
             writable &= desc & (1 << 62) == 0; // APTable[1]: read-only
-            table = (desc & ADDR_MASK) as *const u64;
+            table = table_pointer(desc & ADDR_MASK);
         }
         None
     }
@@ -424,7 +420,7 @@ pub fn query_page(va: u64) -> Option<(bool, bool)> {
 pub fn free_address_space(root: u64) -> usize {
     unsafe fn free_level(t: u64, level: u32, freed: &mut usize) {
         for i in 0..ENTRIES {
-            let d = core::ptr::read_volatile((t as *const u64).add(i));
+            let d = core::ptr::read_volatile(table_pointer(t).add(i));
             if d & VALID == 0 {
                 continue;
             }
@@ -437,7 +433,7 @@ pub fn free_address_space(root: u64) -> usize {
     }
     let mut freed = 0;
     unsafe {
-        let top = core::ptr::read_volatile((root as *const u64).add(USER_L0_SLOT));
+        let top = core::ptr::read_volatile(table_pointer(root).add(USER_L0_SLOT));
         if top & VALID != 0 {
             free_level(top & ADDR_MASK, 1, &mut freed);
             free_frame(top & ADDR_MASK);
@@ -452,7 +448,7 @@ pub fn free_address_space(root: u64) -> usize {
 /// isn't already, discarding this CPU's stale translations (no ASIDs yet)
 pub fn switch_address_space(cpu: usize, root: u64) {
     use core::sync::atomic::Ordering;
-    let target = if root == 0 { kernel_root() } else { root };
+    let target = if root == 0 { empty_root() } else { root };
     if ACTIVE_ROOT[cpu].load(Ordering::Relaxed) == target {
         return;
     }
@@ -485,4 +481,12 @@ pub unsafe fn test_user_physical(root: u64, va: u64) -> u64 {
     let d = walk(root, va, false).expect("test image page").read_volatile();
     assert!(d & VALID != 0);
     (d & ADDR_MASK) | (va & 4095)
+}
+
+fn table_pointer(pa: u64) -> *mut u64 { super::memory::boot_pointer(pa).cast() }
+fn empty_root() -> u64 { super::memory::virt_to_phys(core::ptr::addr_of!(EMPTY_L0) as u64) }
+/// Called first after each physical trampoline has branched high.
+pub fn retire_identity() {
+    let root = empty_root();
+    unsafe { asm!("msr ttbr0_el1, {}", "isb", "tlbi vmalle1", "dsb ish", "isb", in(reg) root); }
 }

@@ -38,12 +38,12 @@ pub fn init(ram: &[(u64, u64)], memreserve: &[(u64, u64)], dtb: u64, kernel_star
             r += 1;
         }
     }
-    crate::memory::init(&usable[..n], &reserved[..r], kernel_end);
+    crate::memory::init(&usable[..n], &reserved[..r], virt_to_phys(kernel_end));
 }
 
-/// Physical → kernel virtual: RAM and devices are identity-mapped
+/// Kernel RAM/device window in TTBR1.
 pub fn phys_to_virt(phys: u64) -> *mut u8 {
-    phys as *mut u8
+    (phys + PHYS_OFFSET) as *mut u8
 }
 
 /// Carve the initial heap from contiguous physical frames
@@ -51,16 +51,28 @@ pub fn heap_init(fa: &mut FrameAllocator) -> (u64, u64) {
     let pa = fa
         .allocate_zeroed_contiguous((HEAP_INITIAL / FRAME_SIZE) as usize)
         .expect("no contiguous RAM for the kernel heap");
-    (pa, pa + HEAP_INITIAL)
+    (pa + PHYS_OFFSET, pa + PHYS_OFFSET + HEAP_INITIAL)
 }
 
 /// Grow the heap in place by claiming the frames right after it. Called
 /// under the frame-allocator lock; None if they're taken (heap exhausted).
 pub fn heap_extend(end: u64, needed: u64, fa: &mut FrameAllocator) -> Option<u64> {
     let grow = (needed + HEAP_GROW_CHUNK - 1) / HEAP_GROW_CHUNK * HEAP_GROW_CHUNK;
-    fa.claim_range(end, (grow / FRAME_SIZE) as usize).then_some(grow)
+    fa.claim_range(virt_to_phys(end), (grow / FRAME_SIZE) as usize).then_some(grow)
 }
 
 /// The kernel may touch user memory directly (PAN is not enabled)
 pub fn user_access_begin() {}
 pub fn user_access_end() {}
+
+/// 48-bit upper translation regime, independent of the physical image address.
+pub const PHYS_OFFSET: u64 = 0xffff_0000_0000_0000;
+pub fn virt_to_phys(va: u64) -> u64 {
+    if va >= PHYS_OFFSET { va - PHYS_OFFSET } else { va }
+}
+/// Page-table setup runs before the high jump; runtime walks run after it.
+pub fn boot_pointer(pa: u64) -> *mut u8 {
+    let pc: u64;
+    unsafe { core::arch::asm!("adr {}, .", out(reg) pc, options(nomem, nostack)); }
+    if pc >= PHYS_OFFSET { phys_to_virt(pa) } else { pa as *mut u8 }
+}

@@ -40,6 +40,7 @@ struct ApBoot {
     mair: u64,
     tcr: u64,
     ttbr0: u64,
+    ttbr1: u64,
     sctlr: u64,
 }
 
@@ -57,8 +58,8 @@ fn psci_call(conduit: PsciConduit, func: u64, a1: u64, a2: u64, a3: u64) -> i64 
     let mut r = func;
     unsafe {
         match conduit {
-            PsciConduit::Hvc => asm!("hvc #0", inout("x0") r, in("x1") a1, in("x2") a2, in("x3") a3),
-            PsciConduit::Smc => asm!("smc #0", inout("x0") r, in("x1") a1, in("x2") a2, in("x3") a3),
+            PsciConduit::Hvc => asm!("hvc #0", inout("x0") r, inlateout("x1") a1 => _, inlateout("x2") a2 => _, inlateout("x3") a3 => _, clobber_abi("C")),
+            PsciConduit::Smc => asm!("smc #0", inout("x0") r, inlateout("x1") a1 => _, inlateout("x2") a2 => _, inlateout("x3") a3 => _, clobber_abi("C")),
             PsciConduit::None => return -1,
         }
     }
@@ -107,6 +108,7 @@ pub fn boot_secondaries(info: &MachineInfo) {
             mair: regs.mair,
             tcr: regs.tcr,
             ttbr0: regs.ttbr0,
+            ttbr1: regs.ttbr1,
             sctlr: regs.sctlr,
         }));
         clean_dcache(boot as *const ApBoot as u64, core::mem::size_of::<ApBoot>());
@@ -115,20 +117,20 @@ pub fn boot_secondaries(info: &MachineInfo) {
         let release = info.cpu_release[i];
         if release != 0 {
             // Spin table: hand over the context, then the entry point
-            AP_SPIN_BOOT.store(boot as *const ApBoot as u64, Ordering::SeqCst);
+            AP_SPIN_BOOT.store(super::memory::virt_to_phys(boot as *const ApBoot as u64), Ordering::SeqCst);
             clean_dcache(AP_SPIN_BOOT.as_ptr() as u64, 8);
             unsafe {
-                core::ptr::write_volatile(release as *mut u64, secondary_spin_entry as *const () as u64);
+                core::ptr::write_volatile(super::memory::phys_to_virt(release).cast::<u64>(), super::memory::virt_to_phys(secondary_spin_entry as *const () as u64));
             }
-            clean_dcache(release, 8);
+            clean_dcache(super::memory::phys_to_virt(release) as u64, 8);
             unsafe { asm!("sev") };
         } else {
             let r = psci_call(
                 info.psci,
                 PSCI_CPU_ON,
                 target,
-                secondary_start as *const () as u64,
-                boot as *const ApBoot as u64,
+                super::memory::virt_to_phys(secondary_start as *const () as u64),
+                super::memory::virt_to_phys(boot as *const ApBoot as u64),
             );
             if r != 0 {
                 crate::serial::write_str("[SMP] PSCI CPU_ON failed for MPIDR 0x");
@@ -161,6 +163,7 @@ pub fn boot_secondaries(info: &MachineInfo) {
 /// First Rust code on a secondary CPU (MMU on, SP = its boot stack)
 #[no_mangle]
 extern "C" fn arm64_secondary_main(cpu: u64) -> ! {
+    super::mmu::retire_identity();
     super::cpu_features::enumerate(cpu as usize);
     if !crate::security::admit_cpu(cpu as usize, || {
         super::exceptions::init();

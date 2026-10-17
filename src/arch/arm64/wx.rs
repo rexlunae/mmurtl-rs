@@ -81,16 +81,17 @@ pub fn self_test() {
         crate::serial::write_line("[MMU] NX probes skipped: out of memory"); return;
     };
     unsafe {
-        (frame as *mut u32).write_volatile(0xd65f03c0); // RET
-        super::mmu::sync_icache(frame as *const u8, 4);
-        deny_execute(frame);
+        let alias = super::memory::phys_to_virt(frame);
+        alias.cast::<u32>().write_volatile(0xd65f03c0); // RET
+        super::mmu::sync_icache(alias, 4);
+        deny_execute(alias as u64);
     }
     crate::memory::heap::with_frame_allocator(|fa| fa.deallocate_frame(frame));
     // User executable pages retain a non-executable identity alias.
     let code = 0xd65f03c0u32.to_le_bytes();
     if let Ok(image) = crate::memory::user::load_program(&code) {
         let alias = unsafe { super::mmu::test_user_physical(image.space, image.entry) };
-        unsafe { deny_execute(alias); }
+        unsafe { deny_execute(super::memory::phys_to_virt(alias) as u64); }
         crate::memory::user::release(image.space, image.slot);
     } else {
         crate::serial::write_line("[MMU] ret2dir probe skipped: out of memory"); return;

@@ -61,19 +61,19 @@ const TYPER_VLPIS: u64 = 1 << 1;
 const TYPER_LAST: u64 = 1 << 4;
 
 fn rd32(addr: u64) -> u32 {
-    unsafe { core::ptr::read_volatile(addr as *const u32) }
+    unsafe { core::ptr::read_volatile(super::memory::phys_to_virt(addr).cast::<u32>()) }
 }
 fn wr32(addr: u64, v: u32) {
-    unsafe { core::ptr::write_volatile(addr as *mut u32, v) }
+    unsafe { core::ptr::write_volatile(super::memory::phys_to_virt(addr).cast::<u32>(), v) }
 }
 fn wr8(addr: u64, v: u8) {
-    unsafe { core::ptr::write_volatile(addr as *mut u8, v) }
+    unsafe { core::ptr::write_volatile(super::memory::phys_to_virt(addr).cast::<u8>(), v) }
 }
 fn rd64(addr: u64) -> u64 {
-    unsafe { core::ptr::read_volatile(addr as *const u64) }
+    unsafe { core::ptr::read_volatile(super::memory::phys_to_virt(addr).cast::<u64>()) }
 }
 fn wr64(addr: u64, v: u64) {
-    unsafe { core::ptr::write_volatile(addr as *mut u64, v) }
+    unsafe { core::ptr::write_volatile(super::memory::phys_to_virt(addr).cast::<u64>(), v) }
 }
 
 fn gicd() -> u64 {
