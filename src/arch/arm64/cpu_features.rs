@@ -23,6 +23,7 @@ pub fn smccc(function: u64, argument: u64) -> i64 {
     crate::security::smccc_status(result)
 }
 pub fn enumerate(cpu: usize) {
+    super::mmu::record_asid_bits(cpu);
     let mut caps = SpecCaps::default();
     unsafe {
         asm!("mrs {}, midr_el1", out(reg) caps.identity, options(nomem, nostack));

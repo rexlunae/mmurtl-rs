@@ -437,6 +437,7 @@ extern "C" fn arm64_high_main(state: *const BootState) -> ! {
     crate::serial::write_str("[INIT] SMP...\n");
     super::smp::boot_secondaries(&info);
     crate::security::finalize();
+    super::mmu::finalize_asids();
     super::store_bypass::init();
     crate::security::report();
 

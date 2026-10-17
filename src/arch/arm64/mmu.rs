@@ -46,6 +46,7 @@ const SH_INNER: u64 = 0b11 << 8;
 const AF: u64 = 1 << 10;
 const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
+const NG: u64 = 1 << 11;
 const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 
 const GIB: u64 = 1 << 30;
@@ -346,7 +347,14 @@ fn free_frame(pa: u64) {
 /// map (every slot but the user window's) with an empty user window.
 /// Returns the table's physical address.
 pub fn new_address_space() -> Result<u64, &'static str> {
-    alloc_zeroed_frame().ok_or("out of memory for a page table")
+    let mut root = alloc_zeroed_frame().ok_or("out of memory for a page table")?;
+    if root == 0 { // zero is reserved by the portable API for kernel tasks
+        root = match alloc_zeroed_frame() { Some(pa) => pa, None => { free_frame(0); return Err("out of memory for a nonzero root"); } };
+        free_frame(0);
+    }
+    let registered = crate::arch::without_interrupts(|| ASIDS.lock().register(root));
+    if !registered { free_frame(root); return Err("address-space registry full"); }
+    Ok(root)
 }
 
 /// Walk `root` to the level-3 entry for `va`, allocating tables if
@@ -375,7 +383,7 @@ unsafe fn walk(root: u64, va: u64, create: bool) -> Option<*mut u64> {
 
 /// Map one 4 KiB user page `va` → `pa` in address space `root`
 pub fn map_user_page(root: u64, va: u64, pa: u64, writable: bool, executable: bool) -> Result<(), &'static str> {
-    let mut desc = (pa & ADDR_MASK) | ATTR_NORMAL | SH_INNER | AF | PXN | TABLE | VALID;
+    let mut desc = (pa & ADDR_MASK) | ATTR_NORMAL | SH_INNER | AF | PXN | NG | TABLE | VALID;
     desc |= if writable { AP_EL0_RW } else { AP_RO_ALL };
     if !executable {
         desc |= UXN;
@@ -418,6 +426,11 @@ pub fn query_page(va: u64) -> Option<(bool, bool)> {
 /// window, the window's tables, and the root. Returns frames freed. The
 /// space must not be loaded on any CPU.
 pub fn free_address_space(root: u64) -> usize {
+    crate::arch::without_interrupts(|| {
+        let mut pool = ASIDS.lock();
+        if let Some(tag) = pool.tag(root) { invalidate_tag(tag); }
+        pool.release(root);
+    });
     unsafe fn free_level(t: u64, level: u32, freed: &mut usize) {
         for i in 0..ENTRIES {
             let d = core::ptr::read_volatile(table_pointer(t).add(i));
@@ -448,21 +461,17 @@ pub fn free_address_space(root: u64) -> usize {
 /// isn't already, discarding this CPU's stale translations (no ASIDs yet)
 pub fn switch_address_space(cpu: usize, root: u64) {
     use core::sync::atomic::Ordering;
-    let target = if root == 0 { empty_root() } else { root };
-    if ACTIVE_ROOT[cpu].load(Ordering::Relaxed) == target {
-        return;
-    }
-    unsafe {
-        asm!(
-            "msr ttbr0_el1, {}",
-            "isb",
-            "tlbi vmalle1",
-            "dsb nsh",
-            "isb",
-            in(reg) target,
-        );
-    }
-    ACTIVE_ROOT[cpu].store(target, Ordering::Relaxed);
+    crate::arch::without_interrupts(|| {
+        apply_asid_width();
+        if ACTIVE_ROOT[cpu].load(Ordering::Acquire) == root { return; }
+        let mut pool = ASIDS.lock();
+        let (tag, flush) = pool.activate(cpu, root);
+        if flush { flush_all(); }
+        let tag = tag.expect("no ASIDs available for active CPUs");
+        let target = (if root == 0 { empty_root() } else { root }) | ((tag as u64) << 48);
+        unsafe { asm!("msr ttbr0_el1, {}", "isb", in(reg) target); }
+        ACTIVE_ROOT[cpu].store(root, Ordering::Release);
+    });
 }
 
 /// Boot self-test only: caller owns this inactive-on-other-CPUs space.
@@ -472,7 +481,7 @@ pub unsafe fn remove_test_page(root: u64, va: u64) -> u64 {
     let desc = entry.read_volatile();
     assert!(desc & VALID != 0 && desc & AP_EL0_BIT != 0);
     entry.write_volatile(0);
-    asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb");
+    invalidate_space(root);
     desc & ADDR_MASK
 }
 
@@ -489,4 +498,50 @@ fn empty_root() -> u64 { super::memory::virt_to_phys(core::ptr::addr_of!(EMPTY_L
 pub fn retire_identity() {
     let root = empty_root();
     unsafe { asm!("msr ttbr0_el1, {}", "isb", "tlbi vmalle1", "dsb ish", "isb", in(reg) root); }
+}
+
+// ASID 0 always names an empty user translation regime for kernel tasks.
+static ASIDS: spin::Mutex<super::asid_pool::Asids<128, { crate::scheduler::MAX_CPUS }>> =
+    spin::Mutex::new(super::asid_pool::Asids::new(8));
+static ASID_WIDTH: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(8);
+static CPU_ASID_BITS: [core::sync::atomic::AtomicU8; crate::scheduler::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU8::new(8) }; crate::scheduler::MAX_CPUS];
+
+pub fn record_asid_bits(cpu: usize) {
+    let mmfr0: u64;
+    unsafe { asm!("mrs {}, id_aa64mmfr0_el1", out(reg) mmfr0, options(nomem, nostack)); }
+    CPU_ASID_BITS[cpu].store(if (mmfr0 >> 4) & 15 == 2 { 16 } else { 8 }, core::sync::atomic::Ordering::Release);
+}
+fn apply_asid_width() {
+    let bits = ASID_WIDTH.load(core::sync::atomic::Ordering::Acquire);
+    let old: u64;
+    unsafe { asm!("mrs {}, tcr_el1", out(reg) old); }
+    let new = if bits == 16 { old | (1 << 36) } else { old & !(1 << 36) };
+    if old != new {
+        unsafe { asm!("dsb ish", "msr tcr_el1, {}", "isb", "tlbi vmalle1", "dsb ish", "isb", in(reg) new); }
+    }
+}
+fn flush_all() { unsafe { asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb"); } }
+fn invalidate_tag(tag: u16) {
+    unsafe { asm!("dsb ishst", "tlbi aside1is, {}", "dsb ish", "isb", in(reg) (tag as u64) << 48); }
+}
+fn invalidate_space(root: u64) {
+    crate::arch::without_interrupts(|| {
+        if let Some(tag) = ASIDS.lock().tag(root) { invalidate_tag(tag); }
+    });
+}
+pub fn finalize_asids() {
+    use core::sync::atomic::Ordering;
+    let admitted = crate::security::freeze();
+    let bits = (0..crate::scheduler::MAX_CPUS).filter(|cpu| admitted & (1u64 << cpu) != 0)
+        .map(|cpu| CPU_ASID_BITS[cpu].load(Ordering::Acquire)).min().unwrap_or(8);
+    crate::arch::without_interrupts(|| {
+        ASIDS.lock().configure(bits);
+        ASID_WIDTH.store(bits, Ordering::Release);
+        apply_asid_width(); flush_all();
+    });
+    crate::serial::write_str("[MMU] kernel at 0x");
+    crate::serial::write_hex(core::ptr::addr_of!(L0) as u64);
+    crate::serial::write_str(" (TTBR1), user-only TTBR0 with "); crate::serial::write_dec(bits as u64);
+    crate::serial::write_line("-bit ASIDs; user nG, TBI0 off");
 }
