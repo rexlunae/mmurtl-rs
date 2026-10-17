@@ -8,6 +8,11 @@ pub enum Bhb { Off, Unaffected, ExceptionClear, ClearInstruction, Loop(u16), Fir
 pub struct Plan { pub v2: V2, pub bhb: Bhb }
 impl Plan {
     pub fn v2_safe(self) -> bool { matches!(self.v2, V2::Unaffected | V2::Firmware1 | V2::Firmware3) }
+    /// No root cache or scheduling history can suppress a user-return barrier.
+    pub fn return_function(self, user: bool) -> Option<u64> {
+        if !user { return None; }
+        match self.v2 { V2::Firmware1 => Some(0x8000_8000), V2::Firmware3 => Some(0x8000_3fff), _ => None }
+    }
     pub fn bhb_safe(self) -> bool { self.v2_safe() && !matches!(self.bhb, Bhb::Off | Bhb::Unavailable) }
 }
 pub fn loop_count(midr: u64) -> Option<u16> {
@@ -22,21 +27,23 @@ pub fn loop_count(midr: u64) -> Option<u16> {
     }
 }
 pub fn select(caps: SpecCaps, policy: Policy, conduit: bool) -> Plan {
+    let force_v2 = policy.overrides[V::SpectreV2 as usize] == Override::On;
+    let mut v2 = if !policy.enabled(V::SpectreV2) { V2::Off }
+        else if caps.not_affected & V::SpectreV2.bit() != 0 && !force_v2 { V2::Unaffected }
+        else if conduit && caps.features & F::WA1 != 0 { V2::Firmware1 }
+        else if conduit && caps.features & F::WA3 != 0 { V2::Firmware3 }
+        else if caps.not_affected & V::SpectreV2.bit() != 0 { V2::Unaffected }
+        else { V2::Unavailable };
     let force_bhb = policy.overrides[V::Bhb as usize] == Override::On;
     let bhb = if !policy.enabled(V::Bhb) { Bhb::Off }
         else if caps.not_affected & V::Bhb.bit() != 0 && !force_bhb { Bhb::Unaffected }
+        else if v2 == V2::Firmware3 { Bhb::Firmware3 }
         else if caps.features & F::ECBHB != 0 { Bhb::ExceptionClear }
         else if caps.features & F::CLRBHB != 0 { Bhb::ClearInstruction }
         else if let Some(k) = loop_count(caps.identity) { Bhb::Loop(k) }
         else if conduit && caps.features & F::WA3 != 0 { Bhb::Firmware3 }
         else if caps.not_affected & V::Bhb.bit() != 0 { Bhb::Unaffected }
         else { Bhb::Unavailable };
-    let force_v2 = policy.overrides[V::SpectreV2 as usize] == Override::On;
-    let v2 = if !policy.enabled(V::SpectreV2) { V2::Off }
-        else if caps.not_affected & V::SpectreV2.bit() != 0 && !force_v2 { V2::Unaffected }
-        else if bhb == Bhb::Firmware3 { V2::Firmware3 } // entry WA3 supersedes switch WA1
-        else if conduit && caps.features & F::WA1 != 0 { V2::Firmware1 }
-        else if caps.not_affected & V::SpectreV2.bit() != 0 { V2::Unaffected }
-        else { V2::Unavailable };
+    if bhb == Bhb::Firmware3 && v2 == V2::Firmware1 { v2 = V2::Firmware3; }
     Plan { v2, bhb }
 }

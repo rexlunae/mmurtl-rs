@@ -1240,11 +1240,14 @@ CLRBHB is followed by ISB. Loop vectors end with DSB NSH; ISB before entering
 common code. Every table is 2-KiB aligned with bounded 128-byte slots, and
 all admitted CPUs' VBAR writes are read back and checked.
 
-Firmware WA3 vectors preserve x0–x3 before the call, supply zero auxiliary
-arguments and restore original user registers before common entry. WA3
-supersedes a separate WA1 switch call. Where WA1 is required, it runs before
-every different nonzero user-root activation, including root reuse after
-kernel execution; no cached retired root can skip a new domain's barrier.
+Firmware vectors preserve x0–x3 before calls, supply zero auxiliary arguments
+and restore original user registers before common entry. WA1 combines with
+plain, loop or CLRBHB vectors as needed. Firmware also runs on every EL0
+return, including same-root syscall/IRQ resumes, before PAN restores user
+access and before user GPRs are reloaded. WA1 additionally runs before each
+different nonzero root activation, including root reuse. WA3 remains available
+for Spectre v2 independently of BHB immunity or its policy, and supersedes
+WA1 when selected. No root-cache hit can skip the return barrier.
 These choices follow the [Linux ARM predictor backend guidance](https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/proton-pack.c)
 and [architectural workaround register preservation](https://github.com/torvalds/linux/blob/master/arch/arm64/include/asm/assembler.h).
 
