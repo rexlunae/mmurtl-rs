@@ -283,19 +283,18 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, &'static str> {
                 let pa=heap::with_frame_allocator(|fa|fa.allocate_zeroed_frame()).flatten().ok_or("out of memory")?;
                 let kva=crate::arch::phys_to_virt(pa);
                 unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(),kva.add((low-page) as usize),data.len()); }
-                for (target,addend) in image.relocations(bytes) {
-                    if target>=page && target<page+PAGE {
-                        // Both bias and nonnegative addend are bounded by validation/layout.
-                        let value=bias+addend as u64;
-                        unsafe { kva.add((target-page) as usize).cast::<u64>().write_unaligned(value); }
-                    }
-                }
                 if segment.executable { crate::arch::sync_icache(kva,PAGE as usize); }
                 let writable=segment.writable && !image.readonly_page(page);
                 if let Err(error)=crate::arch::map_user_page(space,bias+page,pa,writable,segment.executable) {
                     heap::with_frame_allocator(|fa|fa.deallocate_frame(pa)); return Err(error);
                 }
             }
+        }
+        // One pass, independent of image page count and relocation order.
+        // The root is exclusively owned here and cannot be scheduled until
+        // this function returns. All leaves already have final permissions.
+        for (target,addend) in image.relocations(bytes) {
+            unsafe {crate::arch::relocate_private_data(space,bias+target,bias+addend as u64)?;}
         }
         let guard=(random_word() & !255).max(256);
         let mut block=[0u8;32];
@@ -304,6 +303,7 @@ pub fn load_elf(bytes: &[u8]) -> Result<UserImage, &'static str> {
         for i in 1..=STACK_PAGES {
             map_fresh(space,placement.stack_edge-i*PAGE,if i==1 {&block} else {&[]},if i==1 {(PAGE-32) as usize} else {0},true,false)?;
         }
+        core::sync::atomic::fence(Ordering::Release);
         Ok(UserImage {entry:bias+image.entry,stack_top:placement.stack_pointer,stack_edge:placement.stack_edge,startup,space,slot})
     })();
     if result.is_err() { release(space,slot); }

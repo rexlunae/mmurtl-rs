@@ -23,6 +23,10 @@ fn pie_validation_relocations_and_relro(){
         let valid=pie(machine);let parsed=parse(&valid,machine).unwrap();
         assert!(parsed.pie && parsed.readonly_page(0x3000) && !parsed.readonly_page(0x4000));
         assert_eq!(parsed.relocations(&valid).collect::<Vec<_>>(),[(0x4000,0x1000)]);
+        let mut unsorted=valid.clone();put64(&mut unsorted,0x3118,48);
+        put64(&mut unsorted,0x2000,0x4008);
+        put64(&mut unsorted,0x2018,0x4000);put64(&mut unsorted,0x2020,if machine==62 {8}else{1027});put64(&mut unsorted,0x2028,0x2000);
+        assert_eq!(parse(&unsorted,machine).unwrap().relocations(&unsorted).collect::<Vec<_>>(),[(0x4008,0x1000),(0x4000,0x2000)]);
         let mut legacy=valid.clone();put16(&mut legacy,16,2);put16(&mut legacy,56,1);
         put64(&mut legacy,24,layout::BASE+0x1000);put64(&mut legacy,64+16,layout::BASE+0x1000);
         assert!(!parse(&legacy,machine).unwrap().pie);

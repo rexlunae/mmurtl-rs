@@ -203,6 +203,24 @@ pub fn free_address_space(root: u64) -> usize {
 fn free_frame(pa: u64) {
     crate::memory::heap::with_frame_allocator(|fa| fa.deallocate_frame(pa));
 }
+/// Apply a validated relocation to NX user data through its backing frame.
+/// The caller exclusively owns this offline root; it must not be runnable
+/// or loaded on any CPU. RELRO leaf permissions are never widened.
+pub unsafe fn relocate_private_data(root:u64,va:u64,value:u64) -> Result<(), &'static str> {
+    if root==0 || va&7!=0 || va<crate::memory::user::USER_BASE || va>=crate::memory::user::USER_END {
+        return Err("invalid private relocation target");
+    }
+    let mut entries=table(root);
+    for level in (1..4).rev() {
+        let entry=entries.add(((va>>(12+9*level))&511) as usize).read_volatile();
+        if entry&(PTE_PRESENT|PTE_USER|PTE_HUGE)!=(PTE_PRESENT|PTE_USER) {return Err("missing private relocation table");}
+        entries=table(entry&PTE_ADDR);
+    }
+    let entry=entries.add(((va>>12)&511) as usize).read_volatile();
+    if entry&(PTE_PRESENT|PTE_USER|PTE_NX)!=(PTE_PRESENT|PTE_USER|PTE_NX) {return Err("relocation target is not NX user data");}
+    phys_to_virt((entry&PTE_ADDR)+(va&4095)).cast::<u64>().write_volatile(value);
+    Ok(())
+}
 
 /// Load `root` (0 = the kernel's own tables) into this CPU's CR3, if it
 /// isn't loaded already. Kernel mappings are identical in every space, so
