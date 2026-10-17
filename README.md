@@ -1311,7 +1311,7 @@ never erased. Stack erasure does not reclaim heap objects or device buffers.
 architectures: ordinary Rust frames must fit 4 KiB, with an explicit 8 KiB
 allowance for ARM's early boot function on its 64 KiB bootstrap stack. This
 checks individual frames, not cumulative call depth. IDT initialization
-occurs in place and the shell's task snapshot uses heap storage to stay
+occurs in place and the shell's task snapshot uses reusable static storage to stay
 within that budget.
 
 Regression images and commands:
